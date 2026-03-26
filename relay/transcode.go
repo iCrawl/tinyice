@@ -20,6 +20,84 @@ import (
 	"github.com/kazzmir/opus-go/opus"
 )
 
+var mp3BitratesByVersion = map[int]map[int]int64{
+	3: {
+		32:  1,
+		40:  2,
+		48:  3,
+		56:  4,
+		64:  5,
+		80:  6,
+		96:  7,
+		112: 8,
+		128: 9,
+		160: 10,
+		192: 11,
+		224: 12,
+		256: 13,
+		320: 14,
+	},
+	2: {
+		8:   1,
+		16:  2,
+		24:  3,
+		32:  4,
+		40:  5,
+		48:  6,
+		56:  7,
+		64:  8,
+		80:  9,
+		96:  10,
+		112: 11,
+		128: 12,
+		144: 13,
+		160: 14,
+	},
+	0: {
+		8:   1,
+		16:  2,
+		24:  3,
+		32:  4,
+		40:  5,
+		48:  6,
+		56:  7,
+		64:  8,
+		80:  9,
+		96:  10,
+		112: 11,
+		128: 12,
+		144: 13,
+		160: 14,
+	},
+}
+
+func configureMP3EncoderBitrate(encoder *shine.Encoder, bitrate int) {
+	if bitrate <= 0 {
+		return
+	}
+
+	version := int(encoder.Mpeg.Version)
+	bitrateIndex, ok := mp3BitratesByVersion[version][bitrate]
+	if !ok {
+		if logger.L != nil {
+			logger.L.Warnf("MP3: unsupported bitrate %d kbps for sample rate %d; keeping default %d kbps", bitrate, encoder.Wave.SampleRate, encoder.Mpeg.Bitrate)
+		}
+		return
+	}
+
+	avgSlotsPerFrame := (float64(encoder.Mpeg.GranulesPerFrame) * shine.GRANULE_SIZE / float64(encoder.Wave.SampleRate)) *
+		(float64(bitrate) * 1000 / float64(encoder.Mpeg.BitsPerSlot))
+
+	encoder.Mpeg.Bitrate = int64(bitrate)
+	encoder.Mpeg.BitrateIndex = bitrateIndex
+	encoder.Mpeg.WholeSlotsPerFrame = int64(avgSlotsPerFrame)
+	encoder.Mpeg.FracSlotsPerFrame = avgSlotsPerFrame - float64(encoder.Mpeg.WholeSlotsPerFrame)
+	encoder.Mpeg.Slot_lag = -encoder.Mpeg.FracSlotsPerFrame
+	if encoder.Mpeg.FracSlotsPerFrame == 0 {
+		encoder.Mpeg.Padding = 0
+	}
+}
+
 type TranscoderInstance struct {
 	Config *config.TranscoderConfig
 	cancel context.CancelFunc
@@ -270,6 +348,7 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	}
 	// Shine MP3 initialization
 	encoder := shine.NewEncoder(sampleRate, 2)
+	configureMP3EncoderBitrate(encoder, bitrate)
 
 	// Output buffer - shine Write uses int16 samples
 	pcmBuf := make([]byte, 4608) // 1152 samples * 2 bytes * 2 channels

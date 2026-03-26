@@ -487,7 +487,7 @@ func (s *Server) apiDeleteAutoDJ(w http.ResponseWriter, r *http.Request) {
 		if adj.Mount != mount {
 			newADJs = append(newADJs, adj)
 		} else {
-			s.StreamerM.StopStreamer(mount)
+			s.StreamerM.RemoveStreamer(mount)
 			found = true
 		}
 	}

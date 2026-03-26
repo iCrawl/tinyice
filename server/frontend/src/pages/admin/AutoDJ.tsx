@@ -370,8 +370,7 @@ export function AutoDJ() {
           ? {
               ...inst,
               state: evt.state,
-              currentTrack: evt.currentTrack,
-              position: evt.position,
+              currentSong: evt.currentTrack.title || evt.currentTrack.file || inst.currentSong,
               duration: evt.duration,
               queue: evt.queue,
             }

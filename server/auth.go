@@ -35,6 +35,9 @@ func (s *Server) logAuth() *zap.SugaredLogger {
 	if s.AuthLog != nil {
 		return s.AuthLog
 	}
+	if logger.L == nil {
+		return zap.NewNop().Sugar()
+	}
 	return logger.L
 }
 
@@ -120,7 +123,7 @@ func (s *Server) recordScanAttempt(ip, path string) {
 
 	if attempt.Count >= 10 {
 		attempt.LockoutBy = time.Now().Add(15 * time.Minute)
-		logger.L.Warnf("IP %s locked out for 15 minutes due to 10 scanning attempts (404s)", ip)
+		s.logAuth().Warnf("IP %s locked out for 15 minutes due to 10 scanning attempts (404s)", ip)
 		s.dispatchWebhook("security_lockout", map[string]interface{}{
 			"ip":      ip,
 			"reason":  "connection_scanning",
@@ -272,12 +275,6 @@ func (s *Server) isCSRFSafe(r *http.Request) bool {
 		return true
 	}
 
-	// Also allow multipart uploads to /api/ (e.g. logo upload)
-	if strings.HasPrefix(r.URL.Path, "/api/") &&
-		strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") {
-		return true
-	}
-
 	cookie, err := r.Cookie("sid")
 	if err != nil {
 		return true
@@ -296,7 +293,7 @@ func (s *Server) isCSRFSafe(r *http.Request) bool {
 		providedToken = r.Header.Get("X-CSRF-Token")
 	}
 	if providedToken != sess.CSRFToken {
-		logger.L.Warnf("CSRF Mismatch: provided=[%s] expected=[%s] remote=%s path=%s", providedToken, sess.CSRFToken, r.RemoteAddr, r.URL.Path)
+		s.logAuth().Warnf("CSRF Mismatch: provided=[%s] expected=[%s] remote=%s path=%s", providedToken, sess.CSRFToken, r.RemoteAddr, r.URL.Path)
 		return false
 	}
 

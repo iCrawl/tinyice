@@ -55,6 +55,7 @@ const branding = signal<BrandingSettings>({
 })
 
 const loading = signal(true)
+const csrfToken = (window.__TINYICE__ as { csrfToken?: string } | undefined)?.csrfToken || ''
 
 function formatUptime(seconds: number): string {
   const d = Math.floor(seconds / 86400)
@@ -252,6 +253,7 @@ export function Settings() {
                         const res = await fetch('/api/branding/logo', {
                           method: 'POST',
                           body: form,
+                          headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : undefined,
                         })
                         if (res.ok) {
                           const data = await res.json()

@@ -635,7 +635,7 @@ func (s *Server) handleDeleteAutoDJ(w http.ResponseWriter, r *http.Request) {
 		if adj.Mount != mount {
 			newADJs = append(newADJs, adj)
 		} else {
-			s.StreamerM.StopStreamer(mount)
+			s.StreamerM.RemoveStreamer(mount)
 		}
 	}
 	s.Config.AutoDJs = newADJs
@@ -783,7 +783,7 @@ func (s *Server) handleUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 			adj.MPDPassword = mpdPassword
 			adj.Visible = visible
 
-			s.StreamerM.StopStreamer(oldMount)
+			s.StreamerM.RemoveStreamer(oldMount)
 			streamer, err := s.StreamerM.StartStreamer(adj.Name, adj.Mount, absMusicDir, adj.Loop, adj.Format, adj.Bitrate, adj.InjectMetadata, adj.Playlist, adj.MPDEnabled, adj.MPDPort, adj.MPDPassword, adj.Visible, adj.LastPlaylist, adj.SongCommand, adj.SongCommandTimeout)
 			if err == nil {
 				if adj.Enabled {

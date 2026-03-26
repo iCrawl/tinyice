@@ -1,7 +1,6 @@
 import { useEffect, useRef, useCallback } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Visualizer } from '@/components/Visualizer'
-import { ModeToggle } from '@/components/ModeToggle'
 import { VolumeKnob } from '@/components/VolumeKnob'
 import { createSSE } from '@/lib/sse'
 import { connectAudio, getFrequencyData, resumeAudio } from '@/lib/audio'
@@ -13,7 +12,6 @@ const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
 const playing = signal(false)
 const title = signal(data.title || 'Untitled')
 const artist = signal(data.artist || 'Unknown Artist')
-const mode = signal<'http' | 'webrtc'>('http')
 const volume = signal(80)
 const listeners = signal(data.listeners || 0)
 
@@ -70,10 +68,6 @@ export function Player() {
     el.pause()
     el.src = ''
     playing.value = false
-  }, [])
-
-  const handleModeChange = useCallback((m: 'http' | 'webrtc') => {
-    mode.value = m
   }, [])
 
   const handleVolumeChange = useCallback((v: number) => {
@@ -152,11 +146,6 @@ export function Player() {
             </svg>
           )}
         </button>
-
-        {/* Mode toggle */}
-        {data.hasWebRTC && (
-          <ModeToggle mode={mode.value} onChange={handleModeChange} />
-        )}
 
         {/* Volume */}
         <VolumeKnob value={volume.value} onChange={handleVolumeChange} />

@@ -332,11 +332,60 @@ func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
 // SubscribeSafe is like Subscribe but returns false if the stream is already closed.
 // This prevents adding listeners to a closed stream.
 func (s *Stream) SubscribeSafe(id string, burstSize int) (int64, chan struct{}, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return 0, nil, false
 	}
-	offset, ch := s.Subscribe(id, burstSize)
-	return offset, ch, true
+	ch := make(chan struct{}, 1)
+	s.listeners[id] = ch
+
+	start := s.Buffer.Head - int64(burstSize)
+	if start < 0 {
+		start = 0
+	}
+
+	if s.IsOggStream {
+		validStart := s.Buffer.Head - s.Buffer.Size
+		if validStart < 0 {
+			validStart = 0
+		}
+
+		if s.OggHeaderOffset > start {
+			start = s.OggHeaderOffset
+		}
+		if start < validStart {
+			start = validStart
+		}
+
+		bestAlign := s.LastPageOffset
+		found := false
+		for _, po := range s.PageOffsets {
+			if po >= start && po >= validStart && po < bestAlign {
+				bestAlign = po
+				found = true
+			}
+		}
+		if found {
+			start = bestAlign
+		} else if bestAlign >= validStart && bestAlign > 0 {
+			start = bestAlign
+		} else {
+			start = s.Buffer.Head - int64(burstSize)
+			if start < validStart {
+				start = validStart
+			}
+			if start < 0 {
+				start = 0
+			}
+		}
+	}
+
+	if s.Buffer.Head-start > s.Buffer.Size {
+		start = s.Buffer.Head - s.Buffer.Size
+	}
+
+	return start, ch, true
 }
 
 // Unsubscribe removes a listener

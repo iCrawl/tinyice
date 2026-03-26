@@ -9,8 +9,20 @@ import type { LandingData, StreamInfo } from '@/types'
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
 const streams = signal<StreamInfo[]>(data.streams ?? [])
 
-// Configure marked for safe rendering
 marked.setOptions({ breaks: true, gfm: true })
+
+function escapeHtml(input: string): string {
+  return input
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function playerPath(mount: string): string {
+  return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
+}
 
 export function Landing() {
   useEffect(() => {
@@ -46,6 +58,7 @@ export function Landing() {
   const landingMarkdown = data.branding?.landingMarkdown || ''
   const accentColor = data.branding?.accentColor
   const isCustomized = !!(customTitle || customSubtitle || landingMarkdown)
+  const renderedMarkdown = landingMarkdown ? marked.parse(escapeHtml(landingMarkdown)) as string : ''
 
   return (
     <div
@@ -104,7 +117,7 @@ export function Landing() {
               {landingMarkdown ? (
                 <div
                   class="max-w-lg markdown-content"
-                  dangerouslySetInnerHTML={{ __html: marked.parse(landingMarkdown) as string }}
+                  dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
                 />
               ) : (
                 <p class="text-text-tertiary text-base leading-relaxed max-w-md">
@@ -178,7 +191,7 @@ export function Landing() {
                       key={stream.mount}
                       stream={stream}
                       onPlay={() => {
-                        window.location.href = `/player/${stream.mount}`
+                        window.location.href = playerPath(stream.mount)
                       }}
                     />
                   ))}

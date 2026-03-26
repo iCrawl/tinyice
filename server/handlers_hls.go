@@ -99,7 +99,10 @@ func (s *Server) RegisterHLS(mount string) *relay.HLSOutput {
 	// Determine codec from content type
 	codec := "mp3"
 	if stream.IsOgg() {
-		codec = "opus"
+		if logger.L != nil {
+			logger.L.Warnw("HLS: Opus streams are not supported", "mount", mount, "content_type", stream.ContentType)
+		}
+		return nil
 	}
 
 	track := relay.NewAudioTrack(stream, codec)

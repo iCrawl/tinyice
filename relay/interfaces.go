@@ -1,8 +1,11 @@
 package relay
 
 import (
+	"errors"
 	"time"
 )
+
+var ErrUnsupportedCodec = errors.New("unsupported codec")
 
 // StreamInterface defines the basic operations for a stream
 type StreamInterface interface {

@@ -149,11 +149,7 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logger.L.Infow("WebRTC Source: Connection state changed", "mount", mount, "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
-			wm.mu.Lock()
-			if wm.sources[mount] == peerConnection {
-				delete(wm.sources, mount)
-			}
-			wm.mu.Unlock()
+			wm.cleanupSource(mount, peerConnection)
 		}
 	})
 
@@ -318,13 +314,25 @@ func (wm *WebRTCManager) streamToTrack(pc *webrtc.PeerConnection, track *webrtc.
 	}
 }
 
+func (wm *WebRTCManager) cleanupSource(mount string, peerConnection *webrtc.PeerConnection) {
+	wm.mu.Lock()
+	if current, ok := wm.sources[mount]; ok && current == peerConnection {
+		delete(wm.sources, mount)
+	}
+	wm.mu.Unlock()
+	wm.relay.RemoveStream(mount)
+}
+
 func (wm *WebRTCManager) DisconnectSource(mount string) error {
 	wm.mu.Lock()
-	defer wm.mu.Unlock()
 	pc, ok := wm.sources[mount]
+	if ok {
+		delete(wm.sources, mount)
+	}
+	wm.mu.Unlock()
 	if !ok {
 		return fmt.Errorf("no WebRTC source for mount %s", mount)
 	}
-	delete(wm.sources, mount)
+	wm.relay.RemoveStream(mount)
 	return pc.Close()
 }

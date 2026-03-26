@@ -261,14 +261,47 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	send := func() error {
 		allStreams := s.Relay.Snapshot()
 		var info []PublicStreamInfo
+		namedStreams := make([]map[string]interface{}, 0, len(allStreams))
+		metadataEvents := make([]map[string]string, 0, len(allStreams))
 		for _, st := range allStreams {
 			if st.Visible {
 				info = append(info, PublicStreamInfo{Mount: st.MountName, Name: st.Name, Listeners: st.ListenersCount, Bitrate: st.Bitrate, Uptime: st.Uptime, Genre: st.Genre, Description: st.Description, CurrentSong: st.CurrentSong})
+				namedStreams = append(namedStreams, map[string]interface{}{
+					"mount":     st.MountName,
+					"title":     st.CurrentSong,
+					"artist":    st.Name,
+					"format":    st.ContentType,
+					"bitrate":   st.Bitrate,
+					"listeners": st.ListenersCount,
+					"live":      st.SourceIP != "",
+				})
+				metadataEvents = append(metadataEvents, map[string]string{
+					"mount":  st.MountName,
+					"title":  st.CurrentSong,
+					"artist": st.Name,
+				})
 			}
 		}
 		payload, _ := json.Marshal(info)
 		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
 			return err
+		}
+
+		streamsJSON, _ := json.Marshal(namedStreams)
+		if _, err := fmt.Fprintf(w, "event: streams\ndata: %s\n\n", streamsJSON); err != nil {
+			return err
+		}
+		for _, st := range namedStreams {
+			streamJSON, _ := json.Marshal(st)
+			if _, err := fmt.Fprintf(w, "event: stream\ndata: %s\n\n", streamJSON); err != nil {
+				return err
+			}
+		}
+		for _, md := range metadataEvents {
+			metadataJSON, _ := json.Marshal(md)
+			if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+				return err
+			}
 		}
 		flusher.Flush()
 		return nil

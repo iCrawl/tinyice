@@ -66,6 +66,9 @@ func (h *HLSOutput) Start(ctx context.Context, tracks []*Track) error {
 	if audioTrack == nil {
 		return nil // No audio track, nothing to do
 	}
+	if audioTrack.Codec != "mp3" {
+		return ErrUnsupportedCodec
+	}
 
 	segCtx, cancel := context.WithCancel(ctx)
 	h.cancel = cancel

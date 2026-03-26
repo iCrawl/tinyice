@@ -9,6 +9,10 @@ const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
 const streams = signal<StreamInfo[]>(data.streams ?? [])
 const search = signal('')
 
+function playerPath(mount: string): string {
+  return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
+}
+
 export function Explore() {
   useEffect(() => {
     const sse = createSSE('/events')
@@ -83,7 +87,7 @@ export function Explore() {
                   key={stream.mount}
                   stream={stream}
                   onPlay={() => {
-                    window.location.href = `/player/${stream.mount}`
+                    window.location.href = playerPath(stream.mount)
                   }}
                 />
               ))}
