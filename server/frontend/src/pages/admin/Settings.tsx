@@ -2,6 +2,7 @@ import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { Toggle } from '../../components/Toggle'
+import { applyBrandingTheme } from '../../lib/brandingTheme'
 
 interface ServerSettings {
   bind_host: string
@@ -101,6 +102,7 @@ async function saveBranding() {
   saving.value = true
   try {
     await api.put('/api/branding', branding.value)
+    applyBrandingTheme(branding.value.accent_color)
   } catch { /* empty */ }
   saving.value = false
 }
