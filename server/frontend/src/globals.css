@@ -11,6 +11,7 @@
   --color-text-tertiary: rgba(255, 255, 255, 0.38);
 
   --color-accent: var(--accent-override, #ff6600);
+  --color-accent-rgb: var(--accent-override-rgb, 255, 102, 0);
   --color-accent-subtle: rgba(255, 102, 0, 0.08);
   --color-accent-glow: rgba(255, 102, 0, 0.15);
 
@@ -80,6 +81,32 @@ body::after {
 @keyframes spin-slow {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
+}
+
+.accent-shadow-control {
+  box-shadow: 0 0 20px rgba(var(--color-accent-rgb), 0.3);
+  transition: box-shadow 150ms var(--ease-out-expo);
+}
+
+.accent-shadow-control:hover {
+  box-shadow: 0 0 28px rgba(var(--color-accent-rgb), 0.45);
+}
+
+.accent-shadow-control-sm {
+  box-shadow: 0 0 16px rgba(var(--color-accent-rgb), 0.25);
+  transition: box-shadow 150ms var(--ease-out-expo);
+}
+
+.accent-shadow-control-sm:hover {
+  box-shadow: 0 0 24px rgba(var(--color-accent-rgb), 0.4);
+}
+
+.accent-shadow-hover {
+  transition: box-shadow 150ms var(--ease-out-expo);
+}
+
+.accent-shadow-hover:hover {
+  box-shadow: 0 0 20px rgba(var(--color-accent-rgb), 0.3);
 }
 
 /* Markdown prose styles */

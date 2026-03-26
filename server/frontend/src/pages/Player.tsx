@@ -85,7 +85,7 @@ export function Player() {
         }}
       />
 
-      {/* Ambient orange glow behind visualizer */}
+      {/* Ambient accent glow behind visualizer */}
       <div
         class="fixed pointer-events-none z-0"
         style={{
@@ -94,7 +94,7 @@ export function Player() {
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -60%)',
-          background: 'radial-gradient(ellipse, rgba(255,102,0,0.08) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse, rgba(var(--color-accent-rgb), 0.08) 0%, transparent 70%)',
         }}
       />
 
@@ -133,7 +133,7 @@ export function Player() {
         {/* Play / Pause — radio only needs this */}
         <button
           onClick={playing.value ? handlePause : handlePlay}
-          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center shadow-[0_0_20px_rgba(255,102,0,0.3)] hover:shadow-[0_0_28px_rgba(255,102,0,0.45)] transition-shadow"
+          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center accent-shadow-control"
           aria-label={playing.value ? 'Pause' : 'Play'}
         >
           {playing.value ? (

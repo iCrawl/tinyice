@@ -272,7 +272,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
             </button>
             <button
               onClick={() => handleTransport(isPlaying ? 'pause' : 'play')}
-              class="w-10 h-10 rounded-full bg-accent flex items-center justify-center shadow-[0_0_16px_rgba(255,102,0,0.25)] hover:shadow-[0_0_24px_rgba(255,102,0,0.4)] transition-shadow"
+              class="w-10 h-10 rounded-full bg-accent flex items-center justify-center accent-shadow-control-sm"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -388,7 +388,7 @@ export function AutoDJ() {
         <h1 class="text-xl font-bold text-text-primary font-heading">AutoDJ</h1>
         <button
           onClick={() => { resetForm(); showForm.value = true }}
-          class="h-9 px-4 rounded-lg bg-accent text-surface-base text-sm font-medium flex items-center gap-2 hover:shadow-[0_0_20px_rgba(255,102,0,0.3)] transition-shadow"
+          class="h-9 px-4 rounded-lg bg-accent text-surface-base text-sm font-medium flex items-center gap-2 accent-shadow-hover"
         >
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />

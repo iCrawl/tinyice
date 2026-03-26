@@ -2,11 +2,13 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 
 const {
+  bucketTrafficSamples,
   getTrafficBarHeights,
   pushTrafficSample,
   shouldPushTrafficSample,
   TRAFFIC_BAR_COUNT,
   TRAFFIC_SAMPLE_INTERVAL_MS,
+  upsertLiveTrafficSample,
 } =
   await import('./dashboardTraffic.ts')
 
@@ -25,6 +27,31 @@ test('getTrafficBarHeights normalizes bars into the chart range', () => {
   assert.equal(heights.length, TRAFFIC_BAR_COUNT)
   assert.equal(heights.at(-1), 100)
   assert.ok(heights.every((height) => height >= 0 && height <= 100))
+})
+
+test('bucketTrafficSamples aggregates persisted listener history into the selected range buckets', () => {
+  const now = Date.UTC(2026, 2, 26, 12, 0, 0)
+  const bucketMs = (24 * 60 * 60 * 1000) / TRAFFIC_BAR_COUNT
+  const samples = [
+    {
+      timestamp: new Date(now - bucketMs * 3 + 1_000).toISOString(),
+      listeners: 7,
+    },
+    {
+      timestamp: new Date(now - bucketMs * 3 + 5_000).toISOString(),
+      listeners: 11,
+    },
+    {
+      timestamp: new Date(now - bucketMs + 2_000).toISOString(),
+      listeners: 5,
+    },
+  ]
+
+  const buckets = bucketTrafficSamples(samples, '24H', now)
+
+  assert.equal(buckets.length, TRAFFIC_BAR_COUNT)
+  assert.equal(buckets.at(-3), 11)
+  assert.equal(buckets.at(-1), 5)
 })
 
 test('shouldPushTrafficSample ignores repeated heartbeat-only stats updates', () => {
@@ -121,4 +148,24 @@ test('shouldPushTrafficSample allows an immediate sample when listener traffic c
     shouldPushTrafficSample(previous, next, 10_000, 10_001),
     true,
   )
+})
+
+test('upsertLiveTrafficSample updates the active bucket instead of appending before the bucket rolls over', () => {
+  const now = Date.UTC(2026, 2, 26, 12, 0, 0)
+  const bucketSizeMs = (60 * 60 * 1000) / TRAFFIC_BAR_COUNT
+  const history = Array.from({ length: TRAFFIC_BAR_COUNT }, () => 0)
+
+  const first = upsertLiveTrafficSample(history, 8, '1H', now - 5_000, now)
+  const second = upsertLiveTrafficSample(first.history, 13, '1H', first.bucketStartedAt, now + 2_000)
+
+  assert.equal(first.history.length, TRAFFIC_BAR_COUNT)
+  assert.equal(first.history.at(-1), 8)
+  assert.equal(second.history.length, TRAFFIC_BAR_COUNT)
+  assert.equal(second.history.at(-1), 13)
+  assert.equal(second.history.at(-2), 0)
+  assert.equal(second.bucketStartedAt, first.bucketStartedAt)
+
+  const rolled = upsertLiveTrafficSample(second.history, 21, '1H', second.bucketStartedAt, now + bucketSizeMs + 1)
+  assert.equal(rolled.history.at(-2), 13)
+  assert.equal(rolled.history.at(-1), 21)
 })

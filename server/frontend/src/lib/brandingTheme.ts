@@ -30,6 +30,7 @@ export function applyBrandingTheme(accentColor?: string | null, root: HTMLElemen
   const [red, green, blue] = hexToRgb(normalizedColor)
 
   root.style.setProperty('--accent-override', normalizedColor)
+  root.style.setProperty('--accent-override-rgb', `${red}, ${green}, ${blue}`)
   root.style.setProperty('--color-accent-subtle', `rgba(${red}, ${green}, ${blue}, 0.08)`)
   root.style.setProperty('--color-accent-glow', `rgba(${red}, ${green}, ${blue}, 0.15)`)
   root.style.setProperty('--color-border-accent', `rgba(${red}, ${green}, ${blue}, 0.20)`)

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -141,6 +142,19 @@ func (s *Server) collectStatsPayload(user *config.User) ([]byte, error) {
 		"total_dropped":   totalDropped,
 		"server_uptime":   time.Since(s.startTime).Round(time.Second).String(),
 	})
+}
+
+func parseInsightsDuration(rawRange string) (time.Duration, error) {
+	switch strings.ToUpper(strings.TrimSpace(rawRange)) {
+	case "", "24H":
+		return 24 * time.Hour, nil
+	case "1H":
+		return time.Hour, nil
+	case "7D":
+		return 7 * 24 * time.Hour, nil
+	default:
+		return 0, errors.New("invalid insights range")
+	}
 }
 
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
@@ -410,7 +424,13 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := s.Relay.History.GetAllHistoricalStats(24 * time.Hour)
+	duration, err := parseInsightsDuration(r.URL.Query().Get("range"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stats := s.Relay.History.GetAllHistoricalStats(duration)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
 }

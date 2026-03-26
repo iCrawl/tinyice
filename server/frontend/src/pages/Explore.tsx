@@ -50,7 +50,7 @@ export function Explore() {
 
   return (
     <div class="min-h-screen bg-surface-base">
-      <Nav branding={data.branding ?? { logoUrl: null, accentColor: '#ff6600' }} pageTitle={data.pageTitle} />
+      <Nav branding={data.branding} pageTitle={data.pageTitle} />
 
       <main class="relative z-10 pt-14">
         <div class="mx-auto max-w-7xl px-4 py-10">

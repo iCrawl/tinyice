@@ -103,7 +103,7 @@ export function CodeBlock({ tabs, activeTab = 0 }: CodeBlockProps) {
       <style>{`
         .hljs { color: rgba(255,255,255,0.7); }
         .hljs-keyword, .hljs-built_in, .hljs-type { color: #c084fc; }
-        .hljs-title.class_, .hljs-title.function_ { color: #ff6600; }
+        .hljs-title.class_, .hljs-title.function_ { color: var(--color-accent); }
         .hljs-string, .hljs-template-variable { color: #60a5fa; }
         .hljs-number { color: #f59e0b; }
         .hljs-comment { color: rgba(255,255,255,0.2); font-style: italic; }

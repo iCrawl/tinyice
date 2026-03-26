@@ -56,15 +56,11 @@ export function Landing() {
   const customTitle = data.pageTitle && data.pageTitle !== 'TinyIce' ? data.pageTitle : ''
   const customSubtitle = data.pageSubtitle && data.pageSubtitle !== 'Live Streaming Server powered by Go' ? data.pageSubtitle : ''
   const landingMarkdown = data.branding?.landingMarkdown || ''
-  const accentColor = data.branding?.accentColor
   const isCustomized = !!(customTitle || customSubtitle || landingMarkdown)
   const renderedMarkdown = landingMarkdown ? marked.parse(escapeHtml(landingMarkdown)) as string : ''
 
   return (
-    <div
-      class="min-h-screen bg-surface-base relative overflow-hidden"
-      style={accentColor ? { '--color-accent': accentColor } as any : undefined}
-    >
+    <div class="min-h-screen bg-surface-base relative overflow-hidden">
       {/* Dot grid texture */}
       <div
         class="fixed inset-0 pointer-events-none z-0"
@@ -74,16 +70,16 @@ export function Landing() {
         }}
       />
 
-      {/* Ambient glow */}
+      {/* Ambient accent glow */}
       <div
         class="fixed top-0 right-0 w-[800px] h-[800px] pointer-events-none z-0"
         style={{
-          background: 'radial-gradient(ellipse at 80% 20%, rgba(255,102,0,0.06) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse at 80% 20%, rgba(var(--color-accent-rgb), 0.06) 0%, transparent 70%)',
         }}
       />
 
       {/* Nav */}
-      <Nav branding={data.branding ?? { logoUrl: null, accentColor: '#ff6600' }} pageTitle={data.pageTitle} />
+      <Nav branding={data.branding} pageTitle={data.pageTitle} />
 
       {/* Hero */}
       <main class="relative z-10 pt-14">
@@ -132,7 +128,7 @@ export function Landing() {
                   <a
                     href="/admin"
                     class="font-mono text-xs tracking-widest font-bold px-6 py-3 rounded bg-accent text-surface-base hover:bg-accent/90 transition-colors"
-                    style={{ boxShadow: '0 0 20px rgba(255,102,0,0.25)' }}
+                    style={{ boxShadow: '0 0 20px rgba(var(--color-accent-rgb), 0.25)' }}
                   >
                     GET STARTED
                   </a>

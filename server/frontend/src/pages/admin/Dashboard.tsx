@@ -1,9 +1,18 @@
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { createSSE } from '../../lib/sse'
+import { api } from '../../lib/api'
 import { StatCard } from '../../components/StatCard'
 import type { StatsEvent, StreamEvent } from '../../types'
-import { getTrafficBarHeights, pushTrafficSample, shouldPushTrafficSample } from './dashboardTraffic'
+import {
+  alignTrafficBucketStart,
+  bucketTrafficSamples,
+  collapseTrafficSources,
+  getTrafficBarHeights,
+  type TrafficHistorySample,
+  type TrafficRange,
+  upsertLiveTrafficSample,
+} from './dashboardTraffic'
 
 // Reactive state
 const stats = signal<StatsEvent>({
@@ -20,10 +29,14 @@ const stats = signal<StatsEvent>({
 
 const streams = signal<StreamEvent[]>([])
 const connected = signal(false)
-const timeRange = signal<'1H' | '24H' | '7D'>('1H')
+const timeRange = signal<TrafficRange>('1H')
 const listenerHistory = signal<number[]>([])
-const lastTrafficStats = signal<StatsEvent | null>(null)
-const lastTrafficSampleAt = signal(0)
+const trafficBucketStartedAt = signal(0)
+
+type HistoricalTrafficResponse = Record<string, Array<TrafficHistorySample & {
+  bytes_in: number
+  bytes_out: number
+}>>
 
 function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
@@ -46,15 +59,54 @@ function formatBandwidth(bytesPerSec: number): string {
 
 export function Dashboard() {
   useEffect(() => {
+    let cancelled = false
+
+    async function loadTrafficHistory(range: TrafficRange) {
+      try {
+        const historyByMount = await api.get<HistoricalTrafficResponse>(`/admin/insights?range=${timeRange.value}`)
+        if (cancelled) return
+
+        const now = Date.now()
+        const collapsedHistory = collapseTrafficSources(historyByMount)
+        const persistedHistory = bucketTrafficSamples(collapsedHistory, range, now)
+        const liveHistory = upsertLiveTrafficSample(
+          persistedHistory,
+          stats.value.listeners,
+          range,
+          alignTrafficBucketStart(range, now),
+          now,
+        )
+
+        listenerHistory.value = liveHistory.history
+        trafficBucketStartedAt.value = liveHistory.bucketStartedAt
+      } catch {
+        if (cancelled) return
+        trafficBucketStartedAt.value = alignTrafficBucketStart(range)
+      }
+    }
+
+    void loadTrafficHistory(timeRange.value)
+
+    return () => {
+      cancelled = true
+    }
+  }, [timeRange.value])
+
+  useEffect(() => {
     const sse = createSSE('/admin/events')
 
     const offStats = sse.on('stats', (data: StatsEvent) => {
       const now = Date.now()
-      if (shouldPushTrafficSample(lastTrafficStats.value, data, lastTrafficSampleAt.value, now)) {
-        listenerHistory.value = pushTrafficSample(listenerHistory.value, data.listeners)
-        lastTrafficStats.value = data
-        lastTrafficSampleAt.value = now
-      }
+      const nextTraffic = upsertLiveTrafficSample(
+        listenerHistory.value,
+        data.listeners,
+        timeRange.value,
+        trafficBucketStartedAt.value,
+        now,
+      )
+
+      listenerHistory.value = nextTraffic.history
+      trafficBucketStartedAt.value = nextTraffic.bucketStartedAt
 
       stats.value = data
       connected.value = true

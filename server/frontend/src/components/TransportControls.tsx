@@ -47,10 +47,10 @@ export function TransportControls({
         </svg>
       </button>
 
-      {/* Play / Pause — large orange */}
+      {/* Play / Pause */}
       <button
         onClick={playing ? onPause : onPlay}
-        class="w-14 h-14 rounded-full bg-accent flex items-center justify-center shadow-[0_0_20px_rgba(255,102,0,0.3)] hover:shadow-[0_0_28px_rgba(255,102,0,0.45)] transition-shadow"
+        class="w-14 h-14 rounded-full bg-accent flex items-center justify-center accent-shadow-control"
         aria-label={playing ? 'Pause' : 'Play'}
       >
         {playing ? (
