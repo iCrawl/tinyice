@@ -378,11 +378,6 @@ export function AutoDJ() {
       )
     })
 
-    sse.on('stream', () => {
-      // Stream events update listener counts — reload data
-      loadAutoDJ()
-    })
-
     return () => sse.close()
   }, [])
 

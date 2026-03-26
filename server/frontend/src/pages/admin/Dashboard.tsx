@@ -3,6 +3,7 @@ import { useEffect } from 'preact/hooks'
 import { createSSE } from '../../lib/sse'
 import { StatCard } from '../../components/StatCard'
 import type { StatsEvent, StreamEvent } from '../../types'
+import { getTrafficBarHeights, pushTrafficSample, shouldPushTrafficSample } from './dashboardTraffic'
 
 // Reactive state
 const stats = signal<StatsEvent>({
@@ -20,6 +21,9 @@ const stats = signal<StatsEvent>({
 const streams = signal<StreamEvent[]>([])
 const connected = signal(false)
 const timeRange = signal<'1H' | '24H' | '7D'>('1H')
+const listenerHistory = signal<number[]>([])
+const lastTrafficStats = signal<StatsEvent | null>(null)
+const lastTrafficSampleAt = signal(0)
 
 function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
@@ -45,6 +49,13 @@ export function Dashboard() {
     const sse = createSSE('/admin/events')
 
     const offStats = sse.on('stats', (data: StatsEvent) => {
+      const now = Date.now()
+      if (shouldPushTrafficSample(lastTrafficStats.value, data, lastTrafficSampleAt.value, now)) {
+        listenerHistory.value = pushTrafficSample(listenerHistory.value, data.listeners)
+        lastTrafficStats.value = data
+        lastTrafficSampleAt.value = now
+      }
+
       stats.value = data
       connected.value = true
     })
@@ -65,6 +76,8 @@ export function Dashboard() {
 
   const totalStreams = streams.value.length
   const activeStreams = streams.value.filter((s) => s.listeners > 0).length
+  const trafficBars = getTrafficBarHeights(listenerHistory.value)
+  const hasTrafficData = listenerHistory.value.some((listeners) => listeners > 0)
 
   return (
     <div class="p-7 max-w-[1400px]">
@@ -146,12 +159,12 @@ export function Dashboard() {
           </div>
         </div>
         {/* Listener traffic chart */}
-        <div class="h-32 flex items-end gap-px">
-          {stats.value.listeners > 0 ? Array.from({ length: 48 }, (_, i) => (
+        <div class="h-32 flex items-end gap-px overflow-hidden">
+          {hasTrafficData ? trafficBars.map((height, i) => (
             <div
               key={i}
               class="flex-1 rounded-t bg-accent/20 transition-all duration-300"
-              style={{ height: `${Math.max(4, (i === 47 ? stats.value.listeners : 0) * 10)}%` }}
+              style={{ height: `${height}%` }}
             />
           )) : (
             <div class="flex-1 flex items-center justify-center text-text-tertiary text-xs font-mono">
