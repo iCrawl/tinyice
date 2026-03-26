@@ -3,8 +3,11 @@ package relay
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"io"
+	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -98,20 +101,50 @@ func (tm *TranscoderManager) runTranscoder(ctx context.Context, inst *Transcoder
 		"bitrate", inst.Config.Bitrate,
 	)
 
+	const (
+		minBackoff = 5 * time.Second
+		maxBackoff = 5 * time.Minute
+	)
+	backoff := minBackoff
+
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			tm.performTranscode(ctx, inst)
-			// Wait before retry if input stream wasn't found
+			start := time.Now()
+			tm.safePerformTranscode(ctx, inst)
+			// Reset backoff if we ran for a meaningful duration (not an immediate failure)
+			if time.Since(start) > 30*time.Second {
+				backoff = minBackoff
+			}
+			// Wait before retry with exponential backoff
+			logger.L.Infow("Transcoder: retrying", "name", inst.Config.Name, "backoff", backoff)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(backoff):
+			}
+			backoff *= 2
+			if backoff > maxBackoff {
+				backoff = maxBackoff
 			}
 		}
 	}
+}
+
+func (tm *TranscoderManager) safePerformTranscode(ctx context.Context, inst *TranscoderInstance) {
+	defer func() {
+		if r := recover(); r != nil {
+			logger.L.Errorw("Transcoder: recovered from panic, will retry",
+				"name", inst.Config.Name,
+				"input", inst.Config.InputMount,
+				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
+			)
+		}
+	}()
+	tm.performTranscode(ctx, inst)
 }
 
 func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *TranscoderInstance) {
@@ -142,11 +175,77 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 
 	reader := NewStreamReader(input.Buffer, offset, signal, ctx, id).WithOggSync(input)
 
-	// 3. Decode
-	decoder, err := mp3.NewDecoder(reader)
-	if err != nil {
-		logger.L.Errorw("Transcoder: Failed to initialize decoder", "name", inst.Config.Name, "input", inst.Config.InputMount, "error", err)
-		return
+	// 3. Decode — pick decoder based on input content type
+	var pcmReader io.Reader
+	var sampleRate int
+
+	inputIsOgg := strings.Contains(strings.ToLower(input.ContentType), "ogg") ||
+		strings.Contains(strings.ToLower(input.ContentType), "opus")
+
+	if inputIsOgg {
+		// Opus input: scan for OggS page boundary before reading (same as webrtc.go)
+		syncBuf := make([]byte, 16384)
+		foundSync := false
+		var searched int64
+		for !foundSync && searched < 512*1024 {
+			select {
+			case <-ctx.Done():
+				return
+			case <-signal:
+				n, next, _ := input.Buffer.ReadAt(offset, syncBuf)
+				if n == 0 {
+					continue
+				}
+				for i := 0; i <= n-4; i++ {
+					if syncBuf[i] == 'O' && syncBuf[i+1] == 'g' && syncBuf[i+2] == 'g' && syncBuf[i+3] == 'S' {
+						offset += int64(i)
+						foundSync = true
+						break
+					}
+				}
+				if !foundSync {
+					offset = next - 3
+					searched += int64(n)
+				}
+			}
+		}
+
+		if !foundSync {
+			logger.L.Errorw("Transcoder: Could not find Ogg sync", "name", inst.Config.Name, "input", inst.Config.InputMount)
+			return
+		}
+
+		// Re-create reader at synced offset, then prepend Ogg headers
+		reader = NewStreamReader(input.Buffer, offset, signal, ctx, id).WithOggSync(input)
+		var finalReader io.Reader = reader
+		if input.OggHead != nil {
+			finalReader = io.MultiReader(bytes.NewReader(input.OggHead), reader)
+		}
+
+		opusReader, err := ogg.NewOpusReader(finalReader)
+		if err != nil {
+			logger.L.Errorw("Transcoder: Failed to initialize Opus decoder", "name", inst.Config.Name, "input", inst.Config.InputMount, "error", err)
+			return
+		}
+
+		opusDecoder, err := opus.NewDecoderFromHead(opusReader.Head)
+		if err != nil {
+			logger.L.Errorw("Transcoder: Failed to create Opus decoder from head", "name", inst.Config.Name, "input", inst.Config.InputMount, "error", err)
+			return
+		}
+		defer opusDecoder.Close()
+
+		sampleRate = opusDecoder.SampleRate()
+		pcmReader = newOpusPCMReader(opusReader, opusDecoder, opusDecoder.Channels())
+	} else {
+		// MP3 input: existing path
+		mp3Decoder, err := mp3.NewDecoder(reader)
+		if err != nil {
+			logger.L.Errorw("Transcoder: Failed to initialize MP3 decoder", "name", inst.Config.Name, "input", inst.Config.InputMount, "error", err)
+			return
+		}
+		sampleRate = mp3Decoder.SampleRate()
+		pcmReader = mp3Decoder
 	}
 
 	// 4. Create Output Stream
@@ -158,10 +257,10 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 
 	if inst.Config.Format == "mp3" {
 		output.ContentType = "audio/mpeg"
-		EncodeMP3(ctx, tm.relay, output, decoder, inst.Config.Bitrate, &inst.BytesEncoded, false, 44100)
+		EncodeMP3(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, false, sampleRate)
 	} else if inst.Config.Format == "opus" {
 		output.ContentType = "audio/ogg"
-		EncodeOpus(ctx, tm.relay, output, decoder, inst.Config.Bitrate, &inst.BytesEncoded, false)
+		EncodeOpus(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, false, sampleRate, 2)
 	}
 }
 
@@ -215,12 +314,18 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	}
 }
 
-func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool) {
+func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, srcSampleRate int, channels int) {
 	// 48kHz is standard for Opus
 	const sampleRate = 48000
-	const channels = 2
 	const frameMS = 20
 	const frameSize = sampleRate * frameMS / 1000
+
+	if srcSampleRate <= 0 {
+		srcSampleRate = sampleRate
+	}
+	if channels <= 0 {
+		channels = 2
+	}
 
 	enc, err := opus.NewEncoder(sampleRate, channels, opus.ApplicationAudio)
 	if err != nil {
@@ -242,7 +347,7 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 	head := ogg.OpusHead{
 		Version:         1,
 		Channels:        uint8(channels),
-		InputSampleRate: uint32(sampleRate),
+		InputSampleRate: uint32(srcSampleRate),
 	}
 	headPacket, _ := ogg.BuildOpusHeadPacket(head)
 	pw.WritePacket(headPacket, 0, true, false)
@@ -259,9 +364,9 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 	output.OggHeaderOffset = output.Buffer.Head
 	writer.capture = false // Stop capturing headers
 
-	pcmBuf := make([]byte, frameSize*channels*2)
 	pcmSamples := make([]int16, frameSize*channels)
 	opusPacket := make([]byte, 4000) // Max opus packet size
+	frameReader := newPCMFrameReader(decoder, srcSampleRate, sampleRate, channels, frameSize)
 
 	var granulePos uint64
 	var sentCount int64 = 0
@@ -272,13 +377,9 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 		case <-ctx.Done():
 			return
 		default:
-			_, rerr := io.ReadFull(decoder, pcmBuf)
+			_, rerr := frameReader.ReadFrame(pcmSamples)
 			if rerr != nil {
 				return
-			}
-
-			for i := 0; i < len(pcmSamples); i++ {
-				pcmSamples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
 			}
 
 			en, eerr := enc.Encode(pcmSamples, frameSize, opusPacket)
@@ -303,6 +404,58 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 			}
 		}
 	}
+}
+
+// opusPCMReader wraps an Ogg/Opus stream and decodes it into interleaved int16 PCM bytes,
+// implementing io.Reader so it can be fed directly into the MP3/Opus encoders.
+type opusPCMReader struct {
+	oggReader *ogg.OpusReader
+	decoder   *opus.Decoder
+	channels  int
+	buf       []byte // leftover PCM bytes from previous decode
+}
+
+func newOpusPCMReader(oggReader *ogg.OpusReader, decoder *opus.Decoder, channels int) *opusPCMReader {
+	return &opusPCMReader{
+		oggReader: oggReader,
+		decoder:   decoder,
+		channels:  channels,
+	}
+}
+
+func (r *opusPCMReader) Read(p []byte) (int, error) {
+	// Drain buffered PCM first
+	if len(r.buf) > 0 {
+		n := copy(p, r.buf)
+		r.buf = r.buf[n:]
+		return n, nil
+	}
+
+	// Read and decode the next Opus packet
+	pkt, err := r.oggReader.ReadAudioPacket()
+	if err != nil {
+		return 0, err
+	}
+
+	// 5760 = max Opus frame size at 48kHz (120ms)
+	pcmSamples := make([]int16, 5760*r.channels)
+	samplesPerChannel, err := r.decoder.Decode(pkt.Data, pcmSamples, 5760, false)
+	if err != nil {
+		return 0, fmt.Errorf("opus decode: %w", err)
+	}
+
+	// Convert int16 PCM samples to little-endian bytes
+	totalSamples := samplesPerChannel * r.channels
+	pcmBytes := make([]byte, totalSamples*2)
+	for i := 0; i < totalSamples; i++ {
+		binary.LittleEndian.PutUint16(pcmBytes[i*2:], uint16(pcmSamples[i]))
+	}
+
+	n := copy(p, pcmBytes)
+	if n < len(pcmBytes) {
+		r.buf = pcmBytes[n:]
+	}
+	return n, nil
 }
 
 type streamWriter struct {

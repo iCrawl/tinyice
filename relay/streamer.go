@@ -28,23 +28,23 @@ const (
 )
 
 type Streamer struct {
-	Name           string
-	OutputMount    string
-	MusicDir       string
-	Format         string
-	Bitrate        int
-	Playlist       []PlaylistSong
-	Queue          []string
-	CurrentPos     int
-	State          StreamerState
-	Loop           bool
-	Shuffle        bool
-	InjectMetadata bool
-	Visible        bool
-	MPDPassword    string
-	LastPlaylist        string
-	SongCommand         string
-	SongCommandTimeout  int
+	Name               string
+	OutputMount        string
+	MusicDir           string
+	Format             string
+	Bitrate            int
+	Playlist           []PlaylistSong
+	Queue              []string
+	CurrentPos         int
+	State              StreamerState
+	Loop               bool
+	Shuffle            bool
+	InjectMetadata     bool
+	Visible            bool
+	MPDPassword        string
+	LastPlaylist       string
+	SongCommand        string
+	SongCommandTimeout int
 
 	relay  *Relay
 	cancel context.CancelFunc
@@ -603,29 +603,29 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 	}
 
 	s := &Streamer{
-		Name:              name,
-		OutputMount:       mount,
-		MusicDir:          absMusicDir,
-		Format:            format,
-		Bitrate:           bitrate,
-		Playlist:          initialPlaylist,
-		State:             StateStopped,
-		Loop:              loop,
-		InjectMetadata:    injectMetadata,
-		Visible:           visible,
-		MPDPassword:       mpdPassword,
+		Name:               name,
+		OutputMount:        mount,
+		MusicDir:           absMusicDir,
+		Format:             format,
+		Bitrate:            bitrate,
+		Playlist:           initialPlaylist,
+		State:              StateStopped,
+		Loop:               loop,
+		InjectMetadata:     injectMetadata,
+		Visible:            visible,
+		MPDPassword:        mpdPassword,
 		LastPlaylist:       lastPlaylist,
 		SongCommand:        songCommand,
 		SongCommandTimeout: songCommandTimeout,
 		relay:              sm.relay,
-		cancel:            cancel,
-		titleCache:        make(map[string]string),
-		NextID:            nextID, // Start NextID after initial playlist
-		CurrentPlayingPos: -1,
-		CurrentPlayingID:  -1,
-		PlaylistVersion:   1,
-		idleCh:            make(chan string, 10),
-		stateCh:           make(chan struct{}, 1),
+		cancel:             cancel,
+		titleCache:         make(map[string]string),
+		NextID:             nextID, // Start NextID after initial playlist
+		CurrentPlayingPos:  -1,
+		CurrentPlayingID:   -1,
+		PlaylistVersion:    1,
+		idleCh:             make(chan string, 10),
+		stateCh:            make(chan struct{}, 1),
 	}
 
 	if mpdEnabled && mpdPort != "" {
@@ -914,7 +914,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 
 	if s.Format == "opus" {
 		output.ContentType = "audio/ogg"
-		EncodeOpus(ctx, sm.relay, output, decoder, s.Bitrate, &s.BytesStreamed, true)
+		EncodeOpus(ctx, sm.relay, output, decoder, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate(), 2)
 	} else {
 		output.ContentType = "audio/mpeg"
 		EncodeMP3(ctx, sm.relay, output, decoder, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate())
