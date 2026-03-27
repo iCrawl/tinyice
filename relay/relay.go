@@ -44,7 +44,8 @@ type Relay struct {
 	BytesOut   int64              // Global bytes sent counter
 	History    *HistoryManager    // Optional history manager for statistics
 
-	metaSubs   []chan MetadataChange // SSE subscribers for metadata changes
+	metaSubs   []chan MetadataChange      // SSE subscribers for metadata changes
+	lastMeta   map[string]MetadataChange // last metadata per mount
 	metaSubsMu sync.Mutex
 }
 
@@ -167,16 +168,32 @@ func (r *Relay) UnsubscribeMetadata(ch chan MetadataChange) {
 	}
 }
 
-// NotifyMetadataChange fans out a metadata change to all subscribers.
+// NotifyMetadataChange fans out a metadata change to all subscribers
+// and stores it as the last known metadata for the mount.
 func (r *Relay) NotifyMetadataChange(mc MetadataChange) {
 	r.metaSubsMu.Lock()
 	defer r.metaSubsMu.Unlock()
+	if r.lastMeta == nil {
+		r.lastMeta = make(map[string]MetadataChange)
+	}
+	r.lastMeta[mc.Mount] = mc
 	for _, ch := range r.metaSubs {
 		select {
 		case ch <- mc:
 		default: // drop if subscriber is slow
 		}
 	}
+}
+
+// LastMetadata returns the most recent metadata for all mounts.
+func (r *Relay) LastMetadata() []MetadataChange {
+	r.metaSubsMu.Lock()
+	defer r.metaSubsMu.Unlock()
+	out := make([]MetadataChange, 0, len(r.lastMeta))
+	for _, mc := range r.lastMeta {
+		out = append(out, mc)
+	}
+	return out
 }
 
 // DisconnectAllListeners kicks all listeners from all active streams

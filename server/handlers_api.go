@@ -332,6 +332,12 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	if err := send(); err != nil {
 		return
 	}
+	// Send last known metadata for each mount so late joiners get current song
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
+	}
 	for {
 		select {
 		case <-s.done:
@@ -344,6 +350,54 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 			}
 		case <-ticker.C:
 			if err := send(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher, _ := w.(http.Flusher)
+
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
+	sendMetadata := func(mc relay.MetadataChange) error {
+		if !s.Relay.GetStreamVisibility(mc.Mount) {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]string{
+			"mount":      mc.Mount,
+			"title":      mc.Title,
+			"artist":     mc.Artist,
+			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	// Send last known metadata so late joiners get current song
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-r.Context().Done():
+			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
 				return
 			}
 		}
