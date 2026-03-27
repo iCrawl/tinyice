@@ -262,6 +262,10 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
 	type PublicStreamInfo struct {
 		Mount       string `json:"mount"`
 		Name        string `json:"name"`
@@ -276,7 +280,6 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 		allStreams := s.Relay.Snapshot()
 		var info []PublicStreamInfo
 		namedStreams := make([]map[string]interface{}, 0, len(allStreams))
-		metadataEvents := make([]map[string]string, 0, len(allStreams))
 		for _, st := range allStreams {
 			if st.Visible {
 				info = append(info, PublicStreamInfo{Mount: st.MountName, Name: st.Name, Listeners: st.ListenersCount, Bitrate: st.Bitrate, Uptime: st.Uptime, Genre: st.Genre, Description: st.Description, CurrentSong: st.CurrentSong})
@@ -288,11 +291,6 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 					"bitrate":   st.Bitrate,
 					"listeners": st.ListenersCount,
 					"live":      st.SourceIP != "",
-				})
-				metadataEvents = append(metadataEvents, map[string]string{
-					"mount":  st.MountName,
-					"title":  st.CurrentSong,
-					"artist": st.Name,
 				})
 			}
 		}
@@ -311,11 +309,22 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
-		for _, md := range metadataEvents {
-			metadataJSON, _ := json.Marshal(md)
-			if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
-				return err
-			}
+		flusher.Flush()
+		return nil
+	}
+	sendMetadata := func(mc relay.MetadataChange) error {
+		// Only emit for visible streams
+		if !s.Relay.GetStreamVisibility(mc.Mount) {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]string{
+			"mount":      mc.Mount,
+			"title":      mc.Title,
+			"artist":     mc.Artist,
+			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
 		}
 		flusher.Flush()
 		return nil
@@ -329,6 +338,10 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
+				return
+			}
 		case <-ticker.C:
 			if err := send(); err != nil {
 				return

@@ -5,7 +5,7 @@ type SSEEventMap = {
   stream: StreamEvent
   autodj: AutoDJEvent
   streams: StreamInfo[]
-  metadata: { mount: string; title: string; artist: string }
+  metadata: { mount: string; title: string; artist: string; started_at: string }
 }
 
 type SSECallback<K extends keyof SSEEventMap> = (data: SSEEventMap[K]) => void

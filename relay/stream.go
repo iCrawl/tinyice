@@ -443,12 +443,24 @@ func (s *Stream) UpdateMetadata(name, desc, genre, url, bitrate, contentType str
 // SetCurrentSong updates the current song info thread-safely
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.CurrentSong != song {
+	changed := s.CurrentSong != song
+	if changed {
 		s.CurrentSong = song
+	}
+	mount := s.MountName
+	artist := s.Name
+	s.mu.Unlock()
+
+	if changed {
 		if relay.History != nil {
-			relay.History.Add(s.MountName, song)
+			relay.History.Add(mount, song)
 		}
+		relay.NotifyMetadataChange(MetadataChange{
+			Mount:     mount,
+			Title:     song,
+			Artist:    artist,
+			StartedAt: time.Now(),
+		})
 	}
 }
 
