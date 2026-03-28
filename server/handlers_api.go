@@ -278,7 +278,7 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	}
 	send := func() error {
 		allStreams := s.Relay.Snapshot()
-		var info []PublicStreamInfo
+		info := make([]PublicStreamInfo, 0, len(allStreams))
 		namedStreams := make([]map[string]interface{}, 0, len(allStreams))
 		for _, st := range allStreams {
 			if st.Visible {

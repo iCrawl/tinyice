@@ -43,6 +43,7 @@ interface AutoDJInstance {
   shuffle: boolean
   loop: boolean
   injectMetadata: boolean
+  visible: boolean
   musicDir: string
   songCommand: string
   songCommandTimeout: number
@@ -63,6 +64,7 @@ function mapInstance(raw: AutoDJInstanceRaw): AutoDJInstance {
     shuffle: raw.shuffle,
     loop: raw.loop,
     injectMetadata: raw.inject_metadata,
+    visible: raw.visible,
     musicDir: raw.music_dir,
     songCommand: raw.song_command || '',
     songCommandTimeout: raw.song_command_timeout || 5,
@@ -81,6 +83,7 @@ const formFormat = signal('mp3')
 const formBitrate = signal(128)
 const formLoop = signal(true)
 const formInjectMetadata = signal(true)
+const formVisible = signal(true)
 const formSongCommand = signal('')
 const formSongCommandTimeout = signal(5)
 
@@ -92,6 +95,7 @@ function resetForm() {
   formBitrate.value = 128
   formLoop.value = true
   formInjectMetadata.value = true
+  formVisible.value = true
   formSongCommand.value = ''
   formSongCommandTimeout.value = 5
   editingMount.value = null
@@ -105,6 +109,7 @@ function openEditForm(inst: AutoDJInstance) {
   formBitrate.value = inst.bitrate
   formLoop.value = inst.loop
   formInjectMetadata.value = inst.injectMetadata
+  formVisible.value = inst.visible
   formSongCommand.value = inst.songCommand || ''
   formSongCommandTimeout.value = inst.songCommandTimeout || 5
   editingMount.value = inst.mount
@@ -124,6 +129,7 @@ async function saveAutoDJ() {
     bitrate: formBitrate.value,
     loop: formLoop.value,
     inject_metadata: formInjectMetadata.value,
+    visible: formVisible.value,
     song_command: formSongCommand.value || undefined,
     song_command_timeout: formSongCommandTimeout.value || undefined,
   })
@@ -503,6 +509,15 @@ export function AutoDJ() {
                     class="accent-accent"
                   />
                   <span class="text-text-secondary text-xs font-mono tracking-wider uppercase">Inject Metadata</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={formVisible.value}
+                    onChange={(e) => { formVisible.value = (e.target as HTMLInputElement).checked }}
+                    class="accent-accent"
+                  />
+                  <span class="text-text-secondary text-xs font-mono tracking-wider uppercase">Visible</span>
                 </label>
               </div>
               {/* Divider */}

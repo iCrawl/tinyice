@@ -167,6 +167,41 @@ func TestHandlePublicEventsEmitsNamedEvents(t *testing.T) {
 	}
 }
 
+func TestHandlePublicEventsEmitsEmptyArraysWhenNoVisibleStreams(t *testing.T) {
+	s := newTestServer(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/events", nil).WithContext(ctx)
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handlePublicEvents(rr, req)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handlePublicEvents did not return after cancellation")
+	}
+
+	body := rr.Body.String()
+	if strings.Contains(body, "data: null\n\n") {
+		t.Fatalf("expected empty arrays instead of null payloads, got: %s", body)
+	}
+	if !strings.Contains(body, "data: []\n\n") {
+		t.Fatalf("expected empty array payload in response, got: %s", body)
+	}
+	if !strings.Contains(body, "event: streams\ndata: []\n\n") {
+		t.Fatalf("expected empty streams event in response, got: %s", body)
+	}
+}
+
 func TestRegisterHLSRejectsOpusStreams(t *testing.T) {
 	s := newTestServer(t)
 	s.hlsOutputs = make(map[string]*relay.HLSOutput)
