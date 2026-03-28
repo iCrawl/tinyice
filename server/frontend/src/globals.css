@@ -43,6 +43,14 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
+select,
+option,
+optgroup {
+  color-scheme: dark;
+  background-color: var(--color-surface-overlay);
+  color: var(--color-text-primary);
+}
+
 /* Grain overlay for analog warmth */
 body::after {
   content: '';

@@ -3,7 +3,9 @@ import assert from 'node:assert/strict'
 
 const {
   bucketTrafficSamples,
+  formatTrafficBucketLabel,
   getTrafficBarHeights,
+  getTrafficScaleLabels,
   pushTrafficSample,
   shouldPushTrafficSample,
   TRAFFIC_BAR_COUNT,
@@ -27,6 +29,20 @@ test('getTrafficBarHeights normalizes bars into the chart range', () => {
   assert.equal(heights.length, TRAFFIC_BAR_COUNT)
   assert.equal(heights.at(-1), 100)
   assert.ok(heights.every((height) => height >= 0 && height <= 100))
+})
+
+test('getTrafficScaleLabels derives zero, midpoint, and peak labels from listener history', () => {
+  const labels = getTrafficScaleLabels([0, 3, 18, 24, 7])
+
+  assert.deepEqual(labels, [24, 12, 0])
+})
+
+test('formatTrafficBucketLabel describes the bucket time window for hover text', () => {
+  const now = Date.UTC(2026, 2, 26, 12, 0, 0)
+  const label = formatTrafficBucketLabel(TRAFFIC_BAR_COUNT - 1, '24H', now, TRAFFIC_BAR_COUNT, 'UTC')
+
+  assert.match(label, /11:30/)
+  assert.match(label, /12:00/)
 })
 
 test('bucketTrafficSamples aggregates persisted listener history into the selected range buckets', () => {

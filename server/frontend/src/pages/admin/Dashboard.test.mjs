@@ -24,3 +24,23 @@ test('Dashboard hydrates listener traffic from persisted insights data for the s
     'Dashboard must load persisted listener history for the selected range instead of rebuilding the chart from live SSE only'
   )
 })
+
+test('Dashboard renders a listener traffic scale alongside the bars', async () => {
+  const source = await readFile(dashboardPath, 'utf8')
+
+  assert.match(
+    source,
+    /getTrafficScaleLabels/,
+    'Dashboard must render Y-axis labels so listener traffic bars have an at-a-glance scale'
+  )
+})
+
+test('Dashboard attaches hover text to listener traffic bars', async () => {
+  const source = await readFile(dashboardPath, 'utf8')
+
+  assert.match(
+    source,
+    /title=\{/,
+    'Dashboard must expose per-bar hover text with the exact listener count and time bucket'
+  )
+})

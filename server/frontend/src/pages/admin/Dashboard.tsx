@@ -8,7 +8,9 @@ import {
   alignTrafficBucketStart,
   bucketTrafficSamples,
   collapseTrafficSources,
+  formatTrafficBucketLabel,
   getTrafficBarHeights,
+  getTrafficScaleLabels,
   type TrafficHistorySample,
   type TrafficRange,
   upsertLiveTrafficSample,
@@ -55,6 +57,10 @@ function formatBandwidth(bytesPerSec: number): string {
   if (bytesPerSec < 1024) return `${bytesPerSec} B/s`
   if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
   return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`
+}
+
+function formatListenerCount(listeners: number): string {
+  return `${listeners.toLocaleString()} listener${listeners === 1 ? '' : 's'}`
 }
 
 export function Dashboard() {
@@ -129,6 +135,11 @@ export function Dashboard() {
   const totalStreams = streams.value.length
   const activeStreams = streams.value.filter((s) => s.listeners > 0).length
   const trafficBars = getTrafficBarHeights(listenerHistory.value)
+  const paddedTrafficHistory = listenerHistory.value.length >= trafficBars.length
+    ? listenerHistory.value.slice(-trafficBars.length)
+    : [...Array(trafficBars.length - listenerHistory.value.length).fill(0), ...listenerHistory.value]
+  const trafficScaleLabels = getTrafficScaleLabels(paddedTrafficHistory)
+  const trafficRangeEnd = Date.now()
   const hasTrafficData = listenerHistory.value.some((listeners) => listeners > 0)
 
   return (
@@ -211,18 +222,52 @@ export function Dashboard() {
           </div>
         </div>
         {/* Listener traffic chart */}
-        <div class="h-32 flex items-end gap-px overflow-hidden">
-          {hasTrafficData ? trafficBars.map((height, i) => (
-            <div
-              key={i}
-              class="flex-1 rounded-t bg-accent/20 transition-all duration-300"
-              style={{ height: `${height}%` }}
-            />
-          )) : (
-            <div class="flex-1 flex items-center justify-center text-text-tertiary text-xs font-mono">
-              No listener data yet
+        <div class="flex gap-3">
+          {hasTrafficData ? (
+            <div class="h-32 w-12 shrink-0 flex flex-col justify-between text-right font-mono text-[9px] text-text-tertiary">
+              {trafficScaleLabels.map((label) => (
+                <span key={label}>{label.toLocaleString()}</span>
+              ))}
             </div>
-          )}
+          ) : null}
+          <div class="relative h-32 flex-1">
+            {hasTrafficData ? (
+              <>
+                <div class="pointer-events-none absolute inset-0 flex flex-col justify-between">
+                  {trafficScaleLabels.map((label, i) => (
+                    <div
+                      key={`${label}-${i}`}
+                      class={i === trafficScaleLabels.length - 1 ? 'border-t border-border/50' : 'border-t border-border/30'}
+                    />
+                  ))}
+                </div>
+                <div class="relative flex h-full items-end gap-px">
+                  {trafficBars.map((height, i) => {
+                    const listeners = paddedTrafficHistory[i]
+                    const hoverLabel = `${formatListenerCount(listeners)}\n${formatTrafficBucketLabel(i, timeRange.value, trafficRangeEnd, trafficBars.length)}`
+
+                    return (
+                      <div
+                        key={i}
+                        class="group flex-1 h-full flex items-end"
+                        title={hoverLabel}
+                        aria-label={hoverLabel}
+                      >
+                        <div
+                          class="w-full rounded-t bg-accent/20 transition-[height,background-color] duration-200 group-hover:bg-accent/35"
+                          style={{ height: `${height}%` }}
+                        />
+                      </div>
+                    )
+                  })}
+                </div>
+              </>
+            ) : (
+              <div class="flex h-full items-center justify-center text-text-tertiary text-xs font-mono">
+                No listener data yet
+              </div>
+            )}
+          </div>
         </div>
         <div class="flex justify-between mt-2">
           <span class="font-mono text-[9px] text-text-tertiary">

@@ -149,3 +149,47 @@ export function getTrafficBarHeights(history: number[], limit = TRAFFIC_BAR_COUN
     return Math.max(MIN_BAR_HEIGHT_PERCENT, Math.round((value / peak) * 100))
   })
 }
+
+export function getTrafficScaleLabels(history: number[]): number[] {
+  const peak = history.reduce((max, value) => Math.max(max, normalizeListeners(value)), 0)
+  return Array.from(new Set([peak, Math.round(peak / 2), 0]))
+}
+
+function formatTrafficTime(timestamp: number, timeZone?: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+    ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(timestamp))
+}
+
+function formatTrafficDate(timestamp: number, timeZone?: string): string {
+  return new Intl.DateTimeFormat('en-GB', {
+    month: 'short',
+    day: 'numeric',
+    ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(timestamp))
+}
+
+export function formatTrafficBucketLabel(
+  bucketIndex: number,
+  range: TrafficRange,
+  now = Date.now(),
+  limit = TRAFFIC_BAR_COUNT,
+  timeZone?: string,
+): string {
+  const bucketSizeMs = getTrafficBucketSizeMs(range, limit)
+  const rangeStart = now - getTrafficRangeDurationMs(range)
+  const bucketStart = rangeStart + bucketIndex * bucketSizeMs
+  const bucketEnd = bucketStart + bucketSizeMs
+  const includeDate = range === '7D' || formatTrafficDate(bucketStart, timeZone) !== formatTrafficDate(bucketEnd, timeZone)
+  const startLabel = includeDate
+    ? `${formatTrafficDate(bucketStart, timeZone)} ${formatTrafficTime(bucketStart, timeZone)}`
+    : formatTrafficTime(bucketStart, timeZone)
+  const endLabel = includeDate
+    ? `${formatTrafficDate(bucketEnd, timeZone)} ${formatTrafficTime(bucketEnd, timeZone)}`
+    : formatTrafficTime(bucketEnd, timeZone)
+
+  return `${startLabel} - ${endLabel}`
+}
