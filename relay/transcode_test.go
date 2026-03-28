@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"testing"
+	"time"
+
+	"github.com/DatanoiseTV/tinyice/config"
 )
 
 func TestEncodeMP3UsesConfiguredBitrate(t *testing.T) {
@@ -56,4 +59,179 @@ func bitrateFromMP3Header(header []byte) int {
 		0, 32, 40, 48, 56, 64, 80, 96,
 		112, 128, 160, 192, 224, 256, 320, 0,
 	}[bitrateIndex]
+}
+
+func TestMP3EncoderSessionWritesFramesIncrementally(t *testing.T) {
+	r := NewRelay(false, nil)
+	stream := r.GetOrCreateStream("/mp3-session")
+
+	session, err := NewMP3EncoderSession(stream, r, 64, 44100, nil)
+	if err != nil {
+		t.Fatalf("NewMP3EncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	frame := make([]int16, 1152*2)
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #1: %v", err)
+	}
+
+	headAfterFirst := stream.Buffer.Head
+	if headAfterFirst == 0 {
+		t.Fatal("expected encoded bytes after first frame")
+	}
+
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #2: %v", err)
+	}
+	if stream.Buffer.Head <= headAfterFirst {
+		t.Fatal("expected second frame to append encoded bytes")
+	}
+}
+
+func TestOpusEncoderSessionWritesHeadersOnlyOnce(t *testing.T) {
+	r := NewRelay(false, nil)
+	stream := r.GetOrCreateStream("/opus-session")
+
+	session, err := NewOpusEncoderSession(stream, r, 96, 48000, 2, nil)
+	if err != nil {
+		t.Fatalf("NewOpusEncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	frame := make([]int16, (48000/50)*2)
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #1: %v", err)
+	}
+
+	oggHead := append([]byte(nil), stream.OggHead...)
+	headAfterFirst := stream.Buffer.Head
+
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #2: %v", err)
+	}
+	if stream.Buffer.Head <= headAfterFirst {
+		t.Fatal("expected second frame to append opus packets")
+	}
+	if len(stream.OggHead) != len(oggHead) {
+		t.Fatal("expected Ogg head to remain stable across writes")
+	}
+}
+
+func TestListenerConnectDuringSilenceWindowStillGetsDecodableBytes(t *testing.T) {
+	r := NewRelay(false, nil)
+	stream := r.GetOrCreateStream("/gap")
+	stream.ContentType = "audio/mpeg"
+
+	session, err := NewMP3EncoderSession(stream, r, 64, 44100, nil)
+	if err != nil {
+		t.Fatalf("NewMP3EncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	frame := make([]int16, 1152*2)
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	offset, _ := stream.Subscribe("listener", 4096)
+	buf := make([]byte, 1024)
+	n, _, skipped := stream.Buffer.ReadAt(offset, buf)
+	if skipped || n == 0 {
+		t.Fatal("expected new listener to receive decodable bytes immediately")
+	}
+}
+
+func TestAutoDJTransitionContinuityFeedsTranscoderOutput(t *testing.T) {
+	r := NewRelay(false, nil)
+	source := r.GetOrCreateStream("/source")
+	source.ContentType = "audio/mpeg"
+
+	session, err := NewMP3EncoderSession(source, r, 64, 44100, nil)
+	if err != nil {
+		t.Fatalf("NewMP3EncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	frame := make([]int16, 1152*2)
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #1: %v", err)
+	}
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame #2: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tm := NewTranscoderManager(r)
+	inst := &TranscoderInstance{
+		Config: &config.TranscoderConfig{
+			Name:        "fallback",
+			InputMount:  "/source",
+			OutputMount: "/fallback",
+			Format:      "mp3",
+			Bitrate:     64,
+		},
+	}
+	go tm.performTranscode(ctx, inst)
+
+	time.Sleep(250 * time.Millisecond)
+
+	out, ok := r.GetStream("/fallback")
+	if !ok || out.Buffer.Head == 0 {
+		t.Fatal("expected transcoder output to accumulate bytes from a continuous source")
+	}
+}
+
+func TestTranscoderPacingDoesNotDrainBufferedBurstImmediately(t *testing.T) {
+	r := NewRelay(false, nil)
+	source := r.GetOrCreateStream("/paced-source")
+	source.ContentType = "audio/mpeg"
+
+	session, err := NewMP3EncoderSession(source, r, 64, 44100, nil)
+	if err != nil {
+		t.Fatalf("NewMP3EncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	frame := make([]int16, 1152*2)
+	for i := 0; i < 120; i++ {
+		if err := session.WriteFrame(frame); err != nil {
+			t.Fatalf("WriteFrame #%d: %v", i+1, err)
+		}
+	}
+
+	sourceHead := source.Buffer.Head
+	if sourceHead == 0 {
+		t.Fatal("expected buffered source audio")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	tm := NewTranscoderManager(r)
+	inst := &TranscoderInstance{
+		Config: &config.TranscoderConfig{
+			Name:        "paced-fallback",
+			InputMount:  "/paced-source",
+			OutputMount: "/paced-fallback",
+			Format:      "mp3",
+			Bitrate:     64,
+		},
+	}
+	go tm.performTranscode(ctx, inst)
+
+	time.Sleep(300 * time.Millisecond)
+
+	out, ok := r.GetStream("/paced-fallback")
+	if !ok {
+		t.Fatal("expected transcoder output stream")
+	}
+	if out.Buffer.Head == 0 {
+		t.Fatal("expected paced transcoder to emit some output")
+	}
+	if out.Buffer.Head >= sourceHead/2 {
+		t.Fatalf("expected paced transcoder to avoid draining buffered burst immediately, got %d bytes from %d-byte source buffer", out.Buffer.Head, sourceHead)
+	}
 }

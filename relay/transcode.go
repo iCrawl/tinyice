@@ -98,6 +98,133 @@ func configureMP3EncoderBitrate(encoder *shine.Encoder, bitrate int) {
 	}
 }
 
+type PCMFrameWriter interface {
+	WriteFrame(frame []int16) error
+	Close() error
+}
+
+type MP3EncoderSession struct {
+	stream     *Stream
+	relay      *Relay
+	stats      *int64
+	encoder    *shine.Encoder
+	sampleRate int
+}
+
+func NewMP3EncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate int, stats *int64) (*MP3EncoderSession, error) {
+	if sampleRate <= 0 {
+		sampleRate = 44100
+	}
+
+	encoder := shine.NewEncoder(sampleRate, 2)
+	configureMP3EncoderBitrate(encoder, bitrate)
+
+	return &MP3EncoderSession{
+		stream:     stream,
+		relay:      relay,
+		stats:      stats,
+		encoder:    encoder,
+		sampleRate: sampleRate,
+	}, nil
+}
+
+func (s *MP3EncoderSession) WriteFrame(frame []int16) error {
+	writer := &streamWriter{stream: s.stream, relay: s.relay, stats: s.stats}
+	return s.encoder.Write(writer, frame)
+}
+
+func (s *MP3EncoderSession) Close() error { return nil }
+
+type OpusEncoderSession struct {
+	stream       *Stream
+	relay        *Relay
+	stats        *int64
+	encoder      *opus.Encoder
+	packetWriter *ogg.PacketWriter
+	frameSize    int
+	channels     int
+	granulePos   uint64
+}
+
+func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, channels int, stats *int64) (*OpusEncoderSession, error) {
+	const encodeSampleRate = 48000
+	const frameMS = 20
+	const frameSize = encodeSampleRate * frameMS / 1000
+
+	if sampleRate <= 0 {
+		sampleRate = encodeSampleRate
+	}
+	if channels <= 0 {
+		channels = 2
+	}
+
+	enc, err := opus.NewEncoder(encodeSampleRate, channels, opus.ApplicationAudio)
+	if err != nil {
+		return nil, err
+	}
+	if bitrate > 0 {
+		enc.SetBitrate(bitrate * 1000)
+	}
+
+	writer := &streamWriter{stream: stream, relay: relay, stats: stats, capture: true}
+	pw := ogg.NewPacketWriter(writer, uint32(time.Now().UnixNano()))
+
+	head := ogg.OpusHead{
+		Version:         1,
+		Channels:        uint8(channels),
+		InputSampleRate: uint32(sampleRate),
+	}
+	headPacket, _ := ogg.BuildOpusHeadPacket(head)
+	if err := pw.WritePacket(headPacket, 0, true, false); err != nil {
+		return nil, err
+	}
+	pw.Flush()
+
+	tags := ogg.OpusTags{Vendor: "tinyice-opus"}
+	tagsPacket, _ := ogg.BuildOpusTagsPacket(tags)
+	if err := pw.WritePacket(tagsPacket, 0, false, false); err != nil {
+		return nil, err
+	}
+	pw.Flush()
+
+	stream.OggHead = append([]byte(nil), writer.headerBuf.Bytes()...)
+	stream.OggHeaderOffset = stream.Buffer.Head
+	stream.IsOggStream = true
+	writer.capture = false
+
+	return &OpusEncoderSession{
+		stream:       stream,
+		relay:        relay,
+		stats:        stats,
+		encoder:      enc,
+		packetWriter: pw,
+		frameSize:    frameSize,
+		channels:     channels,
+	}, nil
+}
+
+func (s *OpusEncoderSession) WriteFrame(frame []int16) error {
+	packet := make([]byte, 4000)
+	n, err := s.encoder.Encode(frame, s.frameSize, packet)
+	if err != nil {
+		return err
+	}
+
+	s.granulePos += uint64(s.frameSize)
+	if err := s.packetWriter.WritePacket(packet[:n], s.granulePos, false, false); err != nil {
+		return err
+	}
+	s.packetWriter.Flush()
+	return nil
+}
+
+func (s *OpusEncoderSession) Close() error {
+	if s.encoder != nil {
+		s.encoder.Close()
+	}
+	return nil
+}
+
 type TranscoderInstance struct {
 	Config *config.TranscoderConfig
 	cancel context.CancelFunc
@@ -335,10 +462,10 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 
 	if inst.Config.Format == "mp3" {
 		output.ContentType = "audio/mpeg"
-		EncodeMP3(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, false, sampleRate)
+		EncodeMP3(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, true, sampleRate)
 	} else if inst.Config.Format == "opus" {
 		output.ContentType = "audio/ogg"
-		EncodeOpus(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, false, sampleRate, 2)
+		EncodeOpus(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, true, sampleRate, 2)
 	}
 }
 
@@ -346,11 +473,13 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	if sampleRate <= 0 {
 		sampleRate = 44100 // Fallback
 	}
-	// Shine MP3 initialization
-	encoder := shine.NewEncoder(sampleRate, 2)
-	configureMP3EncoderBitrate(encoder, bitrate)
 
-	// Output buffer - shine Write uses int16 samples
+	session, err := NewMP3EncoderSession(output, relay, bitrate, sampleRate, stats)
+	if err != nil {
+		return
+	}
+	defer session.Close()
+
 	pcmBuf := make([]byte, 4608) // 1152 samples * 2 bytes * 2 channels
 	samples := make([]int16, 2304)
 
@@ -367,17 +496,11 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 				return
 			}
 
-			// Convert PCM bytes to int16 for Shine
 			for i := 0; i < n/2; i++ {
 				samples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
 			}
 
-			// Encode and broadcast
-			// Shine writes directly to an io.Writer
-			// We can wrap our broadcast in an io.Writer
-			writer := &streamWriter{stream: output, relay: relay, stats: stats}
-			err = encoder.Write(writer, samples[:n/2])
-			if err != nil {
+			if err := session.WriteFrame(samples[:n/2]); err != nil {
 				return
 			}
 
@@ -406,48 +529,16 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 		channels = 2
 	}
 
-	enc, err := opus.NewEncoder(sampleRate, channels, opus.ApplicationAudio)
+	session, err := NewOpusEncoderSession(output, relay, bitrate, srcSampleRate, channels, stats)
 	if err != nil {
 		logger.L.Errorf("Failed to create Opus encoder: %v", err)
 		return
 	}
-	defer enc.Close()
-
-	if bitrate > 0 {
-		enc.SetBitrate(bitrate * 1000)
-	}
-
-	// Ogg encapsulation
-	writer := &streamWriter{stream: output, relay: relay, stats: stats, capture: true}
-	serial := uint32(time.Now().UnixNano())
-	pw := ogg.NewPacketWriter(writer, serial)
-
-	// 1. ID Header
-	head := ogg.OpusHead{
-		Version:         1,
-		Channels:        uint8(channels),
-		InputSampleRate: uint32(srcSampleRate),
-	}
-	headPacket, _ := ogg.BuildOpusHeadPacket(head)
-	pw.WritePacket(headPacket, 0, true, false)
-	pw.Flush()
-
-	// 2. Tags Header
-	tags := ogg.OpusTags{Vendor: "tinyice-opus"}
-	tagsPacket, _ := ogg.BuildOpusTagsPacket(tags)
-	pw.WritePacket(tagsPacket, 0, false, false)
-	pw.Flush()
-
-	// Store for mid-stream listeners
-	output.OggHead = writer.headerBuf.Bytes()
-	output.OggHeaderOffset = output.Buffer.Head
-	writer.capture = false // Stop capturing headers
+	defer session.Close()
 
 	pcmSamples := make([]int16, frameSize*channels)
-	opusPacket := make([]byte, 4000) // Max opus packet size
 	frameReader := newPCMFrameReader(decoder, srcSampleRate, sampleRate, channels, frameSize)
 
-	var granulePos uint64
 	var sentCount int64 = 0
 	startTime := time.Now()
 
@@ -461,17 +552,10 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 				return
 			}
 
-			en, eerr := enc.Encode(pcmSamples, frameSize, opusPacket)
-			if eerr != nil {
-				logger.L.Errorf("Opus encode error: %v", eerr)
+			if err := session.WriteFrame(pcmSamples); err != nil {
+				logger.L.Errorf("Opus encode error: %v", err)
 				return
 			}
-
-			granulePos += uint64(frameSize)
-			if err := pw.WritePacket(opusPacket[:en], granulePos, false, false); err != nil {
-				return
-			}
-			pw.Flush()
 
 			if pace {
 				sentCount++

@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"io"
 	"math/rand"
 	"os"
 	"os/exec"
@@ -51,6 +52,7 @@ type Streamer struct {
 	mu     sync.RWMutex
 
 	fileCancel   context.CancelFunc
+	outputSession *AutoDJOutputSession
 	titleCache   map[string]string
 	titleFetchWg sync.WaitGroup
 
@@ -725,13 +727,34 @@ func (s *Streamer) MovePlaylistItem(from, to int) {
 
 func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 	logger.L.Infof("Streamer %s starting for mount %s", s.Name, s.OutputMount)
+	defer func() {
+		s.mu.Lock()
+		outputSession := s.outputSession
+		s.outputSession = nil
+		s.fileCancel = nil
+		s.mu.Unlock()
+		if outputSession != nil {
+			outputSession.Stop()
+		}
+	}()
 
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
-			if s.State != StatePlaying {
+			s.mu.RLock()
+			state := s.State
+			s.mu.RUnlock()
+			if state != StatePlaying {
+				s.mu.Lock()
+				outputSession := s.outputSession
+				s.outputSession = nil
+				s.fileCancel = nil
+				s.mu.Unlock()
+				if outputSession != nil {
+					outputSession.Stop()
+				}
 				select {
 				case <-ctx.Done():
 					return
@@ -741,72 +764,35 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			}
 
 			s.mu.Lock()
-			var filePath string
-			var fileID int
-
-			var filePos int
-			// 1. Check Queue first
-			if len(s.Queue) > 0 {
-				filePath = s.Queue[0]
-				s.Queue = s.Queue[1:]
-				fileID = -1 // Queue items don't have an ID from the playlist
-				filePos = -1
-			} else if s.SongCommand != "" {
-				// 2. External song command (unlock during exec to avoid blocking)
-				s.mu.Unlock()
-				if path, err := s.execSongCommand(); err == nil {
-					filePath = path
-					fileID = -1
-					filePos = -1
-				} else {
-					logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
+			if s.outputSession == nil {
+				outputSession, err := NewAutoDJOutputSession(s)
+				if err != nil {
+					s.mu.Unlock()
+					logger.L.Errorf("Streamer %s: failed to create output session: %v", s.Name, err)
+					time.Sleep(1 * time.Second)
+					continue
 				}
-				s.mu.Lock()
-				// If command failed, try playlist as fallback
-				if filePath == "" && len(s.Playlist) > 0 {
-					if s.Shuffle {
-						s.CurrentPos = rand.Intn(len(s.Playlist))
-					} else {
-						if s.CurrentPos >= len(s.Playlist) {
-							if s.Loop {
-								s.CurrentPos = 0
-							} else {
-								s.State = StateStopped
-								s.mu.Unlock()
-								continue
-							}
-						}
-					}
-					filePath = s.Playlist[s.CurrentPos].Path
-					fileID = s.Playlist[s.CurrentPos].ID
-					filePos = s.CurrentPos
-					if !s.Shuffle {
-						s.CurrentPos++
-					}
-				}
-			} else if len(s.Playlist) > 0 {
-				// 3. Normal playlist selection
-				if s.Shuffle {
-					s.CurrentPos = rand.Intn(len(s.Playlist))
-				} else {
-					if s.CurrentPos >= len(s.Playlist) {
-						if s.Loop {
-							s.CurrentPos = 0
-						} else {
-							s.State = StateStopped
-							s.mu.Unlock()
-							continue
-						}
-					}
-				}
-				filePath = s.Playlist[s.CurrentPos].Path
-				fileID = s.Playlist[s.CurrentPos].ID
-				filePos = s.CurrentPos
-				if !s.Shuffle {
-					s.CurrentPos++
-				}
+				s.outputSession = outputSession
 			}
+			outputSession := s.outputSession
 			s.mu.Unlock()
+
+			if err := outputSession.Start(ctx); err != nil {
+				logger.L.Errorf("Streamer %s: failed to start output session: %v", s.Name, err)
+				time.Sleep(1 * time.Second)
+				continue
+			}
+
+			filePath, filePos, fileID, ok := s.nextTrackCandidate()
+			if !ok {
+				outputSession.Stop()
+				s.mu.Lock()
+				s.outputSession = nil
+				s.fileCancel = nil
+				s.State = StateStopped
+				s.mu.Unlock()
+				continue
+			}
 
 			if filePath == "" {
 				time.Sleep(1 * time.Second)
@@ -818,24 +804,99 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 				continue
 			}
 
-			// Create a per-file context for skipping
+			outputSession.SetSource(silencePCMSource{})
+
 			fileCtx, fileCancel := context.WithCancel(ctx)
 			s.mu.Lock()
 			s.fileCancel = fileCancel
 			s.mu.Unlock()
 
-			err := sm.streamFile(fileCtx, s, filePath, filePos, fileID)
-			if err != nil && fileCtx.Err() == nil {
-				logger.L.Errorf("Streamer %s: Failed to stream %s: %v", s.Name, filePath, err)
+			source, err := sm.activateTrackSource(fileCtx, s, filePath, filePos, fileID)
+			if err != nil {
+				fileCancel()
+				s.mu.Lock()
+				s.fileCancel = nil
+				s.mu.Unlock()
+				logger.L.Errorf("Streamer %s: Failed to activate %s: %v", s.Name, filePath, err)
 				time.Sleep(1 * time.Second)
+				continue
 			}
 
+			select {
+			case <-ctx.Done():
+				fileCancel()
+				s.mu.Lock()
+				s.fileCancel = nil
+				s.mu.Unlock()
+				return
+			case <-s.stateCh:
+				s.mu.RLock()
+				stillPlaying := s.State == StatePlaying
+				s.mu.RUnlock()
+				if !stillPlaying {
+					fileCancel()
+					outputSession.SetSource(silencePCMSource{})
+				}
+			case <-source.Done():
+				outputSession.SetSource(silencePCMSource{})
+			}
+
+			fileCancel()
 			s.mu.Lock()
 			s.fileCancel = nil
-			fileCancel()
 			s.mu.Unlock()
 		}
 	}
+}
+
+func (s *Streamer) nextTrackCandidate() (string, int, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var filePath string
+	var fileID int
+	var filePos int
+
+	if len(s.Queue) > 0 {
+		filePath = s.Queue[0]
+		s.Queue = s.Queue[1:]
+		fileID = -1
+		filePos = -1
+		return filePath, filePos, fileID, true
+	}
+
+	if s.SongCommand != "" {
+		s.mu.Unlock()
+		path, err := s.execSongCommand()
+		s.mu.Lock()
+		if err == nil {
+			return path, -1, -1, true
+		}
+		logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
+	}
+
+	if len(s.Playlist) == 0 {
+		return "", 0, 0, false
+	}
+
+	if s.Shuffle {
+		s.CurrentPos = rand.Intn(len(s.Playlist))
+	} else if s.CurrentPos >= len(s.Playlist) {
+		if s.Loop {
+			s.CurrentPos = 0
+		} else {
+			return "", 0, 0, false
+		}
+	}
+
+	filePath = s.Playlist[s.CurrentPos].Path
+	fileID = s.Playlist[s.CurrentPos].ID
+	filePos = s.CurrentPos
+	if !s.Shuffle {
+		s.CurrentPos++
+	}
+
+	return filePath, filePos, fileID, true
 }
 
 func validateAudioFile(path string) error {
@@ -868,12 +929,70 @@ func validateAudioFile(path string) error {
 	return fmt.Errorf("unrecognized audio format (header: %x)", header[:4])
 }
 
-func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path string, pos, id int) error {
+type trackPCMSource struct {
+	ctx    context.Context
+	reader *pcmFrameReader
+	closer io.Closer
+	done   chan struct{}
+	once   sync.Once
+}
+
+func newTrackPCMSource(ctx context.Context, file *os.File, outputFormat string) (*trackPCMSource, int, time.Duration, error) {
+	decoder, err := mp3.NewDecoder(file)
+	if err != nil {
+		file.Close()
+		return nil, 0, 0, err
+	}
+
+	sampleRate := decoder.SampleRate()
+	frameSampleRate := 44100
+	samplesPerFrame := 1152
+	if outputFormat == "opus" {
+		frameSampleRate = 48000
+		samplesPerFrame = 960
+	}
+
+	duration := time.Duration(decoder.Length()) * time.Second / time.Duration(decoder.SampleRate()*4)
+	return &trackPCMSource{
+		ctx:    ctx,
+		reader: newPCMFrameReader(decoder, sampleRate, frameSampleRate, 2, samplesPerFrame),
+		closer: file,
+		done:   make(chan struct{}),
+	}, sampleRate, duration, nil
+}
+
+func (s *trackPCMSource) Done() <-chan struct{} { return s.done }
+
+func (s *trackPCMSource) Close() error {
+	s.once.Do(func() {
+		if s.closer != nil {
+			s.closer.Close()
+		}
+		close(s.done)
+	})
+	return nil
+}
+
+func (s *trackPCMSource) ReadFrame(dst []int16) (int, error) {
+	select {
+	case <-s.ctx.Done():
+		s.Close()
+		return 0, s.ctx.Err()
+	default:
+	}
+
+	n, err := s.reader.ReadFrame(dst)
+	if err != nil {
+		s.Close()
+	}
+	return n, err
+}
+
+func (sm *StreamerManager) activateTrackSource(ctx context.Context, s *Streamer, path string, pos, id int) (*trackPCMSource, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer f.Close()
 
 	// Extract metadata
 	songTitle := filepath.Base(path)
@@ -889,9 +1008,9 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	// Seek back to start after reading tags
 	f.Seek(0, 0)
 
-	decoder, err := mp3.NewDecoder(f)
+	source, sampleRate, duration, err := newTrackPCMSource(ctx, f, s.Format)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	s.mu.Lock()
@@ -910,28 +1029,22 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 			s.CurrentTitle = songTitle
 		}
 	}
-	s.CurrentSampleRate = decoder.SampleRate()
+	s.CurrentSampleRate = sampleRate
 	s.CurrentChannels = 2 // go-mp3 always outputs 2 channels
 	s.CurrentFileTime = time.Now()
-	s.CurrentFileDuration = time.Duration(decoder.Length()) * time.Second / time.Duration(decoder.SampleRate()*4)
+	s.CurrentFileDuration = duration
+	outputSession := s.outputSession
 	s.mu.Unlock()
 
-	// Update stream metadata
-	output := sm.relay.GetOrCreateStream(s.OutputMount)
 	if s.InjectMetadata {
-		output.Name = s.Name
-		output.Visible = true
 		sm.relay.UpdateMetadata(s.OutputMount, s.CurrentFile)
 	}
-	output.Bitrate = fmt.Sprintf("%d", s.Bitrate)
 
-	if s.Format == "opus" {
-		output.ContentType = "audio/ogg"
-		EncodeOpus(ctx, sm.relay, output, decoder, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate(), 2)
-	} else {
-		output.ContentType = "audio/mpeg"
-		EncodeMP3(ctx, sm.relay, output, decoder, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate())
+	if outputSession == nil {
+		source.Close()
+		return nil, fmt.Errorf("output session not initialized")
 	}
 
-	return nil
+	outputSession.SetSource(source)
+	return source, nil
 }
