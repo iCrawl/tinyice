@@ -413,8 +413,9 @@ paths:
                   example: /home/music
                 format:
                   type: string
-                  enum: [mp3, opus, ogg]
+                  enum: [mp3, opus]
                   default: mp3
+                  description: Output format. Use `opus` for Ogg/Opus streams.
                 bitrate:
                   type: integer
                   default: 128
@@ -1373,7 +1374,7 @@ paths:
       description: |
         Connect as a listener to receive the audio stream via HTTP.
         The server responds with a continuous audio stream in the format
-        configured for that mount (MP3, Opus, OGG).
+        configured for that mount (MP3 or Ogg/Opus).
       parameters:
         - name: mount
           in: path

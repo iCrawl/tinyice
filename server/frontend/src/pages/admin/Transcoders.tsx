@@ -155,7 +155,7 @@ export function Transcoders() {
                   class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
                 >
                   <option value="mp3">MP3</option>
-                  <option value="opus">Opus</option>
+                  <option value="opus">Ogg/Opus</option>
                 </select>
               </div>
               <div>
