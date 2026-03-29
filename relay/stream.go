@@ -7,6 +7,18 @@ import (
 	"time"
 )
 
+const (
+	healthBucketDuration = 30 * time.Second
+	healthWindow         = 10 * time.Minute
+	healthBucketCount    = 20
+)
+
+type healthBucket struct {
+	ts      time.Time
+	bytesIn int64
+	dropped int64
+}
+
 // Stream represents a single mount point (e.g., /stream, /live, /radio).
 //
 // A Stream is the fundamental unit of audio distribution in TinyIce. Each stream:
@@ -68,6 +80,8 @@ type Stream struct {
 	BytesOut     int64 // Total bytes sent to listeners
 	BytesDropped int64 // Track total bytes dropped due to slow listeners
 
+	healthBuckets [healthBucketCount]healthBucket
+
 	// Ogg/Opus specific state for proper synchronization
 	// These fields enable new listeners to start at proper page boundaries
 	OggHead         []byte  // Store Ogg headers for Opus/Ogg streams
@@ -79,8 +93,8 @@ type Stream struct {
 	// Core streaming infrastructure
 	Buffer    *CircularBuffer          // Audio data buffer (typically 2MB)
 	listeners map[string]chan struct{} // Signal channels for connected listeners
-	mu     sync.RWMutex             // Mutex protecting all fields
-	closed int32                    // Atomic flag: 1 = stream closed
+	mu        sync.RWMutex             // Mutex protecting all fields
+	closed    int32                    // Atomic flag: 1 = stream closed
 }
 
 // IsOgg returns true if the stream is Ogg-based (Ogg/Vorbis, Ogg/Opus, etc).
@@ -187,11 +201,13 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 	defer s.mu.Unlock()
 
 	// Update timestamp to track source activity
-	s.LastDataReceived = time.Now()
+	now := time.Now()
+	s.LastDataReceived = now
 
 	// Update Metrics (Incoming) - uses atomic for performance
 	atomic.AddInt64(&relay.BytesIn, int64(len(data)))
 	atomic.AddInt64(&s.BytesIn, int64(len(data)))
+	s.recordHealthInputLocked(int64(len(data)), now)
 
 	// Track Ogg Page boundaries for alignment
 	// This enables new Opus listeners to start at proper page boundaries
@@ -219,6 +235,68 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 			// Listener is already signaled or slow, skip
 		}
 	}
+}
+
+func (s *Stream) healthBucketLocked(now time.Time) *healthBucket {
+	start := now.Truncate(healthBucketDuration)
+	idx := int((start.UnixNano() / healthBucketDuration.Nanoseconds()) % int64(healthBucketCount))
+	bucket := &s.healthBuckets[idx]
+	if bucket.ts.IsZero() || !bucket.ts.Equal(start) {
+		*bucket = healthBucket{ts: start}
+	}
+	return bucket
+}
+
+func (s *Stream) recordHealthInputLocked(n int64, now time.Time) {
+	if n <= 0 {
+		return
+	}
+	s.healthBucketLocked(now).bytesIn += n
+}
+
+func (s *Stream) recordHealthDropLocked(n int64, now time.Time) {
+	if n <= 0 {
+		return
+	}
+	s.healthBucketLocked(now).dropped += n
+}
+
+func (s *Stream) recordHealthInputAt(n int64, now time.Time) {
+	if n <= 0 {
+		return
+	}
+	atomic.AddInt64(&s.BytesIn, n)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordHealthInputLocked(n, now)
+}
+
+func (s *Stream) recordHealthDropAt(n int64, now time.Time) {
+	if n <= 0 {
+		return
+	}
+	atomic.AddInt64(&s.BytesDropped, n)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.recordHealthDropLocked(n, now)
+}
+
+func (s *Stream) RecordDroppedBytes(n int64) {
+	s.recordHealthDropAt(n, time.Now())
+}
+
+func (s *Stream) healthTotalsLocked(now time.Time) (int64, int64) {
+	cutoff := now.Add(-healthWindow)
+	var recentIn int64
+	var recentDropped int64
+	for _, bucket := range s.healthBuckets {
+		if bucket.ts.IsZero() || bucket.ts.Before(cutoff) {
+			continue
+		}
+		recentIn += bucket.bytesIn
+		recentDropped += bucket.dropped
+	}
+	return recentIn, recentDropped
 }
 
 // Subscribe adds a listener and returns its starting offset and a signal channel.

@@ -51,3 +51,32 @@ func TestHealthMonitorDetectsStateChange(t *testing.T) {
 		t.Fatalf("expected Degraded, got %v", gotEvent.NewStatus)
 	}
 }
+
+func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/health-window")
+
+	base := time.Unix(1_000, 0)
+	s.Started = base
+	s.LastDataReceived = base
+
+	s.recordHealthInputAt(1000, base)
+	s.recordHealthDropAt(200, base)
+
+	degraded := s.snapshotAt(base)
+	if degraded.Health >= 100 {
+		t.Fatalf("expected degraded health after recent drop, got %.2f", degraded.Health)
+	}
+
+	recoveredAt := base.Add(healthWindow + time.Second)
+	s.LastDataReceived = recoveredAt
+	s.recordHealthInputAt(1000, recoveredAt)
+
+	recovered := s.snapshotAt(recoveredAt)
+	if recovered.Health != 100 {
+		t.Fatalf("expected health to recover to 100 after stale drops age out, got %.2f", recovered.Health)
+	}
+	if recovered.BytesDropped != 200 {
+		t.Fatalf("expected lifetime dropped bytes to remain separate from rolling health, got %d", recovered.BytesDropped)
+	}
+}

@@ -32,6 +32,10 @@ type StreamStats struct {
 
 // Snapshot returns a point-in-time copy of the stream's state
 func (s *Stream) Snapshot() StreamStats {
+	return s.snapshotAt(time.Now())
+}
+
+func (s *Stream) snapshotAt(now time.Time) StreamStats {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -39,22 +43,23 @@ func (s *Stream) Snapshot() StreamStats {
 	bd := atomic.LoadInt64(&s.BytesDropped)
 
 	// Health calculation
-	// 1. Loss-based health
+	// 1. Loss-based health from recent traffic
 	health := 100.0
-	total := bi + bd
+	recentIn, recentDropped := s.healthTotalsLocked(now)
+	total := recentIn + recentDropped
 	if total > 0 {
-		health = (float64(bi) / float64(total)) * 100.0
+		health = (float64(recentIn) / float64(total)) * 100.0
 	}
 
 	// 2. Source Stall Penalty (User Request)
 	// If we haven't received data for more than 5 seconds, health starts dropping
 	if !s.LastDataReceived.IsZero() {
-		silence := time.Since(s.LastDataReceived)
+		silence := now.Sub(s.LastDataReceived)
 		if silence > 5*time.Second {
 			penalty := float64(silence/time.Second) * 2.0 // 2% per second of silence
 			health -= penalty
 		}
-	} else if time.Since(s.Started) > 10*time.Second {
+	} else if now.Sub(s.Started) > 10*time.Second {
 		// Never received data and stream started > 10s ago
 		health = 0
 	}

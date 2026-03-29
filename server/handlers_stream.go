@@ -378,7 +378,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 					break
 				}
 				if skipped {
-					atomic.AddInt64(&stream.BytesDropped, next-offset)
+					stream.RecordDroppedBytes(next - offset)
 					consecutiveSkips++
 					if consecutiveSkips >= maxConsecutiveSkips {
 						logger.L.Warnw("Slow listener disconnected",
