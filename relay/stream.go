@@ -122,6 +122,12 @@ func (s *Stream) IsOgg() bool {
 	return strings.Contains(ct, "ogg") || strings.Contains(ct, "opus")
 }
 
+func (s *Stream) LastDataAt() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastDataReceived
+}
+
 // Close closes all listeners on the stream and cleans up resources.
 //
 // This method should be called when a stream is being removed or when the source

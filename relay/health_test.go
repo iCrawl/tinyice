@@ -52,6 +52,26 @@ func TestHealthMonitorDetectsStateChange(t *testing.T) {
 	}
 }
 
+func TestHealthMonitorEmitsDeadEvent(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/dead")
+	s.LastDataReceived = time.Now().Add(-time.Minute)
+
+	hm := NewHealthMonitor(r)
+	var gotEvent *StreamHealthEvent
+	hm.OnEvent(func(e StreamHealthEvent) {
+		if e.NewStatus == StatusDead {
+			gotEvent = &e
+		}
+	})
+
+	hm.check()
+
+	if gotEvent == nil {
+		t.Fatal("expected dead health event")
+	}
+}
+
 func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/health-window")

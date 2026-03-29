@@ -100,6 +100,8 @@ type Server struct {
 
 	tokenSaveTimer *time.Timer
 	tokenSaveMu    sync.Mutex
+
+	deadStreamRecovery func(string)
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
@@ -145,13 +147,6 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 	})
 
 	healthM := relay.NewHealthMonitor(r)
-	healthM.OnEvent(func(e relay.StreamHealthEvent) {
-		logger.L.Infow("Stream health event",
-			"mount", e.Mount,
-			"old_status", e.OldStatus.String(),
-			"new_status", e.NewStatus.String(),
-		)
-	})
 	hlsCtx, hlsCancel := context.WithCancel(context.Background())
 	srv := &Server{
 		Config:       cfg,
@@ -181,11 +176,24 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		webAuthn:         wa,
 		webauthnSessions: make(map[string]*webauthn.SessionData),
 	}
+	srv.deadStreamRecovery = srv.StreamerM.RecoverDeadSongCommandMount
+	healthM.OnEvent(srv.handleStreamHealthEvent)
 
 	// Ensure default tenant exists for backward compatibility
 	srv.TenantM.GetOrCreateDefaultTenant()
 
 	return srv
+}
+
+func (s *Server) handleStreamHealthEvent(e relay.StreamHealthEvent) {
+	logger.L.Infow("Stream health event",
+		"mount", e.Mount,
+		"old_status", e.OldStatus.String(),
+		"new_status", e.NewStatus.String(),
+	)
+	if e.NewStatus == relay.StatusDead && s.deadStreamRecovery != nil {
+		s.deadStreamRecovery(e.Mount)
+	}
 }
 
 func (s *Server) setupRoutes() *http.ServeMux {

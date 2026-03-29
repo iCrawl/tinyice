@@ -81,13 +81,112 @@ type StreamerManager struct {
 	mu        sync.RWMutex
 	relay     *Relay
 	config    *config.Config
+
+	deadRecovery map[string]context.CancelFunc
+
+	recoveryExecSongCommand func(*Streamer) (string, error)
+	recoveryAfter           func(time.Duration) <-chan time.Time
+	recoveryActivatePath    func(context.Context, *StreamerManager, *Streamer, string) error
 }
 
 func NewStreamerManager(r *Relay, cfg *config.Config) *StreamerManager {
-	return &StreamerManager{
-		instances: make(map[string]*Streamer),
-		relay:     r,
-		config:    cfg,
+	sm := &StreamerManager{
+		instances:    make(map[string]*Streamer),
+		relay:        r,
+		config:       cfg,
+		deadRecovery: make(map[string]context.CancelFunc),
+	}
+	sm.recoveryExecSongCommand = func(s *Streamer) (string, error) { return s.execSongCommand() }
+	sm.recoveryAfter = time.After
+	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
+		return sm.activateRecoveredSongCommandPath(ctx, s, path)
+	}
+	return sm
+}
+
+func (sm *StreamerManager) DeadRecoveryActive(mount string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	_, ok := sm.deadRecovery[mount]
+	return ok
+}
+
+func (sm *StreamerManager) RecoverDeadSongCommandMount(mount string) {
+	sm.mu.Lock()
+	streamer, ok := sm.instances[mount]
+	if !ok || streamer.SongCommand == "" {
+		sm.mu.Unlock()
+		return
+	}
+	if _, running := sm.deadRecovery[mount]; running {
+		sm.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sm.deadRecovery[mount] = cancel
+	sm.mu.Unlock()
+
+	go sm.runDeadSongCommandRecovery(ctx, streamer)
+}
+
+func (sm *StreamerManager) clearDeadRecovery(mount string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.deadRecovery, mount)
+}
+
+func (sm *StreamerManager) streamerEligibleForDeadRecovery(s *Streamer) bool {
+	if s == nil || s.SongCommand == "" {
+		return false
+	}
+
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.State == StatePlaying
+}
+
+func (sm *StreamerManager) mountHasFreshData(mount string) bool {
+	stream, ok := sm.relay.GetStream(mount)
+	if !ok {
+		return false
+	}
+	last := stream.LastDataAt()
+	return !last.IsZero() && time.Since(last) <= 5*time.Second
+}
+
+func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *Streamer) {
+	defer sm.clearDeadRecovery(s.OutputMount)
+
+	bo := &backoff{base: 1 * time.Second, max: 60 * time.Second}
+	select {
+	case <-ctx.Done():
+		return
+	default:
+	}
+
+	for {
+		if !sm.streamerEligibleForDeadRecovery(s) || sm.mountHasFreshData(s.OutputMount) {
+			return
+		}
+		if sm.recoveryExecSongCommand == nil {
+			return
+		}
+
+		path, err := sm.recoveryExecSongCommand(s)
+		if err == nil && sm.recoveryActivatePath != nil {
+			err = sm.recoveryActivatePath(ctx, sm, s, path)
+		}
+		if err == nil && sm.mountHasFreshData(s.OutputMount) {
+			return
+		}
+
+		delay := bo.next()
+		select {
+		case <-ctx.Done():
+			return
+		case <-sm.recoveryAfter(delay):
+		}
 	}
 }
 
@@ -669,6 +768,11 @@ func (sm *StreamerManager) StopStreamer(mount string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 
+	if cancel, ok := sm.deadRecovery[mount]; ok {
+		cancel()
+		delete(sm.deadRecovery, mount)
+	}
+
 	if s, ok := sm.instances[mount]; ok {
 		if s.MPDServer != nil {
 			logger.L.Debugf("AutoDJ %s: Stopping MPD server", s.Name)
@@ -683,6 +787,11 @@ func (sm *StreamerManager) StopStreamer(mount string) {
 func (sm *StreamerManager) RemoveStreamer(mount string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
+
+	if cancel, ok := sm.deadRecovery[mount]; ok {
+		cancel()
+		delete(sm.deadRecovery, mount)
+	}
 
 	if s, ok := sm.instances[mount]; ok {
 		if s.MPDServer != nil {
@@ -1047,4 +1156,32 @@ func (sm *StreamerManager) activateTrackSource(ctx context.Context, s *Streamer,
 
 	outputSession.SetSource(source)
 	return source, nil
+}
+
+func (sm *StreamerManager) activateRecoveredSongCommandPath(ctx context.Context, s *Streamer, path string) error {
+	if err := sm.ensureOutputSession(ctx, s); err != nil {
+		return err
+	}
+	_, err := sm.activateTrackSource(ctx, s, path, -1, -1)
+	return err
+}
+
+func (sm *StreamerManager) ensureOutputSession(ctx context.Context, s *Streamer) error {
+	if !sm.streamerEligibleForDeadRecovery(s) {
+		return fmt.Errorf("streamer is not in a recoverable playing state")
+	}
+
+	s.mu.Lock()
+	if s.outputSession == nil {
+		outputSession, err := NewAutoDJOutputSession(s)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.outputSession = outputSession
+	}
+	outputSession := s.outputSession
+	s.mu.Unlock()
+
+	return outputSession.Start(ctx)
 }
