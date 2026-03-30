@@ -17,11 +17,18 @@ import (
 
 // RTMPServer accepts RTMP publish connections and feeds audio data into TinyIce streams.
 type RTMPServer struct {
-	relay    *Relay
-	config   *config.Config
-	listener net.Listener
-	server   *rtmp.Server
-	mu       sync.Mutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
+	listener        net.Listener
+	server          *rtmp.Server
+	mu              sync.Mutex
+}
+
+func (rs *RTMPServer) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.runtimeRegistry = rr
 }
 
 // NewRTMPServer creates a new RTMP ingest server.
@@ -51,9 +58,10 @@ func (rs *RTMPServer) Start() error {
 	rs.server = rtmp.NewServer(&rtmp.ServerConfig{
 		OnConnect: func(conn net.Conn) (io.ReadWriteCloser, *rtmp.ConnConfig) {
 			h := &rtmpHandler{
-				relay:  rs.relay,
-				config: rs.config,
-				conn:   conn,
+				relay:           rs.relay,
+				runtimeRegistry: rs.runtimeRegistry,
+				config:          rs.config,
+				conn:            conn,
 			}
 			return conn, &rtmp.ConnConfig{
 				Handler: h,
@@ -94,12 +102,13 @@ func (rs *RTMPServer) Stop() {
 // rtmpHandler handles a single RTMP connection.
 type rtmpHandler struct {
 	rtmp.DefaultHandler
-	relay   *Relay
-	config  *config.Config
-	conn    net.Conn
-	mount   string
-	stream  *Stream
-	started time.Time
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
+	conn            net.Conn
+	mount           string
+	stream          *Stream
+	started         time.Time
 
 	// Video support
 	videoStream *Stream // separate video stream
@@ -149,6 +158,11 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 
 	h.mount = mount
 	h.stream = h.relay.GetOrCreateStream(mount)
+	if h.runtimeRegistry != nil {
+		rt := h.runtimeRegistry.GetOrCreate(mount)
+		rt.Stream = h.stream
+		h.runtimeRegistry.AttachSource(mount, SourceRTMP, "default")
+	}
 	h.stream.SourceIP = h.conn.RemoteAddr().String()
 	h.stream.ContentType = "audio/mpeg" // default, may be updated on first audio data
 	h.started = time.Now()
@@ -317,6 +331,9 @@ func (h *rtmpHandler) OnClose() {
 			"duration", time.Since(h.started),
 		)
 		h.relay.RemoveStream(h.mount)
+		if h.runtimeRegistry != nil {
+			h.runtimeRegistry.Remove(h.mount)
+		}
 	}
 	if h.videoMount != "" {
 		h.relay.RemoveStream(h.videoMount)

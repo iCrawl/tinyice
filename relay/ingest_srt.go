@@ -15,12 +15,19 @@ import (
 // SRTServer accepts SRT connections and feeds audio data into TinyIce streams.
 // It uses the pure-Go gosrt library (no CGO required).
 type SRTServer struct {
-	relay    *Relay
-	config   *config.Config
-	server   *srt.Server
-	mountMap sync.Map // socket ID -> srtConnInfo
-	mu       sync.Mutex
-	running  bool
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
+	server          *srt.Server
+	mountMap        sync.Map // socket ID -> srtConnInfo
+	mu              sync.Mutex
+	running         bool
+}
+
+func (ss *SRTServer) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.runtimeRegistry = rr
 }
 
 // srtConnInfo holds connection metadata established during HandleConnect.
@@ -165,6 +172,11 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	mount := info.mount
 
 	stream := ss.relay.GetOrCreateStream(mount)
+	if ss.runtimeRegistry != nil {
+		rt := ss.runtimeRegistry.GetOrCreate(mount)
+		rt.Stream = stream
+		ss.runtimeRegistry.AttachSource(mount, SourceSRT, "default")
+	}
 	stream.SourceIP = remoteAddr.String()
 	stream.ContentType = "audio/mpeg" // default for MPEG-TS with MP3
 
@@ -201,6 +213,9 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 		"remote", remoteAddr,
 		"duration", time.Since(started),
 	)
+	if ss.runtimeRegistry != nil {
+		ss.runtimeRegistry.Remove(mount)
+	}
 	ss.relay.RemoveStream(mount)
 }
 

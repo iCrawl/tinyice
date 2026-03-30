@@ -62,3 +62,30 @@ func TestAutoDJOutputSessionDoesNotPublishMetadataForSilence(t *testing.T) {
 	case <-time.After(200 * time.Millisecond):
 	}
 }
+
+func TestAutoDJOutputSessionRegistersMountRuntime(t *testing.T) {
+	r := NewRelay(false, nil)
+	rr := NewRuntimeRegistry(r)
+	streamer := &Streamer{
+		Name:            "Gap Filler",
+		OutputMount:     "/gap",
+		Format:          "mp3",
+		Bitrate:         64,
+		relay:           r,
+		runtimeRegistry: rr,
+	}
+
+	session, err := NewAutoDJOutputSession(streamer)
+	if err != nil {
+		t.Fatalf("NewAutoDJOutputSession: %v", err)
+	}
+	defer session.Stop()
+
+	rt, ok := rr.Get("/gap")
+	if !ok {
+		t.Fatal("expected mount runtime registration")
+	}
+	if rt.Source != SourceAutoDJ {
+		t.Fatalf("expected autodj source, got %q", rt.Source)
+	}
+}

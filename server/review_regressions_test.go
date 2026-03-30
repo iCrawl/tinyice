@@ -1,11 +1,13 @@
 package server
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -55,17 +57,157 @@ func newTestServer(t *testing.T) *Server {
 	}
 
 	r := relay.NewRelay(false, hm)
+	rr := relay.NewRuntimeRegistry(r)
+	tm := relay.NewTenantManager()
+	tm.GetOrCreateDefaultTenant()
+	rr.SetTenantManager(tm)
+	sm := relay.NewStreamerManager(r, cfg)
+	sm.SetRuntimeRegistry(rr)
 
 	return &Server{
-		Config:       cfg,
-		Relay:        r,
-		StreamerM:    relay.NewStreamerManager(r, cfg),
-		shell:        NewShellRenderer(),
-		sessions:     make(map[string]*session),
-		authAttempts: make(map[string]*authAttempt),
-		scanAttempts: make(map[string]*scanAttempt),
-		startTime:    time.Now(),
-		done:         make(chan struct{}),
+		Config:          cfg,
+		Relay:           r,
+		RuntimeRegistry: rr,
+		StreamerM:       sm,
+		TenantM:         tm,
+		shell:           NewShellRenderer(),
+		sessions:        make(map[string]*session),
+		authAttempts:    make(map[string]*authAttempt),
+		scanAttempts:    make(map[string]*scanAttempt),
+		startTime:       time.Now(),
+		done:            make(chan struct{}),
+	}
+}
+
+type sourceHijackRecorder struct {
+	serverConn net.Conn
+	clientConn net.Conn
+	header     http.Header
+}
+
+func newSourceHijackRecorder(t *testing.T) *sourceHijackRecorder {
+	t.Helper()
+
+	serverConn, clientConn := net.Pipe()
+	go func() {
+		_, _ = io.Copy(io.Discard, clientConn)
+	}()
+	return &sourceHijackRecorder{
+		serverConn: serverConn,
+		clientConn: clientConn,
+		header:     make(http.Header),
+	}
+}
+
+func (r *sourceHijackRecorder) Header() http.Header         { return r.header }
+func (r *sourceHijackRecorder) WriteHeader(statusCode int)  {}
+func (r *sourceHijackRecorder) Write(p []byte) (int, error) { return len(p), nil }
+
+func (r *sourceHijackRecorder) Hijack() (net.Conn, *bufio.ReadWriter, error) {
+	return r.serverConn, bufio.NewReadWriter(bufio.NewReader(r.serverConn), bufio.NewWriter(r.serverConn)), nil
+}
+
+func (r *sourceHijackRecorder) CloseClient() error {
+	return r.clientConn.Close()
+}
+
+func assertEventually(t *testing.T, fn func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if fn() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	t.Fatal("condition was not satisfied before timeout")
+}
+
+func TestNewServerInitializesRuntimeRegistry(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "tinyice.json")
+	cfg := &config.Config{
+		ConfigPath:     cfgPath,
+		SetupComplete:  true,
+		Mounts:         map[string]string{},
+		AdvancedMounts: map[string]*config.MountSettings{},
+		VisibleMounts:  map[string]bool{},
+	}
+	if err := os.WriteFile(cfgPath, []byte("{}"), 0600); err != nil {
+		t.Fatalf("seed config file: %v", err)
+	}
+
+	s := NewServer(cfg, zap.NewNop().Sugar(), "test", "test", "")
+	if s.RuntimeRegistry == nil {
+		t.Fatal("expected runtime registry to be initialized")
+	}
+	if s.RuntimeRegistry.GetOrCreate("/live").Stream != s.Relay.GetOrCreateStream("/live") {
+		t.Fatal("expected runtime registry to wrap the live relay streams")
+	}
+}
+
+func TestHandleSourceRegistersIcecastMountRuntime(t *testing.T) {
+	s := newTestServer(t)
+	pass, err := config.HashPassword("sourcepass")
+	if err != nil {
+		t.Fatalf("hash source password: %v", err)
+	}
+	s.Config.DefaultSourcePassword = pass
+
+	req := httptest.NewRequest(http.MethodPut, "/live", nil)
+	req.RemoteAddr = "127.0.0.1:9002"
+	req.SetBasicAuth("source", "sourcepass")
+
+	rec := newSourceHijackRecorder(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleSource(rec, req)
+	}()
+
+	assertEventually(t, func() bool {
+		rt, ok := s.RuntimeRegistry.Get("/live")
+		return ok && rt.Source == relay.SourceIcecast
+	})
+
+	if err := rec.CloseClient(); err != nil {
+		t.Fatalf("close source client: %v", err)
+	}
+	<-done
+}
+
+func TestHandleSourceRemovesRuntimeOnDisconnect(t *testing.T) {
+	s := newTestServer(t)
+	pass, err := config.HashPassword("sourcepass")
+	if err != nil {
+		t.Fatalf("hash source password: %v", err)
+	}
+	s.Config.DefaultSourcePassword = pass
+
+	req := httptest.NewRequest(http.MethodPut, "/live", nil)
+	req.RemoteAddr = "127.0.0.1:9003"
+	req.SetBasicAuth("source", "sourcepass")
+
+	rec := newSourceHijackRecorder(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleSource(rec, req)
+	}()
+
+	assertEventually(t, func() bool {
+		_, ok := s.Relay.GetStream("/live")
+		return ok
+	})
+
+	if err := rec.CloseClient(); err != nil {
+		t.Fatalf("close source client: %v", err)
+	}
+	<-done
+
+	if _, ok := s.RuntimeRegistry.Get("/live"); ok {
+		t.Fatal("expected runtime to be removed when source disconnects")
 	}
 }
 
@@ -454,6 +596,65 @@ func TestRegisterHLSRejectsOpusStreams(t *testing.T) {
 	}
 	if got := s.getHLSOutput("/opus"); got != nil {
 		t.Fatal("expected no stored HLS output for opus stream")
+	}
+}
+
+func TestRegisterHLSRegistersRuntimeOutput(t *testing.T) {
+	s := newTestServer(t)
+	s.hlsOutputs = make(map[string]*relay.HLSOutput)
+	s.hlsCtx, s.hlsCancel = context.WithCancel(context.Background())
+	defer s.hlsCancel()
+
+	stream := s.Relay.GetOrCreateStream("/live")
+	stream.ContentType = "audio/mpeg"
+	s.RuntimeRegistry.GetOrCreate("/live").Stream = stream
+
+	hls := s.RegisterHLS("/live")
+	if hls == nil {
+		t.Fatal("expected hls output")
+	}
+
+	rt, ok := s.RuntimeRegistry.Get("/live")
+	if !ok {
+		t.Fatal("expected runtime for /live")
+	}
+	if _, ok := rt.Outputs[relay.OutputHLS]; !ok {
+		t.Fatal("expected hls output registration")
+	}
+
+	s.UnregisterHLS("/live")
+	if _, ok := rt.Outputs[relay.OutputHLS]; ok {
+		t.Fatal("expected hls output registration to be removed")
+	}
+}
+
+func TestRuntimeRegistryDoesNotChangeRelaySnapshotShape(t *testing.T) {
+	s := newTestServer(t)
+	stream := s.Relay.GetOrCreateStream("/live")
+	stream.SetCurrentSong("test song", s.Relay)
+	s.RuntimeRegistry.AttachSource("/live", relay.SourceIcecast, "default")
+
+	stats := s.Relay.Snapshot()
+	if len(stats) != 1 {
+		t.Fatalf("expected 1 stream snapshot, got %d", len(stats))
+	}
+	if stats[0].MountName != "/live" {
+		t.Fatalf("expected /live snapshot, got %q", stats[0].MountName)
+	}
+}
+
+func TestRuntimeForMountReturnsAdminMetadataWithoutChangingEvents(t *testing.T) {
+	s := newTestServer(t)
+	stream := s.Relay.GetOrCreateStream("/live")
+	s.RuntimeRegistry.GetOrCreate("/live").Stream = stream
+	s.RuntimeRegistry.AttachSource("/live", relay.SourceAutoDJ, "default")
+
+	rt, ok := s.runtimeForMount("/live")
+	if !ok {
+		t.Fatal("expected runtime metadata for /live")
+	}
+	if rt.Source != relay.SourceAutoDJ {
+		t.Fatalf("expected autodj source, got %q", rt.Source)
 	}
 }
 

@@ -38,6 +38,9 @@ func TestWebRTCCleanupRecordsSourceDisconnectDiagnostic(t *testing.T) {
 	})
 
 	wm := NewWebRTCManager(r)
+	rr := NewRuntimeRegistry(r)
+	rr.AttachSource("/webrtc", SourceWebRTC, "default")
+	wm.SetRuntimeRegistry(rr)
 	wm.cleanupSource("/webrtc", nil)
 
 	current, ok := r.Diagnostics.Current("/webrtc")
@@ -46,5 +49,8 @@ func TestWebRTCCleanupRecordsSourceDisconnectDiagnostic(t *testing.T) {
 	}
 	if current.Class != DiagnosticClassSourceDisconnect {
 		t.Fatalf("expected source_disconnect class, got %q", current.Class)
+	}
+	if _, ok := rr.Get("/webrtc"); ok {
+		t.Fatal("expected runtime registry entry to be removed")
 	}
 }

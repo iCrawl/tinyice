@@ -17,7 +17,8 @@ The heart of TinyIce is the **Relay**. It manages the lifecycle of streams (`rel
     *   **Global Lock:** `Relay` uses a `sync.RWMutex` to manage the map of streams.
     *   **Stream Lock:** Each `Stream` has its own `sync.RWMutex` to protect metadata and listener maps.
     *   **Atomic Stats:** Bandwidth (`BytesIn`, `BytesOut`) is tracked via `sync/atomic` for performance.
-*   **Current Runtime Boundary:** `Relay` and `Stream` remain the production runtime abstraction. The newer pipeline types in `relay/pipeline.go` are retained as internal groundwork for future tenant-aware or multi-track work, but the server does not route normal runtime traffic through `PipelineManager` today.
+*   **Current Runtime Boundary:** `Relay` and `Stream` remain the live audio data plane. `RuntimeRegistry` is the control-plane layer for per-mount ownership metadata such as source kind, tenant association, and registered outputs.
+*   **Experimental Boundary:** The older pipeline types in `relay/pipeline.go` and `relay/pipeline_manager.go` are retained for experiments and tests, but they are not the recommended direction for TinyIce's current audio-first runtime.
 
 ### B. AutoDJ & Streamer (`relay/streamer.go`)
 The **Streamer** is an internal audio source that behaves like an external source client.
@@ -69,6 +70,7 @@ tinyice/
 │   ├── io.go               # Reusable I/O components (StreamWriter, StreamReader).
 │   ├── interfaces.go       # Core interfaces for better abstraction and testability.
 │   ├── relay.go            # Core Relay management and stream coordination.
+│   ├── mount_runtime.go    # Audio-first mount lifecycle registry and metadata.
 │   ├── pipeline*.go        # Experimental pipeline groundwork; not the primary runtime path.
 │   ├── streamer.go         # AutoDJ logic (playlist, queue, playback loop).
 │   ├── transcode.go        # Native MP3/Opus encoding logic.

@@ -19,11 +19,11 @@ type Tenant struct {
 	CreatedAt time.Time    `json:"created_at"`
 
 	// Runtime state (not persisted in JSON config).
-	// Tenant-owned pipelines are retained for isolation and future evolution,
-	// but the production server still routes listener/source traffic through Relay.
-	pipelines map[string]*Pipeline
-	stats     TenantStats
-	mu        sync.RWMutex
+	// Live mounts represent the audio-first runtime ownership model used by the
+	// current server.
+	mounts map[string]struct{}
+	stats  TenantStats
+	mu     sync.RWMutex
 }
 
 // TenantLimits defines resource limits for a tenant.
@@ -110,7 +110,19 @@ func (t *Tenant) UpdateListenerCount(delta int32) {
 func (t *Tenant) StreamCount() int {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
-	return len(t.pipelines)
+	return len(t.mounts)
+}
+
+func (t *Tenant) AttachMount(mount string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.mounts[mount] = struct{}{}
+}
+
+func (t *Tenant) DetachMount(mount string) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	delete(t.mounts, mount)
 }
 
 // CanCreateStream checks if the tenant can create another stream.
@@ -241,7 +253,7 @@ func (tm *TenantManager) CreateTenant(id, name, plan string) *Tenant {
 		Limits:    PlanLimits(plan),
 		Config:    TenantConfig{SourcePasswords: make(map[string]string)},
 		CreatedAt: time.Now(),
-		pipelines: make(map[string]*Pipeline),
+		mounts:    make(map[string]struct{}),
 	}
 	tm.tenants[id] = t
 	return t
@@ -318,7 +330,7 @@ func (tm *TenantManager) GetOrCreateDefaultTenant() *Tenant {
 		Limits:    DefaultTenantLimits(),
 		Config:    TenantConfig{SourcePasswords: make(map[string]string)},
 		CreatedAt: time.Now(),
-		pipelines: make(map[string]*Pipeline),
+		mounts:    make(map[string]struct{}),
 	}
 	tm.tenants["default"] = t
 	return t

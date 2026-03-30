@@ -50,23 +50,24 @@ var assetFS embed.FS
 // multiple goroutines concurrently, so all handler methods must be safe
 // for concurrent access.
 type Server struct {
-	Config      *config.Config           // Application configuration
-	Relay       *relay.Relay             // Core relay/streaming engine
-	RelayM      *relay.RelayManager      // Relay stream management
-	TranscoderM *relay.TranscoderManager // Transcoding management
-	HealthM     *relay.HealthMonitor     // Stream health monitoring
-	WebRTCM     *relay.WebRTCManager     // WebRTC connection management
-	StreamerM   *relay.StreamerManager   // AutoDJ/streamer management
-	RTMP        *relay.RTMPServer        // RTMP ingest server (optional)
-	SRT         *relay.SRTServer         // SRT ingest server (optional)
-	TenantM     *relay.TenantManager     // Multi-tenant management
-	mpdServer   *relay.MPDServer         // MPD protocol server (optional)
-	shell       *ShellRenderer           // New Preact frontend renderer
-	Version     string                   // TinyIce version
-	Commit      string                   // Git commit hash
-	httpServers []*http.Server           // Active HTTP servers
-	startTime   time.Time                // Server start time
-	AuthLog     *zap.SugaredLogger
+	Config          *config.Config           // Application configuration
+	Relay           *relay.Relay             // Core relay/streaming engine
+	RuntimeRegistry *relay.RuntimeRegistry   // Audio-first mount lifecycle registry
+	RelayM          *relay.RelayManager      // Relay stream management
+	TranscoderM     *relay.TranscoderManager // Transcoding management
+	HealthM         *relay.HealthMonitor     // Stream health monitoring
+	WebRTCM         *relay.WebRTCManager     // WebRTC connection management
+	StreamerM       *relay.StreamerManager   // AutoDJ/streamer management
+	RTMP            *relay.RTMPServer        // RTMP ingest server (optional)
+	SRT             *relay.SRTServer         // SRT ingest server (optional)
+	TenantM         *relay.TenantManager     // Multi-tenant management
+	mpdServer       *relay.MPDServer         // MPD protocol server (optional)
+	shell           *ShellRenderer           // New Preact frontend renderer
+	Version         string                   // TinyIce version
+	Commit          string                   // Git commit hash
+	httpServers     []*http.Server           // Active HTTP servers
+	startTime       time.Time                // Server start time
+	AuthLog         *zap.SugaredLogger
 
 	sessions   map[string]*session
 	sessionsMu sync.RWMutex
@@ -141,6 +142,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 	srv := &Server{
 		Config:           cfg,
 		Relay:            r,
+		RuntimeRegistry:  relay.NewRuntimeRegistry(r),
 		HealthM:          healthM,
 		RelayM:           relay.NewRelayManager(r),
 		TranscoderM:      relay.NewTranscoderManager(r),
@@ -166,6 +168,12 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		webauthnSessions: make(map[string]*webauthn.SessionData),
 	}
 	srv.deadStreamRecovery = srv.StreamerM.RecoverDeadSongCommandMount
+	srv.RuntimeRegistry.SetTenantManager(srv.TenantM)
+	srv.StreamerM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.RelayM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.WebRTCM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.RTMP.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.SRT.SetRuntimeRegistry(srv.RuntimeRegistry)
 	healthM.OnEvent(srv.handleStreamHealthEvent)
 
 	// Ensure default tenant exists for backward compatibility

@@ -9,8 +9,9 @@ import (
 // PipelineManager manages experimental Pipeline instances while delegating the
 // actual production runtime path to Relay.
 //
-// It exists to keep pipeline groundwork isolated and backward-compatible
-// without implying that the server has migrated away from Relay.
+// TinyIce's active audio-first runtime uses RuntimeRegistry plus Relay instead.
+// PipelineManager is retained for experiments and tests; it is not the
+// recommended runtime direction for the current server.
 type PipelineManager struct {
 	relay     *Relay
 	pipelines map[string]*Pipeline // key is mount

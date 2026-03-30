@@ -171,7 +171,16 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		"name":  r.Header.Get("Ice-Name"),
 	})
 
+	tenantID := "default"
+	if tenant := TenantFromContext(r.Context()); tenant != nil {
+		tenantID = tenant.ID
+	}
+
 	stream := s.Relay.GetOrCreateStream(mount)
+	rt := s.RuntimeRegistry.GetOrCreate(mount)
+	rt.Stream = stream
+	s.RuntimeRegistry.AttachSource(mount, relay.SourceIcecast, tenantID)
+	defer s.RuntimeRegistry.Remove(mount)
 	stream.SourceIP = r.RemoteAddr
 
 	s.updateSourceMetadata(stream, mount, r)
@@ -350,20 +359,21 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "Server Full", http.StatusServiceUnavailable)
 				return
 			}
-			listener.RequestedMount = requestedMount
-			listener.CurrentMount = mount
+			listener.SetRequestedMount(requestedMount)
+			listener.SetCurrentMount(mount)
 			s.Relay.Listeners.Register(listener)
 			registered = true
-		} else if listener.CurrentMount != mount {
+		} else if listener.CurrentMountName() != mount {
+			currentMount := listener.CurrentMountName()
 			if limit > 0 && s.Relay.Listeners.CountForMount(mount) >= limit {
-				logger.L.Warnw("Listener move rejected by mount cap", "id", listener.ID, "from", listener.CurrentMount, "to", mount)
-				mount = listener.CurrentMount
+				logger.L.Warnw("Listener move rejected by mount cap", "id", listener.ID, "from", currentMount, "to", mount)
+				mount = currentMount
 				continue
 			}
-			listener.RequestedMount = requestedMount
+			listener.SetRequestedMount(requestedMount)
 			if err := s.Relay.Listeners.Move(listener.ID, mount, time.Now()); err != nil {
-				logger.L.Warnw("Listener move failed", "id", listener.ID, "from", listener.CurrentMount, "to", mount, "error", err)
-				mount = listener.CurrentMount
+				logger.L.Warnw("Listener move failed", "id", listener.ID, "from", currentMount, "to", mount, "error", err)
+				mount = currentMount
 				continue
 			}
 		}
@@ -389,7 +399,7 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, listener *relay.Listener, requestedMount, currentMount string, recoveryTicker *time.Ticker, metaint int) listenerLoopResult {
-	listener.CurrentMount = currentMount
+	listener.SetCurrentMount(currentMount)
 	offset := stream.SubscribeListener(listener, 128*1024)
 	signal := listener.Signal
 	defer stream.Unsubscribe(listener.ID)
@@ -424,7 +434,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 			if target == "" || target == currentMount {
 				continue
 			}
-			listener.RequestedMount = target
+			listener.SetRequestedMount(target)
 			return listenerLoopResult{
 				NextMount:      target,
 				RequestedMount: target,

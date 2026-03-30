@@ -81,6 +81,13 @@ func diagnosticInfoFor(r *relay.Relay, mount string) diagnosticInfo {
 	return info
 }
 
+func (s *Server) runtimeForMount(mount string) (*relay.MountRuntime, bool) {
+	if s.RuntimeRegistry == nil {
+		return nil, false
+	}
+	return s.RuntimeRegistry.Get(mount)
+}
+
 func (s *Server) Audit(r *http.Request, action, resourceType, resourceID, detail string) {
 	if !s.Config.AuditEnabled {
 		return

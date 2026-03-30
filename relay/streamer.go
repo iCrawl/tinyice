@@ -48,9 +48,10 @@ type Streamer struct {
 	SongCommand        string
 	SongCommandTimeout int
 
-	relay  *Relay
-	cancel context.CancelFunc
-	mu     sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	cancel          context.CancelFunc
+	mu              sync.RWMutex
 
 	fileCancel    context.CancelFunc
 	outputSession *AutoDJOutputSession
@@ -78,10 +79,11 @@ type Streamer struct {
 }
 
 type StreamerManager struct {
-	instances map[string]*Streamer // key is OutputMount
-	mu        sync.RWMutex
-	relay     *Relay
-	config    *config.Config
+	instances       map[string]*Streamer // key is OutputMount
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
 
 	deadRecovery map[string]context.CancelFunc
 
@@ -103,6 +105,15 @@ func NewStreamerManager(r *Relay, cfg *config.Config) *StreamerManager {
 		return sm.activateRecoveredSongCommandPath(ctx, s, path)
 	}
 	return sm
+}
+
+func (sm *StreamerManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.runtimeRegistry = rr
+	for _, inst := range sm.instances {
+		inst.runtimeRegistry = rr
+	}
 }
 
 func (sm *StreamerManager) DeadRecoveryActive(mount string) bool {
@@ -777,6 +788,7 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 		SongCommand:        songCommand,
 		SongCommandTimeout: songCommandTimeout,
 		relay:              sm.relay,
+		runtimeRegistry:    sm.runtimeRegistry,
 		cancel:             cancel,
 		titleCache:         make(map[string]string),
 		NextID:             nextID, // Start NextID after initial playlist

@@ -41,6 +41,11 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 	}
 
 	stream := streamer.relay.GetOrCreateStream(streamer.OutputMount)
+	if streamer.runtimeRegistry != nil {
+		rt := streamer.runtimeRegistry.GetOrCreate(streamer.OutputMount)
+		rt.Stream = stream
+		streamer.runtimeRegistry.AttachSource(streamer.OutputMount, SourceAutoDJ, "default")
+	}
 
 	sampleRate := 44100
 	frameSize := 1152

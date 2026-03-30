@@ -91,10 +91,10 @@ type Stream struct {
 	PageIndex       int     // Index for managing PageOffsets circular list
 
 	// Core streaming infrastructure
-	Buffer    *CircularBuffer          // Audio data buffer (typically 2MB)
-	listeners map[string]*Listener     // Playback/listener signal state by listener ID
-	mu        sync.RWMutex             // Mutex protecting all fields
-	closed    int32                    // Atomic flag: 1 = stream closed
+	Buffer    *CircularBuffer      // Audio data buffer (typically 2MB)
+	listeners map[string]*Listener // Playback/listener signal state by listener ID
+	mu        sync.RWMutex         // Mutex protecting all fields
+	closed    int32                // Atomic flag: 1 = stream closed
 }
 
 // IsOgg returns true if the stream is Ogg-based (Ogg/Vorbis, Ogg/Opus, etc).
@@ -395,8 +395,8 @@ func (s *Stream) SubscribeListener(listener *Listener, burstSize int) int64 {
 }
 
 func (s *Stream) subscribeListenerLocked(listener *Listener, burstSize int) int64 {
-	if listener.CurrentMount == "" {
-		listener.CurrentMount = s.MountName
+	if listener.CurrentMountName() == "" {
+		listener.SetCurrentMount(s.MountName)
 	}
 	listener.Signal = make(chan struct{}, 1)
 	s.listeners[listener.ID] = listener

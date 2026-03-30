@@ -44,10 +44,11 @@ func (p *SimplePacer) Pace(duration time.Duration) {
 }
 
 type WebRTCManager struct {
-	api     *webrtc.API
-	relay   *Relay
-	mu      sync.RWMutex
-	sources map[string]*webrtc.PeerConnection
+	api             *webrtc.API
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	mu              sync.RWMutex
+	sources         map[string]*webrtc.PeerConnection
 }
 
 func NewWebRTCManager(r *Relay) *WebRTCManager {
@@ -61,6 +62,12 @@ func NewWebRTCManager(r *Relay) *WebRTCManager {
 		relay:   r,
 		sources: make(map[string]*webrtc.PeerConnection),
 	}
+}
+
+func (wm *WebRTCManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wm.runtimeRegistry = rr
 }
 
 func (wm *WebRTCManager) HandleOffer(mount, remoteAddr, userAgent string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
@@ -183,6 +190,11 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 		logger.L.Infow("WebRTC Source: Received track", "track", track.ID(), "mount", mount)
 
 		stream := wm.relay.GetOrCreateStream(mount)
+		if wm.runtimeRegistry != nil {
+			rt := wm.runtimeRegistry.GetOrCreate(mount)
+			rt.Stream = stream
+			wm.runtimeRegistry.AttachSource(mount, SourceWebRTC, "default")
+		}
 		stream.mu.Lock()
 		stream.ContentType = "audio/ogg"
 		stream.IsOggStream = true
@@ -354,6 +366,9 @@ func (wm *WebRTCManager) cleanupSource(mount string, peerConnection *webrtc.Peer
 		Actor:     DiagnosticActorWebRTC,
 		Timestamp: time.Now(),
 	})
+	if wm.runtimeRegistry != nil {
+		wm.runtimeRegistry.Remove(mount)
+	}
 	wm.relay.RemoveStream(mount)
 }
 
@@ -375,6 +390,9 @@ func (wm *WebRTCManager) DisconnectSource(mount string) error {
 		Actor:     DiagnosticActorWebRTC,
 		Timestamp: time.Now(),
 	})
+	if wm.runtimeRegistry != nil {
+		wm.runtimeRegistry.Remove(mount)
+	}
 	wm.relay.RemoveStream(mount)
 	return pc.Close()
 }
