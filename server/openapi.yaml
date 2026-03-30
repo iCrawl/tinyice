@@ -315,6 +315,14 @@ paths:
                   type: string
                   description: Source password for this mount
                   example: secret123
+                burst_size:
+                  type: integer
+                  description: Initial burst size in bytes for this mount
+                  example: 65536
+                max_listeners:
+                  type: integer
+                  description: Mount-specific listener cap (0 = use global cap)
+                  example: 250
       responses:
         "200":
           description: Mount created
@@ -326,6 +334,45 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "409":
           description: Mount already taken
+    put:
+      tags: [Streams]
+      summary: Update stream mount settings
+      security:
+        - session: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [mount]
+              properties:
+                mount:
+                  type: string
+                  description: Existing mount path
+                  example: /live
+                burst_size:
+                  type: integer
+                  description: Burst size in bytes for this mount
+                  example: 131072
+                max_listeners:
+                  type: integer
+                  description: Mount-specific listener cap (0 = use global cap)
+                  example: 500
+      responses:
+        "200":
+          description: Mount settings updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
     delete:
       tags: [Streams]
       summary: Delete a stream mount
@@ -402,6 +449,97 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/listeners:
+    get:
+      tags: [Listeners]
+      summary: List active playback listeners
+      description: Returns active HTTP and WebRTC playback listeners visible to the authenticated user.
+      security:
+        - session: []
+        - bearer: []
+      responses:
+        "200":
+          description: Array of active listener snapshots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Listener"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/listeners/disconnect:
+    post:
+      tags: [Listeners]
+      summary: Disconnect a playback listener
+      security:
+        - session: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+                  description: Listener ID to disconnect
+      responses:
+        "200":
+          description: Listener disconnect queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Listener not found
+
+  /api/listeners/move:
+    post:
+      tags: [Listeners]
+      summary: Move an HTTP playback listener to another mount
+      description: WebRTC listeners return `disconnect_required` because live rebinding is not implemented for that transport.
+      security:
+        - session: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, target_mount]
+              properties:
+                id:
+                  type: string
+                  description: Listener ID to move
+                target_mount:
+                  type: string
+                  description: Active target mount path
+                  example: /backup
+      responses:
+        "200":
+          description: Listener move queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StatusResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: Listener or target mount not found
+        "409":
+          description: Listener cannot be moved live (for example WebRTC playback)
 
   # ── AutoDJ ────────────────────────────────────────────────
   /api/autodj:
@@ -1584,8 +1722,14 @@ components:
         bitrate:
           type: string
           description: Bitrate string (e.g. "128")
+        burst_size:
+          type: integer
+          description: Burst size in bytes for this mount
         listeners:
           type: integer
+        max_listeners:
+          type: integer
+          description: Mount-specific listener cap (0 = use global cap)
         source_ip:
           type: string
           description: IP of connected source, empty if offline
@@ -1630,6 +1774,32 @@ components:
         live:
           type: boolean
           description: Whether a source is currently connected
+
+    Listener:
+      type: object
+      properties:
+        id:
+          type: string
+        protocol:
+          type: string
+          enum: [http, webrtc]
+        requested_mount:
+          type: string
+        current_mount:
+          type: string
+        remote_addr:
+          type: string
+        user_agent:
+          type: string
+        connected_at:
+          type: integer
+          format: int64
+        duration_seconds:
+          type: integer
+          format: int64
+        last_stream_switch_at:
+          type: integer
+          format: int64
 
     AutoDJ:
       type: object

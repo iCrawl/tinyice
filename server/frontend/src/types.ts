@@ -37,10 +37,24 @@ export interface StreamInfo {
   format: string
   bitrate: number
   listeners: number
+  burst_size: number
+  max_listeners: number
   live: boolean
   status: string
   status_reason: string
   history: DiagnosticHistoryEntry[]
+}
+
+export interface ListenerInfo {
+  id: string
+  protocol: 'http' | 'webrtc'
+  requested_mount: string
+  current_mount: string
+  remote_addr: string
+  user_agent: string
+  connected_at: number
+  duration_seconds: number
+  last_stream_switch_at: number
 }
 
 export interface DiagnosticHistoryEntry {

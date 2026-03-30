@@ -85,8 +85,9 @@ type RelayConfig struct {
 }
 
 type MountSettings struct {
-	Password  string `json:"password"` // Hashed
-	BurstSize int    `json:"burst_size"`
+	Password     string `json:"password"` // Hashed
+	BurstSize    int    `json:"burst_size"`
+	MaxListeners int    `json:"max_listeners"`
 }
 
 type TranscoderConfig struct {

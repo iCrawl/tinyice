@@ -44,6 +44,7 @@ type Relay struct {
 	BytesOut     int64              // Global bytes sent counter
 	History      *HistoryManager    // Optional history manager for statistics
 	Diagnostics  *DiagnosticsStore  // Mount-scoped lifecycle diagnostics
+	Listeners    *ListenerRegistry  // Global playback listener registry
 
 	metaSubs   []chan MetadataChange      // SSE subscribers for metadata changes
 	lastMeta   map[string]MetadataChange // last metadata per mount
@@ -56,6 +57,7 @@ func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
 		LowLatency:  lowLatency,
 		History:     history,
 		Diagnostics: NewDiagnosticsStoreWithHistory(10, history),
+		Listeners:   NewListenerRegistry(),
 	}
 }
 
@@ -97,7 +99,7 @@ func (r *Relay) GetOrCreateStream(mount string) *Stream {
 
 	s := &Stream{
 		MountName:   mount,
-		listeners:   make(map[string]chan struct{}),
+		listeners:   make(map[string]*Listener),
 		Buffer:      NewCircularBuffer(512 * 1024), // 2MB shared buffer per stream
 		Started:     time.Now(),
 		Name:        "Unnamed Stream",

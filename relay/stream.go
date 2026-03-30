@@ -92,7 +92,7 @@ type Stream struct {
 
 	// Core streaming infrastructure
 	Buffer    *CircularBuffer          // Audio data buffer (typically 2MB)
-	listeners map[string]chan struct{} // Signal channels for connected listeners
+	listeners map[string]*Listener     // Playback/listener signal state by listener ID
 	mu        sync.RWMutex             // Mutex protecting all fields
 	closed    int32                    // Atomic flag: 1 = stream closed
 }
@@ -159,7 +159,9 @@ func (s *Stream) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, ch := range s.listeners {
-		close(ch)
+		if ch.Signal != nil {
+			close(ch.Signal)
+		}
 		delete(s.listeners, id)
 	}
 }
@@ -169,7 +171,9 @@ func (s *Stream) DisconnectListeners() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for id, ch := range s.listeners {
-		close(ch)
+		if ch.Signal != nil {
+			close(ch.Signal)
+		}
 		delete(s.listeners, id)
 	}
 }
@@ -239,9 +243,12 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 
 	// 2. Signal all listeners that new data is available
 	// Use non-blocking send to avoid blocking on slow listeners
-	for _, ch := range s.listeners {
+	for _, listener := range s.listeners {
+		if listener.Signal == nil {
+			continue
+		}
 		select {
-		case ch <- struct{}{}:
+		case listener.Signal <- struct{}{}:
 			// Successfully signaled listener
 		default:
 			// Listener is already signaled or slow, skip
@@ -353,70 +360,16 @@ func (s *Stream) healthTotalsLocked(now time.Time) (int64, int64) {
 //	offset, signal := stream.Subscribe("listener-123", 32*1024)
 //	reader := NewStreamReader(stream.Buffer, offset, signal, ctx, "listener-123")
 func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
+	listener := &Listener{
+		ID:           id,
+		CurrentMount: s.MountName,
+		Signal:       make(chan struct{}, 1),
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Create buffered signal channel for this listener
-	ch := make(chan struct{}, 1)
-	s.listeners[id] = ch
-
-	// Start at current head minus burst size for instant playback
-	// This gives the listener immediate audio data instead of waiting for new data
-	start := s.Buffer.Head - int64(burstSize)
-	if start < 0 {
-		start = 0
-	}
-
-	// For Ogg/Opus, align to the oldest known page boundary within the valid buffer range
-	// This is crucial for proper Opus decoding - listeners MUST start at page boundaries
-	if s.IsOggStream {
-		validStart := s.Buffer.Head - s.Buffer.Size
-		if validStart < 0 {
-			validStart = 0
-		}
-
-		// If we have an OggHead persistent storage, we want to start reading
-		// from the Buffer AFTER the initial headers to avoid duplicates.
-		if s.OggHeaderOffset > start {
-			start = s.OggHeaderOffset
-		}
-
-		if start < validStart {
-			start = validStart
-		}
-
-		// Find the best page boundary that is >= start and still valid
-		bestAlign := s.LastPageOffset
-		found := false
-		for _, po := range s.PageOffsets {
-			// Find the smallest PO that is >= start AND is still valid
-			if po >= start && po >= validStart && po < bestAlign {
-				bestAlign = po
-				found = true
-			}
-		}
-		if found {
-			start = bestAlign
-		} else if bestAlign >= validStart && bestAlign > 0 {
-			start = bestAlign
-		} else {
-			// No valid Ogg page boundaries found — fall back to burst-based offset
-			start = s.Buffer.Head - int64(burstSize)
-			if start < validStart {
-				start = validStart
-			}
-			if start < 0 {
-				start = 0
-			}
-		}
-	}
-
-	// Ensure we don't go back further than the buffer allows
-	if s.Buffer.Head-start > s.Buffer.Size {
-		start = s.Buffer.Head - s.Buffer.Size
-	}
-
-	return start, ch
+	return s.subscribeListenerLocked(listener, burstSize), listener.Signal
 }
 
 // SubscribeSafe is like Subscribe but returns false if the stream is already closed.
@@ -427,8 +380,26 @@ func (s *Stream) SubscribeSafe(id string, burstSize int) (int64, chan struct{}, 
 	if atomic.LoadInt32(&s.closed) == 1 {
 		return 0, nil, false
 	}
-	ch := make(chan struct{}, 1)
-	s.listeners[id] = ch
+	listener := &Listener{
+		ID:           id,
+		CurrentMount: s.MountName,
+		Signal:       make(chan struct{}, 1),
+	}
+	return s.subscribeListenerLocked(listener, burstSize), listener.Signal, true
+}
+
+func (s *Stream) SubscribeListener(listener *Listener, burstSize int) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.subscribeListenerLocked(listener, burstSize)
+}
+
+func (s *Stream) subscribeListenerLocked(listener *Listener, burstSize int) int64 {
+	if listener.CurrentMount == "" {
+		listener.CurrentMount = s.MountName
+	}
+	listener.Signal = make(chan struct{}, 1)
+	s.listeners[listener.ID] = listener
 
 	start := s.Buffer.Head - int64(burstSize)
 	if start < 0 {
@@ -444,6 +415,7 @@ func (s *Stream) SubscribeSafe(id string, burstSize int) (int64, chan struct{}, 
 		if s.OggHeaderOffset > start {
 			start = s.OggHeaderOffset
 		}
+
 		if start < validStart {
 			start = validStart
 		}
@@ -475,15 +447,17 @@ func (s *Stream) SubscribeSafe(id string, burstSize int) (int64, chan struct{}, 
 		start = s.Buffer.Head - s.Buffer.Size
 	}
 
-	return start, ch, true
+	return start
 }
 
 // Unsubscribe removes a listener
 func (s *Stream) Unsubscribe(id string) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if ch, ok := s.listeners[id]; ok {
-		close(ch)
+	if listener, ok := s.listeners[id]; ok {
+		if listener.Signal != nil {
+			close(listener.Signal)
+		}
 		delete(s.listeners, id)
 	}
 }

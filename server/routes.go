@@ -169,10 +169,14 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("/api/streams", methodHandler(map[string]http.HandlerFunc{
 		http.MethodGet:    s.apiGetStreams,
 		http.MethodPost:   s.apiCreateStream,
+		http.MethodPut:    s.apiUpdateStream,
 		http.MethodDelete: s.apiDeleteStream,
 	}))
 	mux.HandleFunc("/api/streams/kick", s.apiKickStream)
 	mux.HandleFunc("/api/streams/diagnostics", s.apiGetStreamDiagnostics)
+	mux.HandleFunc("/api/listeners", s.apiGetListeners)
+	mux.HandleFunc("/api/listeners/disconnect", s.apiDisconnectListener)
+	mux.HandleFunc("/api/listeners/move", s.apiMoveListener)
 
 	mux.HandleFunc("/api/autodj", methodHandler(map[string]http.HandlerFunc{
 		http.MethodGet:    s.apiGetAutoDJ,

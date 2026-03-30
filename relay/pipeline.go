@@ -61,7 +61,7 @@ func NewVideoTrack(codec string, bufferSize int) *Track {
 		Codec: codec,
 		Stream: &Stream{
 			MountName:   "video",
-			listeners:   make(map[string]chan struct{}),
+			listeners:   make(map[string]*Listener),
 			Buffer:      NewCircularBuffer(bufferSize),
 			Started:     time.Now(),
 			Enabled:     true,

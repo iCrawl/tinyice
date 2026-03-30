@@ -21,7 +21,9 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		Mount              string                  `json:"mount"`
 		ContentType        string                  `json:"content_type"`
 		Bitrate            string                  `json:"bitrate"`
+		BurstSize          int                     `json:"burst_size"`
 		Listeners          int                     `json:"listeners"`
+		MaxListeners       int                     `json:"max_listeners"`
 		SourceIP           string                  `json:"source_ip"`
 		Visible            bool                    `json:"visible"`
 		Enabled            bool                    `json:"enabled"`
@@ -45,11 +47,20 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
 			diag := diagnosticInfoFor(s.Relay, st.MountName)
+			ms := s.Config.AdvancedMounts[st.MountName]
+			burstSize := 0
+			maxListeners := 0
+			if ms != nil {
+				burstSize = ms.BurstSize
+				maxListeners = ms.MaxListeners
+			}
 			result = append(result, streamInfo{
 				Mount:              st.MountName,
 				ContentType:        st.ContentType,
 				Bitrate:            st.Bitrate,
+				BurstSize:          burstSize,
 				Listeners:          st.ListenersCount,
+				MaxListeners:       maxListeners,
 				SourceIP:           st.SourceIP,
 				Visible:            st.Visible,
 				Enabled:            st.Enabled,
@@ -75,8 +86,17 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
 			diag := diagnosticInfoFor(s.Relay, mount)
+			ms := s.Config.AdvancedMounts[mount]
+			burstSize := 0
+			maxListeners := 0
+			if ms != nil {
+				burstSize = ms.BurstSize
+				maxListeners = ms.MaxListeners
+			}
 			result = append(result, streamInfo{
 				Mount:              mount,
+				BurstSize:          burstSize,
+				MaxListeners:       maxListeners,
 				Visible:            visible,
 				Enabled:            !disabled,
 				Status:             diag.Status,
@@ -97,8 +117,17 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
 				diag := diagnosticInfoFor(s.Relay, mount)
+				ms := s.Config.AdvancedMounts[mount]
+				burstSize := 0
+				maxListeners := 0
+				if ms != nil {
+					burstSize = ms.BurstSize
+					maxListeners = ms.MaxListeners
+				}
 				result = append(result, streamInfo{
 					Mount:              mount,
+					BurstSize:          burstSize,
+					MaxListeners:       maxListeners,
 					Visible:            visible,
 					Enabled:            !disabled,
 					Status:             diag.Status,
@@ -160,8 +189,10 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Mount    string `json:"mount"`
-		Password string `json:"password"`
+		Mount        string `json:"mount"`
+		Password     string `json:"password"`
+		BurstSize    int    `json:"burst_size"`
+		MaxListeners int    `json:"max_listeners"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -201,6 +232,19 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		} else {
 			user.Mounts[body.Mount] = hashed
 		}
+		if body.BurstSize > 0 || body.MaxListeners > 0 {
+			ms := cfg.AdvancedMounts[body.Mount]
+			if ms == nil {
+				ms = &config.MountSettings{}
+				cfg.AdvancedMounts[body.Mount] = ms
+			}
+			if body.BurstSize > 0 {
+				ms.BurstSize = body.BurstSize
+			}
+			if body.MaxListeners > 0 {
+				ms.MaxListeners = body.MaxListeners
+			}
+		}
 		return nil
 	}); err != nil {
 		jsonError(w, "Failed to save config", http.StatusInternalServerError)
@@ -233,6 +277,7 @@ func (s *Server) apiDeleteStream(w http.ResponseWriter, r *http.Request) {
 		delete(cfg.Mounts, mount)
 		delete(cfg.DisabledMounts, mount)
 		delete(cfg.VisibleMounts, mount)
+		delete(cfg.AdvancedMounts, mount)
 		delete(user.Mounts, mount)
 		return nil
 	}); err != nil {
@@ -242,6 +287,52 @@ func (s *Server) apiDeleteStream(w http.ResponseWriter, r *http.Request) {
 	s.Relay.RemoveStream(mount)
 	jsonResponse(w, map[string]string{"status": "deleted"})
 	s.Audit(r, "mount_deleted", "stream", mount, "")
+}
+
+func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
+	if !s.isCSRFSafe(r) {
+		jsonError(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	user, ok := s.checkAuth(r)
+	if !ok {
+		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	var body struct {
+		Mount        string `json:"mount"`
+		BurstSize    int    `json:"burst_size"`
+		MaxListeners int    `json:"max_listeners"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		jsonError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.Mount == "" {
+		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+	if !s.hasAccess(user, body.Mount) {
+		jsonError(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		ms := cfg.AdvancedMounts[body.Mount]
+		if ms == nil {
+			ms = &config.MountSettings{}
+			cfg.AdvancedMounts[body.Mount] = ms
+		}
+		ms.BurstSize = body.BurstSize
+		ms.MaxListeners = body.MaxListeners
+		return nil
+	}); err != nil {
+		jsonError(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
+
+	jsonResponse(w, map[string]string{"status": "updated"})
 }
 
 func (s *Server) apiKickStream(w http.ResponseWriter, r *http.Request) {

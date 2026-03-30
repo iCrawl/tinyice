@@ -63,7 +63,7 @@ func NewWebRTCManager(r *Relay) *WebRTCManager {
 	}
 }
 
-func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
+func (wm *WebRTCManager) HandleOffer(mount, remoteAddr, userAgent string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
 	stream, ok := wm.relay.GetStream(mount)
 	if !ok {
 		return nil, fmt.Errorf("stream not found")
@@ -111,6 +111,32 @@ func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescripti
 		return nil, err
 	}
 	<-gatherComplete
+
+	now := time.Now()
+	listener := &Listener{
+		ID:                 fmt.Sprintf("webrtc-%d", now.UnixNano()),
+		Protocol:           ListenerProtocolWebRTC,
+		RequestedMount:     mount,
+		CurrentMount:       mount,
+		RemoteAddr:         remoteAddr,
+		UserAgent:          userAgent,
+		Connected:          now,
+		LastStreamSwitchAt: now,
+		DisconnectCh:       make(chan struct{}),
+		MoveCh:             make(chan ListenerCommand, 1),
+	}
+	wm.relay.Listeners.Register(listener)
+
+	go func() {
+		<-listener.DisconnectCh
+		peerConnection.Close()
+	}()
+
+	peerConnection.OnConnectionStateChange(func(s webrtc.PeerConnectionState) {
+		if s == webrtc.PeerConnectionStateClosed || s == webrtc.PeerConnectionStateFailed || s == webrtc.PeerConnectionStateDisconnected {
+			wm.relay.Listeners.Unregister(listener.ID)
+		}
+	})
 
 	// Start feeding the track
 	go wm.streamToTrack(peerConnection, audioTrack, stream)

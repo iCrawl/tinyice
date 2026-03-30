@@ -24,6 +24,8 @@ func TestDomainRouteRegistrarsWireRepresentativePaths(t *testing.T) {
 		{name: "admin events", method: http.MethodGet, path: "/admin/events", wantStatus: http.StatusUnauthorized},
 		{name: "oidc providers", method: http.MethodGet, path: "/api/oidc/providers", wantStatus: http.StatusOK},
 		{name: "streams api", method: http.MethodGet, path: "/api/streams", wantStatus: http.StatusUnauthorized},
+		{name: "streams update api", method: http.MethodPut, path: "/api/streams", wantStatus: http.StatusUnauthorized},
+		{name: "listeners api", method: http.MethodGet, path: "/api/listeners", wantStatus: http.StatusUnauthorized},
 		{name: "public legacy stats", method: http.MethodGet, path: "/status-json.xsl", wantStatus: http.StatusOK},
 	}
 

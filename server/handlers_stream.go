@@ -228,13 +228,42 @@ func (s *Server) updateSourceMetadata(stream *relay.Stream, mount string, r *htt
 	}
 }
 
+func (s *Server) effectiveMountListenerLimit(mount string) int {
+	if ms, ok := s.Config.AdvancedMounts[mount]; ok && ms.MaxListeners > 0 {
+		return ms.MaxListeners
+	}
+	return s.Config.MaxListeners
+}
+
+func (s *Server) newHTTPListener(r *http.Request, requestedMount, currentMount string) *relay.Listener {
+	now := time.Now()
+	return &relay.Listener{
+		ID:                 fmt.Sprintf("http-%d", now.UnixNano()),
+		Protocol:           relay.ListenerProtocolHTTP,
+		RequestedMount:     requestedMount,
+		CurrentMount:       currentMount,
+		RemoteAddr:         r.RemoteAddr,
+		UserAgent:          r.Header.Get("User-Agent"),
+		Connected:          now,
+		LastStreamSwitchAt: now,
+		DisconnectCh:       make(chan struct{}),
+		MoveCh:             make(chan relay.ListenerCommand, 1),
+	}
+}
+
+type listenerLoopResult struct {
+	NextMount      string
+	RequestedMount string
+	KeepGoing      bool
+}
+
 func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 	if s.isBanned(r.RemoteAddr) {
 		http.Error(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	originalMount := r.URL.Path
-	mount := originalMount
+	requestedMount := r.URL.Path
+	mount := requestedMount
 
 	if s.Relay.History != nil {
 		s.Relay.History.RecordUA(r.Header.Get("User-Agent"), "listener")
@@ -248,9 +277,15 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 	}
 
 	flusher, _ := w.(http.Flusher)
-	id := r.RemoteAddr + "-" + fmt.Sprintf("%d", time.Now().UnixNano())
 	logger.L.Infow("Listener connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
 	defer logger.L.Infow("Listener disconnected", "mount", mount, "ip", r.RemoteAddr)
+	listener := s.newHTTPListener(r, requestedMount, mount)
+	registered := false
+	defer func() {
+		if registered {
+			s.Relay.Listeners.Unregister(listener.ID)
+		}
+	}()
 
 	recoveryTicker := time.NewTicker(10 * time.Second)
 	defer recoveryTicker.Stop()
@@ -265,17 +300,17 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
-		if mount != originalMount {
-			if _, ok := s.Relay.GetStream(originalMount); ok {
+		if mount != requestedMount {
+			if _, ok := s.Relay.GetStream(requestedMount); ok {
 				if primaryFirstSeen.IsZero() {
 					primaryFirstSeen = time.Now()
 				}
 				if time.Since(primaryFirstSeen) >= fallbackHysteresis {
 					logger.L.Infow("Primary stream stable, recovering from fallback",
-						"mount", originalMount,
+						"mount", requestedMount,
 						"stable_for", time.Since(primaryFirstSeen),
 					)
-					mount = originalMount
+					mount = requestedMount
 					primaryFirstSeen = time.Time{}
 				}
 			} else {
@@ -291,13 +326,13 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 				mount = fallback
 				continue
 			}
-			if mount != originalMount {
-				mount = originalMount
+			if mount != requestedMount {
+				mount = requestedMount
 				time.Sleep(1 * time.Second)
 				continue
 			}
 			host, _, _ := net.SplitHostPort(r.RemoteAddr)
-			s.recordScanAttempt(host, mount)
+			s.recordScanAttempt(host, requestedMount)
 			http.NotFound(w, r)
 			return
 		}
@@ -309,13 +344,32 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("icy-name", s.Config.PageTitle)
 		}
 
-		if s.Config.MaxListeners > 0 && stream.ListenersCount() >= s.Config.MaxListeners {
-			http.Error(w, "Server Full", http.StatusServiceUnavailable)
-			return
+		limit := s.effectiveMountListenerLimit(mount)
+		if !registered {
+			if limit > 0 && s.Relay.Listeners.CountForMount(mount) >= limit {
+				http.Error(w, "Server Full", http.StatusServiceUnavailable)
+				return
+			}
+			listener.RequestedMount = requestedMount
+			listener.CurrentMount = mount
+			s.Relay.Listeners.Register(listener)
+			registered = true
+		} else if listener.CurrentMount != mount {
+			if limit > 0 && s.Relay.Listeners.CountForMount(mount) >= limit {
+				logger.L.Warnw("Listener move rejected by mount cap", "id", listener.ID, "from", listener.CurrentMount, "to", mount)
+				mount = listener.CurrentMount
+				continue
+			}
+			listener.RequestedMount = requestedMount
+			if err := s.Relay.Listeners.Move(listener.ID, mount, time.Now()); err != nil {
+				logger.L.Warnw("Listener move failed", "id", listener.ID, "from", listener.CurrentMount, "to", mount, "error", err)
+				mount = listener.CurrentMount
+				continue
+			}
 		}
 
 		w.Header().Set("Content-Type", stream.ContentType)
-		if mount != originalMount {
+		if mount != requestedMount {
 			w.Header().Set("X-Stream-Status", "fallback")
 		} else {
 			w.Header().Set("X-Stream-Status", "primary")
@@ -324,22 +378,27 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 
-		if !s.serveStreamData(w, r, stream, id, originalMount, mount, recoveryTicker, metaint) {
+		result := s.serveStreamData(w, r, stream, listener, requestedMount, mount, recoveryTicker, metaint)
+		if !result.KeepGoing {
 			return
 		}
+		requestedMount = result.RequestedMount
+		mount = result.NextMount
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int) bool {
-	offset, signal := stream.Subscribe(id, 128*1024)
-	defer stream.Unsubscribe(id)
+func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, listener *relay.Listener, requestedMount, currentMount string, recoveryTicker *time.Ticker, metaint int) listenerLoopResult {
+	listener.CurrentMount = currentMount
+	offset := stream.SubscribeListener(listener, 128*1024)
+	signal := listener.Signal
+	defer stream.Unsubscribe(listener.ID)
 
 	if stream.OggHead != nil {
 		if _, err := w.Write(stream.OggHead); err != nil {
-			return false
+			return listenerLoopResult{}
 		}
-		logger.L.Debugf("Ogg Listener %s: Sending stored headers (%d bytes), then starting burst at %d", id, len(stream.OggHead), offset)
+		logger.L.Debugf("Ogg Listener %s: Sending stored headers (%d bytes), then starting burst at %d", listener.ID, len(stream.OggHead), offset)
 	}
 
 	// was 16384
@@ -355,18 +414,39 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 	for {
 		select {
 		case <-s.done:
-			return false
+			return listenerLoopResult{}
 		case <-r.Context().Done():
-			return false
+			return listenerLoopResult{}
+		case <-listener.DisconnectCh:
+			return listenerLoopResult{}
+		case cmd := <-listener.MoveCh:
+			target := cmd.TargetMount
+			if target == "" || target == currentMount {
+				continue
+			}
+			listener.RequestedMount = target
+			return listenerLoopResult{
+				NextMount:      target,
+				RequestedMount: target,
+				KeepGoing:      true,
+			}
 		case <-recoveryTicker.C:
-			if currentMount != originalMount {
-				if _, ok := s.Relay.GetStream(originalMount); ok {
-					return true
+			if currentMount != requestedMount {
+				if _, ok := s.Relay.GetStream(requestedMount); ok {
+					return listenerLoopResult{
+						NextMount:      requestedMount,
+						RequestedMount: requestedMount,
+						KeepGoing:      true,
+					}
 				}
 			}
 		case _, ok := <-signal:
 			if !ok {
-				return true
+				return listenerLoopResult{
+					NextMount:      currentMount,
+					RequestedMount: requestedMount,
+					KeepGoing:      true,
+				}
 			}
 			for {
 				readLimit := len(buf)
@@ -382,10 +462,10 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 					consecutiveSkips++
 					if consecutiveSkips >= maxConsecutiveSkips {
 						logger.L.Warnw("Slow listener disconnected (ogg sync skip)",
-							"id", id, "mount", currentMount,
+							"id", listener.ID, "mount", currentMount,
 							"consecutive_skips", consecutiveSkips,
 						)
-						return false
+						return listenerLoopResult{}
 					}
 					offset = relay.FindNextPageBoundary(stream.Buffer.Data, stream.Buffer.Size, stream.Buffer.Head, next)
 					continue
@@ -398,10 +478,10 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 					consecutiveSkips++
 					if consecutiveSkips >= maxConsecutiveSkips {
 						logger.L.Warnw("Slow listener disconnected",
-							"id", id, "mount", currentMount,
+							"id", listener.ID, "mount", currentMount,
 							"consecutive_skips", consecutiveSkips,
 						)
-						return false
+						return listenerLoopResult{}
 					}
 				} else {
 					consecutiveSkips = 0
@@ -409,7 +489,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 				offset = next
 
 				if _, err := w.Write(buf[:n]); err != nil {
-					return false
+					return listenerLoopResult{}
 				}
 
 				if metaint > 0 {
@@ -428,7 +508,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 						copy(res[1:], meta)
 
 						if _, err := w.Write(res); err != nil {
-							return false
+							return listenerLoopResult{}
 						}
 						bytesSentSinceMeta = 0
 					}

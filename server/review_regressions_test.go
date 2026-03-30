@@ -32,9 +32,10 @@ func newTestServer(t *testing.T) *Server {
 
 	cfgPath := filepath.Join(t.TempDir(), "tinyice.json")
 	cfg := &config.Config{
-		ConfigPath:    cfgPath,
-		SetupComplete: true,
-		Mounts:        map[string]string{},
+		ConfigPath:     cfgPath,
+		SetupComplete:  true,
+		Mounts:         map[string]string{},
+		AdvancedMounts: map[string]*config.MountSettings{},
 		Users: map[string]*config.User{
 			"admin": {
 				Username: "admin",
@@ -65,6 +66,166 @@ func newTestServer(t *testing.T) *Server {
 		scanAttempts: make(map[string]*scanAttempt),
 		startTime:    time.Now(),
 		done:         make(chan struct{}),
+	}
+}
+
+func TestHandleListenerRejectsWhenMountSpecificCapIsReached(t *testing.T) {
+	s := newTestServer(t)
+	s.Config.MaxListeners = 10
+	s.Config.AdvancedMounts["/live"] = &config.MountSettings{MaxListeners: 1}
+
+	stream := s.Relay.GetOrCreateStream("/live")
+	stream.UpdateMetadata("Station", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+	s.Relay.Listeners.Register(&relay.Listener{
+		ID:             "existing",
+		Protocol:       relay.ListenerProtocolHTTP,
+		RequestedMount: "/live",
+		CurrentMount:   "/live",
+		Connected:      time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/live", nil)
+	req.RemoteAddr = "127.0.0.1:9000"
+	rr := httptest.NewRecorder()
+
+	s.handleListener(rr, req)
+
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatalf("expected 503 when mount cap is reached, got %d", rr.Code)
+	}
+}
+
+func TestHandleListenerRegistersAndUnregistersHTTPPlaybackClients(t *testing.T) {
+	s := newTestServer(t)
+	stream := s.Relay.GetOrCreateStream("/live")
+	stream.UpdateMetadata("Station", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/live", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:9001"
+	req.Header.Set("User-Agent", "tinyice-test")
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleListener(rr, req)
+	}()
+
+	deadline := time.After(time.Second)
+	for s.Relay.Listeners.CountForMount("/live") == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("listener never registered")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("listener handler did not exit after cancellation")
+	}
+
+	if got := s.Relay.Listeners.CountForMount("/live"); got != 0 {
+		t.Fatalf("expected listener to unregister on exit, got %d", got)
+	}
+}
+
+func TestAPIUpdateStreamPersistsAdvancedMountSettings(t *testing.T) {
+	s := newTestServer(t)
+	s.Config.Mounts["/live"] = "hashed"
+	s.sessions["sid-1"] = &session{
+		User:      s.Config.Users["admin"],
+		CSRFToken: "csrf-ok",
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/streams", strings.NewReader(`{"mount":"/live","burst_size":131072,"max_listeners":42}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", "csrf-ok")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiUpdateStream(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+
+	ms := s.Config.AdvancedMounts["/live"]
+	if ms == nil {
+		t.Fatal("expected advanced mount settings to be created")
+	}
+	if ms.BurstSize != 131072 {
+		t.Fatalf("expected burst size 131072, got %d", ms.BurstSize)
+	}
+	if ms.MaxListeners != 42 {
+		t.Fatalf("expected max listeners 42, got %d", ms.MaxListeners)
+	}
+}
+
+func TestHandleListenerProcessesMoveCommand(t *testing.T) {
+	s := newTestServer(t)
+	live := s.Relay.GetOrCreateStream("/live")
+	live.UpdateMetadata("Live", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+	backup := s.Relay.GetOrCreateStream("/backup")
+	backup.UpdateMetadata("Backup", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req := httptest.NewRequest(http.MethodGet, "/live", nil).WithContext(ctx)
+	req.RemoteAddr = "127.0.0.1:9002"
+	req.Header.Set("User-Agent", "tinyice-move-test")
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleListener(rr, req)
+	}()
+
+	var listenerID string
+	deadline := time.After(time.Second)
+	for listenerID == "" {
+		select {
+		case <-deadline:
+			t.Fatal("listener never registered")
+		default:
+			listeners := s.Relay.Listeners.List()
+			if len(listeners) > 0 {
+				listenerID = listeners[0].ID
+				if listeners[0].CurrentMount != "/live" {
+					t.Fatalf("expected initial mount /live, got %q", listeners[0].CurrentMount)
+				}
+			} else {
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
+	}
+
+	if err := s.Relay.Listeners.RequestMove(listenerID, "/backup"); err != nil {
+		t.Fatalf("queue move: %v", err)
+	}
+
+	moveDeadline := time.After(time.Second)
+	for {
+		select {
+		case <-moveDeadline:
+			t.Fatal("listener never moved to /backup")
+		default:
+			snapshot, ok := s.Relay.Listeners.Get(listenerID)
+			if ok && snapshot.CurrentMount == "/backup" {
+				cancel()
+				<-done
+				if got := s.Relay.Listeners.CountForMount("/live"); got != 0 {
+					t.Fatalf("expected /live to be empty after move and disconnect, got %d", got)
+				}
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
 	}
 }
 

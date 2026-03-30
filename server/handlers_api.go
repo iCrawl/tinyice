@@ -630,7 +630,7 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := s.WebRTCM.HandleOffer(mount, offer)
+	answer, err := s.WebRTCM.HandleOffer(mount, r.RemoteAddr, r.Header.Get("User-Agent"), offer)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)

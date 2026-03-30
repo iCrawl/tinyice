@@ -8,6 +8,8 @@ interface Stream {
   source_ip: string
   content_type: string
   listeners: number
+  burst_size: number
+  max_listeners: number
   enabled: boolean
   visible: boolean
   health: number
@@ -27,11 +29,26 @@ const showModal = signal(false)
 const formMount = signal('')
 const formPassword = signal('')
 const formBurst = signal(65536)
+const formMaxListeners = signal(0)
+const burstDrafts = signal<Record<string, number>>({})
+const maxListenerDrafts = signal<Record<string, number>>({})
+
+function syncDrafts(nextStreams: Stream[]) {
+  const nextBursts: Record<string, number> = {}
+  const nextCaps: Record<string, number> = {}
+  for (const stream of nextStreams) {
+    nextBursts[stream.mount] = stream.burst_size || 0
+    nextCaps[stream.mount] = stream.max_listeners || 0
+  }
+  burstDrafts.value = nextBursts
+  maxListenerDrafts.value = nextCaps
+}
 
 async function load() {
   loading.value = true
   try {
     streams.value = await api.get<Stream[]>('/api/streams')
+    syncDrafts(streams.value)
   } catch { /* empty */ }
   loading.value = false
 }
@@ -40,12 +57,23 @@ async function addMount() {
   await api.post('/api/streams', {
     mount: formMount.value,
     password: formPassword.value,
-    burstSize: formBurst.value,
+    burst_size: formBurst.value,
+    max_listeners: formMaxListeners.value,
   })
   showModal.value = false
   formMount.value = ''
   formPassword.value = ''
   formBurst.value = 65536
+  formMaxListeners.value = 0
+  load()
+}
+
+async function updateMount(mount: string) {
+  await api.put('/api/streams', {
+    mount,
+    burst_size: burstDrafts.value[mount] || 0,
+    max_listeners: maxListenerDrafts.value[mount] || 0,
+  })
   load()
 }
 
@@ -119,14 +147,16 @@ export function Streams() {
               <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Source IP</th>
               <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Format</th>
               <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Listeners</th>
+              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Burst</th>
+              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Cap</th>
               <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading.value ? (
-              <tr><td colSpan={6} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
+              <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
             ) : streams.value.length === 0 ? (
-              <tr><td colSpan={6} class="px-4 py-8 text-center text-text-tertiary text-sm">No streams configured</td></tr>
+              <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">No streams configured</td></tr>
             ) : (
               streams.value.map((s) => (
                 <tr key={s.mount} class="border-b border-[rgba(255,255,255,0.03)]">
@@ -149,8 +179,41 @@ export function Streams() {
                   <td class="px-4 py-3.5 text-sm text-text-secondary">{s.source_ip || 'No source'}</td>
                   <td class="px-4 py-3.5 text-sm text-text-secondary">{s.content_type || '—'}</td>
                   <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.listeners}</td>
+                  <td class="px-4 py-3.5">
+                    <input
+                      type="number"
+                      value={burstDrafts.value[s.mount] || 0}
+                      onInput={(e) => {
+                        burstDrafts.value = {
+                          ...burstDrafts.value,
+                          [s.mount]: parseInt((e.target as HTMLInputElement).value) || 0,
+                        }
+                      }}
+                      class="w-24 bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-3 py-2 text-text-primary font-mono text-xs focus:border-accent outline-none"
+                    />
+                  </td>
+                  <td class="px-4 py-3.5">
+                    <input
+                      type="number"
+                      value={maxListenerDrafts.value[s.mount] || 0}
+                      onInput={(e) => {
+                        maxListenerDrafts.value = {
+                          ...maxListenerDrafts.value,
+                          [s.mount]: parseInt((e.target as HTMLInputElement).value) || 0,
+                        }
+                      }}
+                      class="w-20 bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-3 py-2 text-text-primary font-mono text-xs focus:border-accent outline-none"
+                    />
+                  </td>
                   <td class="px-4 py-3.5 text-right">
                     <div class="flex items-center justify-end gap-1">
+                      <button
+                        onClick={() => updateMount(s.mount)}
+                        title="Save stream settings"
+                        class="border border-border text-accent font-mono text-xs px-2 py-1.5 rounded-lg hover:border-accent/40"
+                      >
+                        SAVE
+                      </button>
                       <button
                         onClick={() => kickSource(s.mount)}
                         title="Kick source"
@@ -212,6 +275,15 @@ export function Streams() {
                   type="number"
                   value={formBurst.value}
                   onInput={(e) => { formBurst.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
+                  class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
+                />
+              </div>
+              <div>
+                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">MAX LISTENERS</label>
+                <input
+                  type="number"
+                  value={formMaxListeners.value}
+                  onInput={(e) => { formMaxListeners.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
                   class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
                 />
               </div>
