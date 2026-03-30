@@ -162,6 +162,17 @@ func (sm *StreamerManager) mountHasFreshData(mount string) bool {
 func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *Streamer) {
 	defer sm.clearDeadRecovery(s.OutputMount)
 
+	if s.relay != nil && s.OutputMount != "" {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     s.OutputMount,
+			Status:    DiagnosticStatusRecovering,
+			Class:     DiagnosticClassRecoveryStarted,
+			Reason:    "retrying song_command after dead health event",
+			Actor:     DiagnosticActorAutoDJ,
+			Timestamp: time.Now(),
+		})
+	}
+
 	bo := &backoff{base: 1 * time.Second, max: 60 * time.Second}
 	select {
 	case <-ctx.Done():
@@ -182,6 +193,19 @@ func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *St
 			err = sm.recoveryActivatePath(ctx, sm, s, path)
 		}
 		if err == nil && sm.mountHasFreshData(s.OutputMount) {
+			if s.relay != nil && s.OutputMount != "" {
+				now := time.Now()
+				s.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:              s.OutputMount,
+					Status:             DiagnosticStatusRunning,
+					Class:              DiagnosticClassRecoverySucceeded,
+					Reason:             "dead mount recovered and resumed playback",
+					Actor:              DiagnosticActorAutoDJ,
+					Timestamp:          now,
+					LastRecoveryAt:     now,
+					LastRecoveryResult: "success",
+				})
+			}
 			return
 		}
 
@@ -252,6 +276,16 @@ func (s *Streamer) Stop() {
 	defer s.mu.Unlock()
 	s.State = StateStopped
 	s.manualStop = true
+	if s.relay != nil && s.OutputMount != "" {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     s.OutputMount,
+			Status:    DiagnosticStatusStopped,
+			Class:     DiagnosticClassManualStop,
+			Reason:    "manual stop requested",
+			Actor:     DiagnosticActorAdmin,
+			Timestamp: time.Now(),
+		})
+	}
 	if s.fileCancel != nil {
 		s.fileCancel()
 	}
@@ -990,10 +1024,31 @@ func (s *Streamer) nextTrackCandidate() (string, int, int, bool) {
 		if err == nil {
 			return path, -1, -1, true
 		}
+		if s.relay != nil && s.OutputMount != "" {
+			s.relay.Diagnostics.Record(DiagnosticUpdate{
+				Mount:     s.OutputMount,
+				Status:    DiagnosticStatusError,
+				Class:     classifySongCommandError(err),
+				Reason:    songCommandReason(err),
+				Error:     err.Error(),
+				Actor:     DiagnosticActorAutoDJ,
+				Timestamp: time.Now(),
+			})
+		}
 		logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
 	}
 
 	if len(s.Playlist) == 0 {
+		if s.SongCommand == "" && s.relay != nil && s.OutputMount != "" {
+			s.relay.Diagnostics.Record(DiagnosticUpdate{
+				Mount:     s.OutputMount,
+				Status:    DiagnosticStatusStopped,
+				Class:     DiagnosticClassPlaylistExhausted,
+				Reason:    "no playable files remain and no song_command is configured",
+				Actor:     DiagnosticActorAutoDJ,
+				Timestamp: time.Now(),
+			})
+		}
 		return "", 0, 0, false
 	}
 
@@ -1214,4 +1269,31 @@ func (sm *StreamerManager) ensureOutputSession(ctx context.Context, s *Streamer)
 	s.mu.Unlock()
 
 	return outputSession.Start(ctx)
+}
+
+func classifySongCommandError(err error) DiagnosticClass {
+	if err == nil {
+		return DiagnosticClassSongCommandFailure
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "empty output"):
+		return DiagnosticClassSongCommandEmpty
+	case strings.Contains(msg, "invalid file"):
+		return DiagnosticClassSongCommandInvalid
+	default:
+		return DiagnosticClassSongCommandFailure
+	}
+}
+
+func songCommandReason(err error) string {
+	switch classifySongCommandError(err) {
+	case DiagnosticClassSongCommandEmpty:
+		return "song_command returned empty output"
+	case DiagnosticClassSongCommandInvalid:
+		return "song_command returned invalid file"
+	default:
+		return "song_command failed"
+	}
 }

@@ -1,3 +1,4 @@
+import type { DiagnosticHistoryEntry } from '../../types'
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
@@ -13,6 +14,11 @@ interface Stream {
   bitrate: string
   current_song: string
   name: string
+  status: string
+  status_class: string
+  status_reason: string
+  last_error?: string
+  history: DiagnosticHistoryEntry[]
 }
 
 const streams = signal<Stream[]>([])
@@ -58,6 +64,35 @@ async function kickListeners(mount: string) {
   load()
 }
 
+function statusLabel(status: string, sourceIP: string) {
+  switch (status) {
+    case 'running': return 'Running'
+    case 'recovering': return 'Recovering'
+    case 'degraded': return 'Degraded'
+    case 'dead': return 'Dead'
+    case 'error': return 'Error'
+    case 'stopped': return 'Stopped'
+    default: return sourceIP ? 'Running' : 'Stopped'
+  }
+}
+
+function statusBadgeClass(status: string, sourceIP: string) {
+  const effective = status || (sourceIP ? 'running' : 'stopped')
+  switch (effective) {
+    case 'running':
+      return 'bg-live/15 text-live'
+    case 'recovering':
+      return 'bg-accent/15 text-accent'
+    case 'degraded':
+      return 'bg-yellow-500/15 text-yellow-400'
+    case 'dead':
+    case 'error':
+      return 'bg-danger/15 text-danger'
+    default:
+      return 'bg-surface-overlay text-text-tertiary'
+  }
+}
+
 export function Streams() {
   useEffect(() => { load() }, [])
 
@@ -96,7 +131,19 @@ export function Streams() {
               streams.value.map((s) => (
                 <tr key={s.mount} class="border-b border-[rgba(255,255,255,0.03)]">
                   <td class="px-4 py-3.5">
-                    <span class={`inline-block w-2 h-2 rounded-full ${s.source_ip ? 'bg-live' : 'bg-text-tertiary'}`} />
+                    <div class="flex flex-col gap-1.5">
+                      <span class={`inline-flex items-center rounded-full px-2 py-1 font-mono text-[10px] uppercase ${statusBadgeClass(s.status, s.source_ip)}`}>
+                        {statusLabel(s.status, s.source_ip)}
+                      </span>
+                      <span class="text-xs text-text-secondary">
+                        {s.status_reason || (s.source_ip ? 'source connected' : 'no source')}
+                      </span>
+                      {s.history?.length > 0 && (
+                        <span class="text-[11px] text-text-tertiary">
+                          Recent: {s.history.slice(-3).reverse().map((entry) => entry.reason).join(' • ')}
+                        </span>
+                      )}
+                    </div>
                   </td>
                   <td class="px-4 py-3.5 font-mono font-bold text-sm text-text-primary">{s.mount}</td>
                   <td class="px-4 py-3.5 text-sm text-text-secondary">{s.source_ip || 'No source'}</td>

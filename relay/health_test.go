@@ -72,6 +72,29 @@ func TestHealthMonitorEmitsDeadEvent(t *testing.T) {
 	}
 }
 
+func TestHealthMonitorWritesDeadDiagnosticReason(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/dead")
+	s.LastDataReceived = time.Now().Add(-time.Minute)
+
+	hm := NewHealthMonitor(r)
+	hm.check()
+
+	current, ok := r.Diagnostics.Current("/dead")
+	if !ok {
+		t.Fatal("expected diagnostic for dead mount")
+	}
+	if current.Status != DiagnosticStatusDead {
+		t.Fatalf("expected dead diagnostic, got %q", current.Status)
+	}
+	if current.Class != DiagnosticClassHealthDead {
+		t.Fatalf("expected health_dead class, got %q", current.Class)
+	}
+	if current.Reason == "" {
+		t.Fatal("expected dead diagnostic reason to be populated")
+	}
+}
+
 func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/health-window")

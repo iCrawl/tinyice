@@ -255,3 +255,81 @@ func TestRecoverDeadSongCommandMountSkipsManualStop(t *testing.T) {
 		t.Fatalf("expected manual stop to remain stopped, got %v", state)
 	}
 }
+
+func TestRecoverDeadSongCommandMountRecordsRecoveryStartAndSuccess(t *testing.T) {
+	r := NewRelay(false, nil)
+	sm := NewStreamerManager(r, nil)
+	sm.instances["/dead"] = &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/dead",
+		State:              StatePlaying,
+		SongCommand:        "printf track.mp3",
+		SongCommandTimeout: 1,
+		relay:              r,
+	}
+
+	stream := r.GetOrCreateStream("/dead")
+	stream.LastDataReceived = time.Now().Add(-time.Minute)
+
+	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
+		return "/tmp/recovered.mp3", nil
+	}
+	sm.recoveryAfter = func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
+		stream.LastDataReceived = time.Now()
+		return nil
+	}
+
+	sm.RecoverDeadSongCommandMount("/dead")
+
+	deadline := time.After(500 * time.Millisecond)
+	for sm.DeadRecoveryActive("/dead") {
+		select {
+		case <-deadline:
+			t.Fatal("expected recovery worker to exit")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	current, ok := r.Diagnostics.Current("/dead")
+	if !ok {
+		t.Fatal("expected recovery diagnostic snapshot")
+	}
+	if current.Status != DiagnosticStatusRunning {
+		t.Fatalf("expected running after successful recovery, got %q", current.Status)
+	}
+	if current.LastRecoveryResult != "success" {
+		t.Fatalf("expected success recovery result, got %q", current.LastRecoveryResult)
+	}
+	if len(current.History) < 2 {
+		t.Fatalf("expected recovery history entries, got %d", len(current.History))
+	}
+}
+
+func TestNextTrackCandidateUsesPlaylistExhaustedOnlyWithoutSongCommand(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := &Streamer{
+		Name:        "NoCmd",
+		OutputMount: "/empty",
+		State:       StatePlaying,
+		relay:       r,
+	}
+
+	_, _, _, ok := s.nextTrackCandidate()
+	if ok {
+		t.Fatal("expected no track candidate")
+	}
+
+	current, ok := r.Diagnostics.Current("/empty")
+	if !ok {
+		t.Fatal("expected diagnostics for empty playlist")
+	}
+	if current.Class != DiagnosticClassPlaylistExhausted {
+		t.Fatalf("expected playlist_exhausted, got %q", current.Class)
+	}
+}

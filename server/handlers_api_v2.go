@@ -32,6 +32,42 @@ func jsonError(w http.ResponseWriter, msg string, status int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+type diagnosticInfo struct {
+	Status             string                  `json:"status"`
+	StatusClass        string                  `json:"status_class"`
+	StatusReason       string                  `json:"status_reason"`
+	LastError          string                  `json:"last_error,omitempty"`
+	StatusUpdatedAt    int64                   `json:"status_updated_at"`
+	LastRecoveryAt     int64                   `json:"last_recovery_at,omitempty"`
+	LastRecoveryResult string                  `json:"last_recovery_result,omitempty"`
+	History            []relay.DiagnosticEntry `json:"history"`
+}
+
+func diagnosticInfoFor(r *relay.Relay, mount string) diagnosticInfo {
+	if r == nil || r.Diagnostics == nil {
+		return diagnosticInfo{History: []relay.DiagnosticEntry{}}
+	}
+
+	current, ok := r.Diagnostics.Current(mount)
+	if !ok {
+		return diagnosticInfo{History: []relay.DiagnosticEntry{}}
+	}
+
+	info := diagnosticInfo{
+		Status:             string(current.Status),
+		StatusClass:        string(current.Class),
+		StatusReason:       current.Reason,
+		LastError:          current.Error,
+		StatusUpdatedAt:    current.UpdatedAt.Unix(),
+		LastRecoveryResult: current.LastRecoveryResult,
+		History:            current.History,
+	}
+	if !current.LastRecoveryAt.IsZero() {
+		info.LastRecoveryAt = current.LastRecoveryAt.Unix()
+	}
+	return info
+}
+
 // ---------------------------------------------------------------------------
 // Audit helper
 // ---------------------------------------------------------------------------
@@ -100,17 +136,25 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 
 	allStreams := s.Relay.Snapshot()
 	type streamInfo struct {
-		Mount       string  `json:"mount"`
-		ContentType string  `json:"content_type"`
-		Bitrate     string  `json:"bitrate"`
-		Listeners   int     `json:"listeners"`
-		SourceIP    string  `json:"source_ip"`
-		Visible     bool    `json:"visible"`
-		Enabled     bool    `json:"enabled"`
-		Health      float64 `json:"health"`
-		Uptime      string  `json:"uptime"`
-		CurrentSong string  `json:"current_song"`
-		Name        string  `json:"name"`
+		Mount              string                  `json:"mount"`
+		ContentType        string                  `json:"content_type"`
+		Bitrate            string                  `json:"bitrate"`
+		Listeners          int                     `json:"listeners"`
+		SourceIP           string                  `json:"source_ip"`
+		Visible            bool                    `json:"visible"`
+		Enabled            bool                    `json:"enabled"`
+		Health             float64                 `json:"health"`
+		Uptime             string                  `json:"uptime"`
+		CurrentSong        string                  `json:"current_song"`
+		Name               string                  `json:"name"`
+		Status             string                  `json:"status"`
+		StatusClass        string                  `json:"status_class"`
+		StatusReason       string                  `json:"status_reason"`
+		LastError          string                  `json:"last_error,omitempty"`
+		StatusUpdatedAt    int64                   `json:"status_updated_at"`
+		LastRecoveryAt     int64                   `json:"last_recovery_at,omitempty"`
+		LastRecoveryResult string                  `json:"last_recovery_result,omitempty"`
+		History            []relay.DiagnosticEntry `json:"history"`
 	}
 
 	var result []streamInfo
@@ -118,18 +162,27 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	for _, st := range allStreams {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
+			diag := diagnosticInfoFor(s.Relay, st.MountName)
 			result = append(result, streamInfo{
-				Mount:       st.MountName,
-				ContentType: st.ContentType,
-				Bitrate:     st.Bitrate,
-				Listeners:   st.ListenersCount,
-				SourceIP:    st.SourceIP,
-				Visible:     st.Visible,
-				Enabled:     st.Enabled,
-				Health:      st.Health,
-				Uptime:      st.Uptime,
-				CurrentSong: st.CurrentSong,
-				Name:        st.Name,
+				Mount:              st.MountName,
+				ContentType:        st.ContentType,
+				Bitrate:            st.Bitrate,
+				Listeners:          st.ListenersCount,
+				SourceIP:           st.SourceIP,
+				Visible:            st.Visible,
+				Enabled:            st.Enabled,
+				Health:             st.Health,
+				Uptime:             st.Uptime,
+				CurrentSong:        st.CurrentSong,
+				Name:               st.Name,
+				Status:             diag.Status,
+				StatusClass:        diag.StatusClass,
+				StatusReason:       diag.StatusReason,
+				LastError:          diag.LastError,
+				StatusUpdatedAt:    diag.StatusUpdatedAt,
+				LastRecoveryAt:     diag.LastRecoveryAt,
+				LastRecoveryResult: diag.LastRecoveryResult,
+				History:            diag.History,
 			})
 		}
 	}
@@ -140,10 +193,19 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			seen[mount] = true
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
+			diag := diagnosticInfoFor(s.Relay, mount)
 			result = append(result, streamInfo{
-				Mount:   mount,
-				Visible: visible,
-				Enabled: !disabled,
+				Mount:              mount,
+				Visible:            visible,
+				Enabled:            !disabled,
+				Status:             diag.Status,
+				StatusClass:        diag.StatusClass,
+				StatusReason:       diag.StatusReason,
+				LastError:          diag.LastError,
+				StatusUpdatedAt:    diag.StatusUpdatedAt,
+				LastRecoveryAt:     diag.LastRecoveryAt,
+				LastRecoveryResult: diag.LastRecoveryResult,
+				History:            diag.History,
 			})
 		}
 	}
@@ -153,10 +215,19 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				seen[mount] = true
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
+				diag := diagnosticInfoFor(s.Relay, mount)
 				result = append(result, streamInfo{
-					Mount:   mount,
-					Visible: visible,
-					Enabled: !disabled,
+					Mount:              mount,
+					Visible:            visible,
+					Enabled:            !disabled,
+					Status:             diag.Status,
+					StatusClass:        diag.StatusClass,
+					StatusReason:       diag.StatusReason,
+					LastError:          diag.LastError,
+					StatusUpdatedAt:    diag.StatusUpdatedAt,
+					LastRecoveryAt:     diag.LastRecoveryAt,
+					LastRecoveryResult: diag.LastRecoveryResult,
+					History:            diag.History,
 				})
 			}
 		}
@@ -306,28 +377,36 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type autoDJInfo struct {
-		Name           string               `json:"name"`
-		Mount          string               `json:"mount"`
-		State          int                  `json:"state"`
-		CurrentSong    string               `json:"current_song"`
-		StartTime      int64                `json:"start_time"`
-		Duration       float64              `json:"duration"`
-		PlaylistPos    int                  `json:"playlist_pos"`
-		PlaylistLen    int                  `json:"playlist_len"`
-		Shuffle        bool                 `json:"shuffle"`
-		Loop           bool                 `json:"loop"`
-		InjectMetadata bool                 `json:"inject_metadata"`
-		Visible        bool                 `json:"visible"`
-		MusicDir       string               `json:"music_dir"`
-		Format         string               `json:"format"`
-		Bitrate        int                  `json:"bitrate"`
-		Enabled        bool                 `json:"enabled"`
-		MPDEnabled     bool                 `json:"mpd_enabled"`
-		MPDPort        string               `json:"mpd_port"`
-		LastPlaylist       string               `json:"last_playlist"`
-		SongCommand        string               `json:"song_command"`
-		SongCommandTimeout int                   `json:"song_command_timeout"`
-		Queue              []relay.PlaylistItem  `json:"queue"`
+		Name               string                  `json:"name"`
+		Mount              string                  `json:"mount"`
+		State              int                     `json:"state"`
+		CurrentSong        string                  `json:"current_song"`
+		StartTime          int64                   `json:"start_time"`
+		Duration           float64                 `json:"duration"`
+		PlaylistPos        int                     `json:"playlist_pos"`
+		PlaylistLen        int                     `json:"playlist_len"`
+		Shuffle            bool                    `json:"shuffle"`
+		Loop               bool                    `json:"loop"`
+		InjectMetadata     bool                    `json:"inject_metadata"`
+		Visible            bool                    `json:"visible"`
+		MusicDir           string                  `json:"music_dir"`
+		Format             string                  `json:"format"`
+		Bitrate            int                     `json:"bitrate"`
+		Enabled            bool                    `json:"enabled"`
+		MPDEnabled         bool                    `json:"mpd_enabled"`
+		MPDPort            string                  `json:"mpd_port"`
+		LastPlaylist       string                  `json:"last_playlist"`
+		SongCommand        string                  `json:"song_command"`
+		SongCommandTimeout int                     `json:"song_command_timeout"`
+		Queue              []relay.PlaylistItem    `json:"queue"`
+		Status             string                  `json:"status"`
+		StatusClass        string                  `json:"status_class"`
+		StatusReason       string                  `json:"status_reason"`
+		LastError          string                  `json:"last_error,omitempty"`
+		StatusUpdatedAt    int64                   `json:"status_updated_at"`
+		LastRecoveryAt     int64                   `json:"last_recovery_at,omitempty"`
+		LastRecoveryResult string                  `json:"last_recovery_result,omitempty"`
+		History            []relay.DiagnosticEntry `json:"history"`
 	}
 
 	var result []autoDJInfo
@@ -344,14 +423,14 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := autoDJInfo{
-			Name:           adj.Name,
-			Mount:          adj.Mount,
-			Format:         adj.Format,
-			Bitrate:        adj.Bitrate,
-			Enabled:        adj.Enabled,
-			MusicDir:       adj.MusicDir,
-			MPDEnabled:     adj.MPDEnabled,
-			MPDPort:        adj.MPDPort,
+			Name:               adj.Name,
+			Mount:              adj.Mount,
+			Format:             adj.Format,
+			Bitrate:            adj.Bitrate,
+			Enabled:            adj.Enabled,
+			MusicDir:           adj.MusicDir,
+			MPDEnabled:         adj.MPDEnabled,
+			MPDPort:            adj.MPDPort,
 			LastPlaylist:       adj.LastPlaylist,
 			SongCommand:        adj.SongCommand,
 			SongCommandTimeout: adj.SongCommandTimeout,
@@ -359,6 +438,15 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 			InjectMetadata:     adj.InjectMetadata,
 			Visible:            adj.Visible,
 		}
+		diag := diagnosticInfoFor(s.Relay, adj.Mount)
+		info.Status = diag.Status
+		info.StatusClass = diag.StatusClass
+		info.StatusReason = diag.StatusReason
+		info.LastError = diag.LastError
+		info.StatusUpdatedAt = diag.StatusUpdatedAt
+		info.LastRecoveryAt = diag.LastRecoveryAt
+		info.LastRecoveryResult = diag.LastRecoveryResult
+		info.History = diag.History
 		if st, ok := streamerMap[adj.Mount]; ok {
 			stats := st.GetStats()
 			info.State = int(stats.State)
@@ -375,6 +463,9 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 		}
 		if info.Queue == nil {
 			info.Queue = []relay.PlaylistItem{}
+		}
+		if info.History == nil {
+			info.History = []relay.DiagnosticEntry{}
 		}
 		result = append(result, info)
 	}

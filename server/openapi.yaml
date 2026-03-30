@@ -1570,6 +1570,29 @@ components:
           type: string
         name:
           type: string
+        status:
+          type: string
+          example: dead
+        status_class:
+          type: string
+          example: health_dead
+        status_reason:
+          type: string
+          example: no data for 63s
+        last_error:
+          type: string
+        status_updated_at:
+          type: integer
+          format: int64
+        last_recovery_at:
+          type: integer
+          format: int64
+        last_recovery_result:
+          type: string
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosticEntry"
         live:
           type: boolean
           description: Whether a source is currently connected
@@ -1623,6 +1646,46 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/PlaylistItem"
+        status:
+          type: string
+          example: recovering
+        status_class:
+          type: string
+          example: recovery_started
+        status_reason:
+          type: string
+          example: retrying song_command after dead health event
+        last_error:
+          type: string
+        status_updated_at:
+          type: integer
+          format: int64
+        last_recovery_at:
+          type: integer
+          format: int64
+        last_recovery_result:
+          type: string
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosticEntry"
+
+    DiagnosticEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: string
+        class:
+          type: string
+        reason:
+          type: string
+        error:
+          type: string
+        actor:
+          type: string
 
     PlaylistItem:
       type: object

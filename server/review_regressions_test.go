@@ -29,6 +29,7 @@ func newTestServer(t *testing.T) *Server {
 	cfg := &config.Config{
 		ConfigPath:    cfgPath,
 		SetupComplete: true,
+		Mounts:        map[string]string{},
 		Users: map[string]*config.User{
 			"admin": {
 				Username: "admin",
@@ -42,10 +43,12 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed config file: %v", err)
 	}
 
+	r := relay.NewRelay(false, nil)
+
 	return &Server{
 		Config:       cfg,
-		Relay:        relay.NewRelay(false, nil),
-		StreamerM:    relay.NewStreamerManager(relay.NewRelay(false, nil), cfg),
+		Relay:        r,
+		StreamerM:    relay.NewStreamerManager(r, cfg),
 		sessions:     make(map[string]*session),
 		authAttempts: make(map[string]*authAttempt),
 		scanAttempts: make(map[string]*scanAttempt),

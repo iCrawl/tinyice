@@ -37,12 +37,13 @@ type MetadataChange struct {
 }
 
 type Relay struct {
-	Streams    map[string]*Stream // Active streams by mount point
-	mu         sync.RWMutex       // Mutex protecting the streams map
-	LowLatency bool               // Whether to optimize for low latency
-	BytesIn    int64              // Global bytes received counter
-	BytesOut   int64              // Global bytes sent counter
-	History    *HistoryManager    // Optional history manager for statistics
+	Streams      map[string]*Stream // Active streams by mount point
+	mu           sync.RWMutex       // Mutex protecting the streams map
+	LowLatency   bool               // Whether to optimize for low latency
+	BytesIn      int64              // Global bytes received counter
+	BytesOut     int64              // Global bytes sent counter
+	History      *HistoryManager    // Optional history manager for statistics
+	Diagnostics  *DiagnosticsStore  // Mount-scoped lifecycle diagnostics
 
 	metaSubs   []chan MetadataChange      // SSE subscribers for metadata changes
 	lastMeta   map[string]MetadataChange // last metadata per mount
@@ -51,9 +52,10 @@ type Relay struct {
 
 func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
 	return &Relay{
-		Streams:    make(map[string]*Stream),
-		LowLatency: lowLatency,
-		History:    history,
+		Streams:     make(map[string]*Stream),
+		LowLatency:  lowLatency,
+		History:     history,
+		Diagnostics: NewDiagnosticsStore(10),
 	}
 }
 

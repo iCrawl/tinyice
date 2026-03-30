@@ -156,6 +156,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 	bufrw.Flush()
 
 	logger.L.Infow("Source connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusRunning,
+		Class:     relay.DiagnosticClassRecoverySucceeded,
+		Reason:    "source connected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_connect", map[string]interface{}{
 		"mount": mount,
 		"ip":    r.RemoteAddr,
@@ -179,6 +187,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logger.L.Infow("Source disconnected", "mount", mount)
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusStopped,
+		Class:     relay.DiagnosticClassSourceDisconnect,
+		Reason:    "source disconnected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_disconnect", map[string]interface{}{
 		"mount": mount,
 	})

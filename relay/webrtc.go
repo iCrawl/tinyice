@@ -320,6 +320,14 @@ func (wm *WebRTCManager) cleanupSource(mount string, peerConnection *webrtc.Peer
 		delete(wm.sources, mount)
 	}
 	wm.mu.Unlock()
+	wm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     mount,
+		Status:    DiagnosticStatusStopped,
+		Class:     DiagnosticClassSourceDisconnect,
+		Reason:    "webrtc source disconnected",
+		Actor:     DiagnosticActorWebRTC,
+		Timestamp: time.Now(),
+	})
 	wm.relay.RemoveStream(mount)
 }
 
@@ -333,6 +341,14 @@ func (wm *WebRTCManager) DisconnectSource(mount string) error {
 	if !ok {
 		return fmt.Errorf("no WebRTC source for mount %s", mount)
 	}
+	wm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     mount,
+		Status:    DiagnosticStatusStopped,
+		Class:     DiagnosticClassSourceDisconnect,
+		Reason:    "webrtc source disconnected",
+		Actor:     DiagnosticActorWebRTC,
+		Timestamp: time.Now(),
+	})
 	wm.relay.RemoveStream(mount)
 	return pc.Close()
 }

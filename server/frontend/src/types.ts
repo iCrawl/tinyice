@@ -38,6 +38,18 @@ export interface StreamInfo {
   bitrate: number
   listeners: number
   live: boolean
+  status: string
+  status_reason: string
+  history: DiagnosticHistoryEntry[]
+}
+
+export interface DiagnosticHistoryEntry {
+  timestamp: string | number
+  status: string
+  class: string
+  reason: string
+  error?: string
+  actor: string
 }
 
 // SSE Events
@@ -61,6 +73,8 @@ export interface StreamEvent {
   bitrate: number
   listeners: number
   health: number
+  status: string
+  status_reason: string
 }
 
 export interface AutoDJEvent {

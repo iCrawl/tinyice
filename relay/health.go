@@ -126,6 +126,27 @@ func (hm *HealthMonitor) check() {
 
 		if newStatus != oldStatus {
 			hm.lastStatus[ss.MountName] = newStatus
+			reason := "no data for " + time.Since(checkTime).Round(time.Second).String()
+			switch newStatus {
+			case StatusDegraded:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDegraded,
+					Class:     DiagnosticClassHealthDegraded,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			case StatusDead:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDead,
+					Class:     DiagnosticClassHealthDead,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			}
 			logger.L.Infow("Stream health changed",
 				"mount", ss.MountName,
 				"from", oldStatus.String(),
