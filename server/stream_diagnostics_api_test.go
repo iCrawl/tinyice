@@ -161,3 +161,33 @@ func TestAPIGetStreamDiagnosticsReturnsPersistedEntries(t *testing.T) {
 		t.Fatalf("expected persisted reason, got %#v", payload[0]["reason"])
 	}
 }
+
+func TestAPIGetStreamDiagnosticsRejectsUnauthorizedMountAccess(t *testing.T) {
+	s := newTestServer(t)
+	s.Config.Users["dj"] = &config.User{
+		Username: "dj",
+		Role:     config.RoleAdmin,
+		Mounts: map[string]string{
+			"/owned": "hashed",
+		},
+	}
+	s.sessions["sid-dj"] = &session{User: s.Config.Users["dj"], CSRFToken: "csrf-ok"}
+	s.Relay.History.RecordDiagnostic(relay.DiagnosticUpdate{
+		Mount:     "/other",
+		Status:    relay.DiagnosticStatusDead,
+		Class:     relay.DiagnosticClassHealthDead,
+		Reason:    "no data for 91s",
+		Actor:     relay.DiagnosticActorHealthMonitor,
+		Timestamp: time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/streams/diagnostics?mount=%2Fother", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetStreamDiagnostics(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden for unauthorized mount, got %d: %s", rr.Code, rr.Body.String())
+	}
+}

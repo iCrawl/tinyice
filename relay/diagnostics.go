@@ -26,6 +26,7 @@ const (
 	DiagnosticClassSourceDisconnect   DiagnosticClass = "source_disconnect"
 	DiagnosticClassHealthDegraded     DiagnosticClass = "health_degraded"
 	DiagnosticClassHealthDead         DiagnosticClass = "health_dead"
+	DiagnosticClassHealthRecovered    DiagnosticClass = "health_recovered"
 	DiagnosticClassSongCommandFailure DiagnosticClass = "song_command_failure"
 	DiagnosticClassSongCommandEmpty   DiagnosticClass = "song_command_empty_output"
 	DiagnosticClassSongCommandInvalid DiagnosticClass = "song_command_invalid_file"

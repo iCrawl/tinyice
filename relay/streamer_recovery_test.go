@@ -311,6 +311,60 @@ func TestRecoverDeadSongCommandMountRecordsRecoveryStartAndSuccess(t *testing.T)
 	}
 }
 
+func TestRecoverDeadSongCommandMountRecordsRecoveryFailure(t *testing.T) {
+	r := NewRelay(false, nil)
+	sm := NewStreamerManager(r, nil)
+	sm.instances["/dead"] = &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/dead",
+		State:              StatePlaying,
+		SongCommand:        "printf track.mp3",
+		SongCommandTimeout: 1,
+		relay:              r,
+	}
+
+	stream := r.GetOrCreateStream("/dead")
+	stream.LastDataReceived = time.Now().Add(-time.Minute)
+
+	waitCh := make(chan time.Time)
+	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
+		return "", errors.New("boom")
+	}
+	sm.recoveryAfter = func(time.Duration) <-chan time.Time {
+		return waitCh
+	}
+
+	sm.RecoverDeadSongCommandMount("/dead")
+
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		current, ok := r.Diagnostics.Current("/dead")
+		if ok && current.Class == DiagnosticClassRecoveryFailed {
+			if current.Status != DiagnosticStatusError {
+				t.Fatalf("expected error status for failed recovery, got %q", current.Status)
+			}
+			if current.LastRecoveryResult != "failed" {
+				t.Fatalf("expected failed recovery result, got %q", current.LastRecoveryResult)
+			}
+			break
+		}
+
+		select {
+		case <-deadline:
+			t.Fatal("expected recovery failure diagnostic")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	sm.mu.RLock()
+	cancel := sm.deadRecovery["/dead"]
+	sm.mu.RUnlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 func TestNextTrackCandidateUsesPlaylistExhaustedOnlyWithoutSongCommand(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := &Streamer{

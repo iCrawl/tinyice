@@ -32,6 +32,19 @@ func jsonError(w http.ResponseWriter, msg string, status int) {
 	json.NewEncoder(w).Encode(map[string]string{"error": msg})
 }
 
+func (s *Server) requireMountAccess(w http.ResponseWriter, r *http.Request, mount string) (*config.User, bool) {
+	user, ok := s.checkAuth(r)
+	if !ok {
+		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return nil, false
+	}
+	if !s.hasAccess(user, mount) {
+		jsonError(w, "Forbidden", http.StatusForbidden)
+		return nil, false
+	}
+	return user, true
+}
+
 type diagnosticInfo struct {
 	Status             string                  `json:"status"`
 	StatusClass        string                  `json:"status_class"`
@@ -252,18 +265,16 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) apiGetStreamDiagnostics(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
 		return
 	}
 	if s.Relay.History == nil {
 		jsonError(w, "History disabled", http.StatusServiceUnavailable)
-		return
-	}
-
-	mount := r.URL.Query().Get("mount")
-	if mount == "" {
-		jsonError(w, "Mount is required", http.StatusBadRequest)
 		return
 	}
 
@@ -522,22 +533,18 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	var body struct {
-		Name           string `json:"name"`
-		Mount          string `json:"mount"`
-		MusicDir       string `json:"music_dir"`
-		Format         string `json:"format"`
-		Bitrate        int    `json:"bitrate"`
-		Loop           bool   `json:"loop"`
-		InjectMetadata bool   `json:"inject_metadata"`
-		MPDEnabled     bool   `json:"mpd_enabled"`
-		MPDPort        string `json:"mpd_port"`
-		MPDPassword    string `json:"mpd_password"`
+		Name               string `json:"name"`
+		Mount              string `json:"mount"`
+		MusicDir           string `json:"music_dir"`
+		Format             string `json:"format"`
+		Bitrate            int    `json:"bitrate"`
+		Loop               bool   `json:"loop"`
+		InjectMetadata     bool   `json:"inject_metadata"`
+		MPDEnabled         bool   `json:"mpd_enabled"`
+		MPDPort            string `json:"mpd_port"`
+		MPDPassword        string `json:"mpd_password"`
 		Visible            bool   `json:"visible"`
 		SongCommand        string `json:"song_command"`
 		SongCommandTimeout int    `json:"song_command_timeout"`
@@ -553,6 +560,9 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	if body.Mount[0] != '/' {
 		body.Mount = "/" + body.Mount
 	}
+	if _, ok := s.requireMountAccess(w, r, body.Mount); !ok {
+		return
+	}
 	if body.Format == "" {
 		body.Format = "mp3"
 	}
@@ -563,30 +573,29 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	absMusicDir, _ := filepath.Abs(body.MusicDir)
 
 	adj := &config.AutoDJConfig{
-		Name:           body.Name,
-		Mount:          body.Mount,
-		MusicDir:       absMusicDir,
-		Format:         body.Format,
-		Bitrate:        body.Bitrate,
-		Enabled:        true,
-		Loop:           body.Loop,
-		InjectMetadata: body.InjectMetadata,
-		MPDEnabled:     body.MPDEnabled,
-		MPDPort:        body.MPDPort,
+		Name:               body.Name,
+		Mount:              body.Mount,
+		MusicDir:           absMusicDir,
+		Format:             body.Format,
+		Bitrate:            body.Bitrate,
+		Enabled:            true,
+		Loop:               body.Loop,
+		InjectMetadata:     body.InjectMetadata,
+		MPDEnabled:         body.MPDEnabled,
+		MPDPort:            body.MPDPort,
 		MPDPassword:        body.MPDPassword,
 		Visible:            body.Visible,
 		SongCommand:        body.SongCommand,
 		SongCommandTimeout: body.SongCommandTimeout,
 	}
 
-	s.Config.AutoDJs = append(s.Config.AutoDJs, adj)
-	s.Config.SaveConfig()
-
 	streamer, err := s.StreamerM.StartStreamer(adj.Name, adj.Mount, adj.MusicDir, adj.Loop, adj.Format, adj.Bitrate, adj.InjectMetadata, nil, adj.MPDEnabled, adj.MPDPort, adj.MPDPassword, adj.Visible, "", adj.SongCommand, adj.SongCommandTimeout)
 	if err != nil {
 		jsonError(w, fmt.Sprintf("Failed to start AutoDJ: %v", err), http.StatusInternalServerError)
 		return
 	}
+	s.Config.AutoDJs = append(s.Config.AutoDJs, adj)
+	s.Config.SaveConfig()
 	if adj.InjectMetadata {
 		if st, ok := s.Relay.GetStream(adj.Mount); ok {
 			st.SetVisible(adj.Visible)
@@ -603,14 +612,13 @@ func (s *Server) apiDeleteAutoDJ(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
 	if mount == "" {
 		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
 		return
 	}
 
@@ -639,12 +647,11 @@ func (s *Server) apiAutoDJPlay(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -659,12 +666,11 @@ func (s *Server) apiAutoDJPause(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -679,12 +685,11 @@ func (s *Server) apiAutoDJNext(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -699,12 +704,11 @@ func (s *Server) apiAutoDJShuffle(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -720,12 +724,11 @@ func (s *Server) apiAutoDJLoop(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -749,12 +752,10 @@ func (s *Server) apiAutoDJLoop(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) apiGetPlaylist(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
 		return
 	}
-
-	mount := r.URL.Query().Get("mount")
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -766,10 +767,6 @@ func (s *Server) apiGetPlaylist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiAddToPlaylist(w http.ResponseWriter, r *http.Request) {
 	if !s.isCSRFSafe(r) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
-		return
-	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
@@ -796,6 +793,9 @@ func (s *Server) apiAddToPlaylist(w http.ResponseWriter, r *http.Request) {
 	mount := body.Mount
 	if mount == "" {
 		mount = r.URL.Query().Get("mount")
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
 	}
 
 	streamer := s.StreamerM.GetStreamer(mount)
@@ -859,10 +859,6 @@ func (s *Server) apiRemoveFromPlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	mount := r.URL.Query().Get("mount")
 
@@ -877,6 +873,9 @@ func (s *Server) apiRemoveFromPlaylist(w http.ResponseWriter, r *http.Request) {
 	idx := body.ID
 	if idx == 0 {
 		fmt.Sscanf(r.URL.Query().Get("id"), "%d", &idx)
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
 	}
 
 	streamer := s.StreamerM.GetStreamer(mount)
@@ -902,10 +901,6 @@ func (s *Server) apiClearPlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	var body struct {
 		Mount string `json:"mount"`
@@ -917,6 +912,9 @@ func (s *Server) apiClearPlaylist(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		body.Mount = mount
+	}
+	if _, ok := s.requireMountAccess(w, r, body.Mount); !ok {
+		return
 	}
 
 	streamer := s.StreamerM.GetStreamer(body.Mount)
@@ -941,10 +939,6 @@ func (s *Server) apiReorderPlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	var body struct {
 		Mount string `json:"mount"`
@@ -953,6 +947,9 @@ func (s *Server) apiReorderPlaylist(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, body.Mount); !ok {
 		return
 	}
 
@@ -979,12 +976,10 @@ func (s *Server) apiReorderPlaylist(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) apiGetQueue(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
 		return
 	}
-
-	mount := r.URL.Query().Get("mount")
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -998,10 +993,6 @@ func (s *Server) apiAddToQueue(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
 
 	var body struct {
 		Mount string `json:"mount"`
@@ -1009,6 +1000,9 @@ func (s *Server) apiAddToQueue(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, body.Mount); !ok {
 		return
 	}
 
@@ -1033,12 +1027,10 @@ func (s *Server) apiAddToQueue(w http.ResponseWriter, r *http.Request) {
 // ---------------------------------------------------------------------------
 
 func (s *Server) apiGetFiles(w http.ResponseWriter, r *http.Request) {
-	if _, ok := s.checkAuth(r); !ok {
-		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+	mount := r.URL.Query().Get("mount")
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
 		return
 	}
-
-	mount := r.URL.Query().Get("mount")
 	subDir := r.URL.Query().Get("path")
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
@@ -1340,8 +1332,13 @@ func (s *Server) apiCreateTranscoder(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
+	user, ok := s.checkAuth(r)
+	if !ok {
 		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != config.RoleSuperAdmin {
+		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -1381,8 +1378,13 @@ func (s *Server) apiDeleteTranscoder(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
+	user, ok := s.checkAuth(r)
+	if !ok {
 		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != config.RoleSuperAdmin {
+		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 

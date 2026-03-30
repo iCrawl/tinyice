@@ -95,6 +95,29 @@ func TestHealthMonitorWritesDeadDiagnosticReason(t *testing.T) {
 	}
 }
 
+func TestHealthMonitorMarksRecoveredMountRunningAgain(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/recover")
+	s.LastDataReceived = time.Now().Add(-time.Minute)
+
+	hm := NewHealthMonitor(r)
+	hm.check()
+
+	s.LastDataReceived = time.Now()
+	hm.check()
+
+	current, ok := r.Diagnostics.Current("/recover")
+	if !ok {
+		t.Fatal("expected recovered mount diagnostic")
+	}
+	if current.Status != DiagnosticStatusRunning {
+		t.Fatalf("expected running status after recovery, got %q", current.Status)
+	}
+	if current.Class != DiagnosticClassHealthRecovered {
+		t.Fatalf("expected health_recovered class, got %q", current.Class)
+	}
+}
+
 func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/health-window")

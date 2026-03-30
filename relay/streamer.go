@@ -52,10 +52,10 @@ type Streamer struct {
 	cancel context.CancelFunc
 	mu     sync.RWMutex
 
-	fileCancel   context.CancelFunc
+	fileCancel    context.CancelFunc
 	outputSession *AutoDJOutputSession
-	titleCache   map[string]string
-	titleFetchWg sync.WaitGroup
+	titleCache    map[string]string
+	titleFetchWg  sync.WaitGroup
 
 	// Stats
 	BytesStreamed       int64
@@ -191,6 +191,22 @@ func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *St
 		path, err := sm.recoveryExecSongCommand(s)
 		if err == nil && sm.recoveryActivatePath != nil {
 			err = sm.recoveryActivatePath(ctx, sm, s, path)
+		}
+		if err != nil {
+			if s.relay != nil && s.OutputMount != "" {
+				now := time.Now()
+				s.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:              s.OutputMount,
+					Status:             DiagnosticStatusError,
+					Class:              DiagnosticClassRecoveryFailed,
+					Reason:             "dead mount recovery attempt failed",
+					Error:              err.Error(),
+					Actor:              DiagnosticActorAutoDJ,
+					Timestamp:          now,
+					LastRecoveryAt:     now,
+					LastRecoveryResult: "failed",
+				})
+			}
 		}
 		if err == nil && sm.mountHasFreshData(s.OutputMount) {
 			if s.relay != nil && s.OutputMount != "" {

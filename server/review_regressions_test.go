@@ -277,3 +277,161 @@ func TestAPIDeleteAutoDJAllowsRecreateOnSameMount(t *testing.T) {
 		t.Fatalf("expected recreate on same mount to succeed, got %d: %s", recreateRR.Code, recreateRR.Body.String())
 	}
 }
+
+func TestMountScopedUserCannotManageOtherUsersAutoDJResources(t *testing.T) {
+	s := newTestServer(t)
+	s.Config.Users["dj"] = &config.User{
+		Username: "dj",
+		Role:     config.RoleAdmin,
+		Mounts: map[string]string{
+			"/owned": "hashed",
+		},
+	}
+	s.sessions["sid-dj"] = &session{
+		User:      s.Config.Users["dj"],
+		CSRFToken: "csrf-ok",
+	}
+
+	musicDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(musicDir, "track.mp3"), []byte("ID3test-data"), 0600); err != nil {
+		t.Fatalf("seed music file: %v", err)
+	}
+	if _, err := s.StreamerM.StartStreamer("Other", "/other", musicDir, false, "mp3", 128, false, nil, false, "", "", true, "", "", 0); err != nil {
+		t.Fatalf("start streamer: %v", err)
+	}
+	s.Config.AutoDJs = []*config.AutoDJConfig{{
+		Name:     "Other",
+		Mount:    "/other",
+		MusicDir: musicDir,
+		Format:   "mp3",
+		Bitrate:  128,
+		Enabled:  true,
+	}}
+
+	tests := []struct {
+		name string
+		run  func(*httptest.ResponseRecorder)
+	}{
+		{
+			name: "create autodj on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				body := strings.NewReader(`{"name":"Nope","mount":"/other","music_dir":"` + musicDir + `"}`)
+				req := httptest.NewRequest(http.MethodPost, "/api/autodj", body)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-CSRF-Token", "csrf-ok")
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiCreateAutoDJ(rr, req)
+			},
+		},
+		{
+			name: "play autodj on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodPost, "/api/autodj/play?mount=%2Fother", nil)
+				req.Header.Set("X-CSRF-Token", "csrf-ok")
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiAutoDJPlay(rr, req)
+			},
+		},
+		{
+			name: "read playlist on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodGet, "/api/playlist?mount=%2Fother", nil)
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiGetPlaylist(rr, req)
+			},
+		},
+		{
+			name: "queue file on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				body := strings.NewReader(`{"mount":"/other","path":"track.mp3"}`)
+				req := httptest.NewRequest(http.MethodPost, "/api/queue", body)
+				req.Header.Set("Content-Type", "application/json")
+				req.Header.Set("X-CSRF-Token", "csrf-ok")
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiAddToQueue(rr, req)
+			},
+		},
+		{
+			name: "browse files on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodGet, "/api/files?mount=%2Fother", nil)
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiGetFiles(rr, req)
+			},
+		},
+		{
+			name: "delete autodj on unauthorized mount",
+			run: func(rr *httptest.ResponseRecorder) {
+				req := httptest.NewRequest(http.MethodDelete, "/api/autodj?mount=%2Fother", nil)
+				req.Header.Set("X-CSRF-Token", "csrf-ok")
+				req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+				s.apiDeleteAutoDJ(rr, req)
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rr := httptest.NewRecorder()
+			tc.run(rr)
+			if rr.Code != http.StatusForbidden {
+				t.Fatalf("expected forbidden, got %d: %s", rr.Code, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestNonSuperAdminCannotCreateTranscoder(t *testing.T) {
+	s := newTestServer(t)
+	s.Config.Users["dj"] = &config.User{
+		Username: "dj",
+		Role:     config.RoleAdmin,
+		Mounts: map[string]string{
+			"/owned": "hashed",
+		},
+	}
+	s.sessions["sid-dj"] = &session{
+		User:      s.Config.Users["dj"],
+		CSRFToken: "csrf-ok",
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/transcoders", strings.NewReader(`{"name":"x","input_mount":"/owned","output_mount":"/x","format":"mp3","bitrate":128}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", "csrf-ok")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-dj"})
+	rr := httptest.NewRecorder()
+
+	s.apiCreateTranscoder(rr, req)
+
+	if rr.Code != http.StatusForbidden {
+		t.Fatalf("expected forbidden, got %d: %s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestAPICreateAutoDJRollsBackConfigWhenStartFails(t *testing.T) {
+	s := newTestServer(t)
+	s.sessions["sid-1"] = &session{
+		User:      s.Config.Users["admin"],
+		CSRFToken: "csrf-ok",
+	}
+
+	musicDir := t.TempDir()
+	if _, err := s.StreamerM.StartStreamer("Existing", "/dup", musicDir, false, "mp3", 128, false, nil, false, "", "", true, "", "", 0); err != nil {
+		t.Fatalf("start existing streamer: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/autodj", strings.NewReader(`{"name":"Broken","mount":"/dup","music_dir":"`+musicDir+`","format":"mp3","bitrate":128}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-CSRF-Token", "csrf-ok")
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiCreateAutoDJ(rr, req)
+
+	if rr.Code != http.StatusInternalServerError {
+		t.Fatalf("expected startup failure, got %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(s.Config.AutoDJs) != 0 {
+		t.Fatalf("expected failed create to leave config unchanged, got %d entries", len(s.Config.AutoDJs))
+	}
+}

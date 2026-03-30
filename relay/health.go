@@ -11,7 +11,7 @@ import (
 type HealthStatus int
 
 const (
-	StatusHealthy  HealthStatus = iota
+	StatusHealthy HealthStatus = iota
 	StatusDegraded
 	StatusDead
 )
@@ -128,6 +128,15 @@ func (hm *HealthMonitor) check() {
 			hm.lastStatus[ss.MountName] = newStatus
 			reason := "no data for " + time.Since(checkTime).Round(time.Second).String()
 			switch newStatus {
+			case StatusHealthy:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusRunning,
+					Class:     DiagnosticClassHealthRecovered,
+					Reason:    "stream healthy again",
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
 			case StatusDegraded:
 				hm.relay.Diagnostics.Record(DiagnosticUpdate{
 					Mount:     ss.MountName,
