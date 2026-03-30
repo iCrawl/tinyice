@@ -1,49 +1,63 @@
 import type { ListenerInfo } from '../../types'
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
-const listeners = signal<ListenerInfo[]>([])
-const loading = signal(true)
-const filterMount = signal('')
-const moveTargets = signal<Record<string, string>>({})
+type ListenersStore = ReturnType<typeof createListenersStore>
 
-function syncMoveTargets(nextListeners: ListenerInfo[]) {
+function createListenersStore() {
+  const listeners = signal<ListenerInfo[]>([])
+  const loading = signal(true)
+  const filterMount = signal('')
+  const moveTargets = signal<Record<string, string>>({})
+
+  return { listeners, loading, filterMount, moveTargets }
+}
+
+function useListenersStore() {
+  const storeRef = useRef<ListenersStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createListenersStore()
+  }
+  return storeRef.current
+}
+
+function syncMoveTargets(store: ListenersStore, nextListeners: ListenerInfo[]) {
   const next: Record<string, string> = {}
   for (const listener of nextListeners) {
     next[listener.id] = listener.current_mount
   }
-  moveTargets.value = next
+  store.moveTargets.value = next
 }
 
-async function load() {
-  loading.value = true
+async function load(store: ListenersStore) {
+  store.loading.value = true
   try {
-    listeners.value = await api.get<ListenerInfo[]>('/api/listeners')
-    syncMoveTargets(listeners.value)
+    store.listeners.value = await api.get<ListenerInfo[]>('/api/listeners')
+    syncMoveTargets(store, store.listeners.value)
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function disconnectListener(id: string) {
+async function disconnectListener(store: ListenersStore, id: string) {
   await api.post('/api/listeners/disconnect', { id })
-  load()
+  await load(store)
 }
 
-async function moveListener(id: string) {
+async function moveListener(store: ListenersStore, id: string) {
   await api.post('/api/listeners/move', {
     id,
-    target_mount: moveTargets.value[id] || '',
+    target_mount: store.moveTargets.value[id] || '',
   })
-  load()
+  await load(store)
 }
 
-function filteredListeners(): ListenerInfo[] {
-  if (!filterMount.value) {
-    return listeners.value
+function filteredListeners(store: ListenersStore): ListenerInfo[] {
+  if (!store.filterMount.value) {
+    return store.listeners.value
   }
-  return listeners.value.filter((listener) =>
-    listener.current_mount.includes(filterMount.value) || listener.requested_mount.includes(filterMount.value),
+  return store.listeners.value.filter((listener) =>
+    listener.current_mount.includes(store.filterMount.value) || listener.requested_mount.includes(store.filterMount.value),
   )
 }
 
@@ -56,9 +70,14 @@ function formatDuration(totalSeconds: number): string {
 }
 
 export function Listeners() {
-  useEffect(() => { load() }, [])
+  const store = useListenersStore()
+  const { listeners, loading, filterMount, moveTargets } = store
 
-  const rows = filteredListeners()
+  useEffect(() => {
+    void load(store)
+  }, [])
+
+  const rows = filteredListeners(store)
 
   return (
     <div class="p-7">
@@ -126,13 +145,13 @@ export function Listeners() {
                   <td class="px-4 py-3.5 text-right">
                     <div class="flex items-center justify-end gap-2">
                       <button
-                        onClick={() => moveListener(listener.id)}
+                        onClick={() => { void moveListener(store, listener.id) }}
                         class="border border-border text-accent font-mono text-xs px-2 py-1.5 rounded-lg hover:border-accent/40"
                       >
                         MOVE
                       </button>
                       <button
-                        onClick={() => disconnectListener(listener.id)}
+                        onClick={() => { void disconnectListener(store, listener.id) }}
                         class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                       >
                         DISCONNECT

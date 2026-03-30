@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Nav } from '@/components/Nav'
 import { StreamCard } from '@/components/StreamCard'
@@ -6,14 +6,31 @@ import { createSSE } from '@/lib/sse'
 import type { LandingData, StreamInfo } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
-const streams = signal<StreamInfo[]>(data.streams ?? [])
-const search = signal('')
+
+type ExploreStore = ReturnType<typeof createExploreStore>
+
+function createExploreStore(initialData: Partial<LandingData>) {
+  const streams = signal<StreamInfo[]>(initialData.streams ?? [])
+  const search = signal('')
+
+  return { streams, search }
+}
+
+function useExploreStore(initialData: Partial<LandingData>) {
+  const storeRef = useRef<ExploreStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createExploreStore(initialData)
+  }
+  return storeRef.current
+}
 
 function playerPath(mount: string): string {
   return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
 }
 
 export function Explore() {
+  const { streams, search } = useExploreStore(data)
+
   useEffect(() => {
     const sse = createSSE('/events')
 
@@ -56,6 +73,7 @@ export function Explore() {
         <div class="mx-auto max-w-7xl px-4 py-10">
           {/* Search */}
           <div class="relative mb-8">
+            <label htmlFor="stream-search" class="sr-only">Search streams</label>
             <svg
               class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary"
               viewBox="0 0 24 24"
@@ -69,6 +87,7 @@ export function Explore() {
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
+              id="stream-search"
               type="text"
               placeholder="Search streams..."
               value={search.value}

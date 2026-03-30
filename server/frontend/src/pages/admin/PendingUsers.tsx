@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 
 interface PendingUserData {
   id: string
@@ -9,47 +9,66 @@ interface PendingUserData {
   requested_at: string
 }
 
-const pendingUsers = signal<PendingUserData[]>([])
-const loading = signal(true)
-const approveModal = signal<PendingUserData | null>(null)
-const approveUsername = signal('')
-const approveRole = signal('dj')
+type PendingUsersStore = ReturnType<typeof createPendingUsersStore>
 
-async function fetchPending() {
+function createPendingUsersStore() {
+  const pendingUsers = signal<PendingUserData[]>([])
+  const loading = signal(true)
+  const approveModal = signal<PendingUserData | null>(null)
+  const approveUsername = signal('')
+  const approveRole = signal('dj')
+
+  return { pendingUsers, loading, approveModal, approveUsername, approveRole }
+}
+
+function usePendingUsersStore() {
+  const storeRef = useRef<PendingUsersStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createPendingUsersStore()
+  }
+  return storeRef.current
+}
+
+async function fetchPending(store: PendingUsersStore) {
   try {
     const res = await fetch('/api/pending-users')
     if (res.ok) {
-      pendingUsers.value = await res.json()
+      store.pendingUsers.value = await res.json()
     }
   } finally {
-    loading.value = false
+    store.loading.value = false
   }
 }
 
-async function approve(user: PendingUserData) {
+async function approve(store: PendingUsersStore, user: PendingUserData) {
   const res = await fetch('/api/pending-users/approve', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: user.id, username: approveUsername.value, role: approveRole.value }),
+    body: JSON.stringify({ id: user.id, username: store.approveUsername.value, role: store.approveRole.value }),
   })
   if (res.ok) {
-    approveModal.value = null
-    approveUsername.value = ''
-    fetchPending()
+    store.approveModal.value = null
+    store.approveUsername.value = ''
+    await fetchPending(store)
   }
 }
 
-async function deny(id: string) {
+async function deny(store: PendingUsersStore, id: string) {
   await fetch('/api/pending-users/deny', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ id }),
   })
-  fetchPending()
+  await fetchPending(store)
 }
 
 export function PendingUsers() {
-  useEffect(() => { fetchPending() }, [])
+  const store = usePendingUsersStore()
+  const { pendingUsers, loading, approveModal, approveUsername, approveRole } = store
+
+  useEffect(() => {
+    void fetchPending(store)
+  }, [])
 
   return (
     <div class="p-6 max-w-4xl">
@@ -78,7 +97,7 @@ export function PendingUsers() {
                   Approve
                 </button>
                 <button
-                  onClick={() => deny(user.id)}
+                  onClick={() => { void deny(store, user.id) }}
                   class="bg-red-600 text-white font-mono text-xs px-3 py-1.5 rounded hover:bg-red-500 transition-colors"
                 >
                   Deny
@@ -114,7 +133,7 @@ export function PendingUsers() {
               </select>
               <div class="flex gap-2 mt-2">
                 <button
-                  onClick={() => approve(approveModal.value!)}
+                  onClick={() => { void approve(store, approveModal.value!) }}
                   class="flex-1 bg-green-600 text-white font-mono text-sm py-2 rounded hover:bg-green-500"
                 >
                   Approve

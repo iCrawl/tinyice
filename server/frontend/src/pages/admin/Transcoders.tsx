@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
 interface Transcoder {
@@ -14,47 +14,66 @@ interface Transcoder {
   uptime: string
 }
 
-const transcoders = signal<Transcoder[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const formName = signal('')
-const formInput = signal('')
-const formOutput = signal('')
-const formFormat = signal('mp3')
-const formBitrate = signal(128)
+type TranscodersStore = ReturnType<typeof createTranscodersStore>
 
-async function load() {
-  loading.value = true
+function createTranscodersStore() {
+  const transcoders = signal<Transcoder[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const formName = signal('')
+  const formInput = signal('')
+  const formOutput = signal('')
+  const formFormat = signal('mp3')
+  const formBitrate = signal(128)
+
+  return { transcoders, loading, showForm, formName, formInput, formOutput, formFormat, formBitrate }
+}
+
+function useTranscodersStore() {
+  const storeRef = useRef<TranscodersStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createTranscodersStore()
+  }
+  return storeRef.current
+}
+
+async function load(store: TranscodersStore) {
+  store.loading.value = true
   try {
-    transcoders.value = await api.get<Transcoder[]>('/api/transcoders')
+    store.transcoders.value = await api.get<Transcoder[]>('/api/transcoders')
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function addTranscoder() {
+async function addTranscoder(store: TranscodersStore) {
   await api.post('/api/transcoders', {
-    name: formName.value,
-    input_mount: formInput.value,
-    output_mount: formOutput.value,
-    format: formFormat.value,
-    bitrate: formBitrate.value,
+    name: store.formName.value,
+    input_mount: store.formInput.value,
+    output_mount: store.formOutput.value,
+    format: store.formFormat.value,
+    bitrate: store.formBitrate.value,
   })
-  showForm.value = false
-  formName.value = ''
-  formInput.value = ''
-  formOutput.value = ''
-  formFormat.value = 'mp3'
-  formBitrate.value = 128
-  load()
+  store.showForm.value = false
+  store.formName.value = ''
+  store.formInput.value = ''
+  store.formOutput.value = ''
+  store.formFormat.value = 'mp3'
+  store.formBitrate.value = 128
+  await load(store)
 }
 
-async function removeTranscoder(name: string) {
+async function removeTranscoder(store: TranscodersStore, name: string) {
   await api.del(`/api/transcoders?name=${encodeURIComponent(name)}`)
-  load()
+  await load(store)
 }
 
 export function Transcoders() {
-  useEffect(() => { load() }, [])
+  const store = useTranscodersStore()
+  const { transcoders, loading, showForm, formName, formInput, formOutput, formFormat, formBitrate } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -98,7 +117,7 @@ export function Transcoders() {
                     <span class="text-xs text-text-tertiary">{t.active ? t.uptime : 'OFF'}</span>
                   </div>
                   <button
-                    onClick={() => removeTranscoder(t.name)}
+                    onClick={() => { void removeTranscoder(store, t.name) }}
                     title="Remove transcoder"
                     class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                   >
@@ -176,7 +195,7 @@ export function Transcoders() {
                 CANCEL
               </button>
               <button
-                onClick={addTranscoder}
+                onClick={() => { void addTranscoder(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE

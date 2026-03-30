@@ -1,10 +1,31 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
-const copied = signal(false)
+type APITokensStore = ReturnType<typeof createAPITokensStore>
 
-function fallbackCopy(text: string) {
+function createAPITokensStore() {
+  const copied = signal(false)
+  const tokens = signal<TokenInfo[]>([])
+  const loading = signal(true)
+  const showCreate = signal(false)
+  const createdToken = signal<string | null>(null)
+  const createdName = signal('')
+  const formName = signal('')
+  const formExpiry = signal('never')
+
+  return { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry }
+}
+
+function useAPITokensStore() {
+  const storeRef = useRef<APITokensStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createAPITokensStore()
+  }
+  return storeRef.current
+}
+
+function fallbackCopy(store: APITokensStore, text: string) {
   const textarea = document.createElement('textarea')
   textarea.value = text
   textarea.style.position = 'fixed'
@@ -13,8 +34,8 @@ function fallbackCopy(text: string) {
   textarea.select()
   document.execCommand('copy')
   document.body.removeChild(textarea)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 2000)
+  store.copied.value = true
+  setTimeout(() => { store.copied.value = false }, 2000)
 }
 
 interface TokenInfo {
@@ -33,14 +54,6 @@ interface TokenCreateResponse {
   token: string
   name: string
 }
-
-const tokens = signal<TokenInfo[]>([])
-const loading = signal(true)
-const showCreate = signal(false)
-const createdToken = signal<string | null>(null)
-const createdName = signal('')
-const formName = signal('')
-const formExpiry = signal('never')
 
 function relativeTime(dateStr: string): string {
   if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
@@ -78,45 +91,50 @@ function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString()
 }
 
-async function loadTokens() {
-  loading.value = true
+async function loadTokens(store: APITokensStore) {
+  store.loading.value = true
   try {
-    tokens.value = await api.get<TokenInfo[]>('/api/tokens')
+    store.tokens.value = await api.get<TokenInfo[]>('/api/tokens')
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function createToken() {
-  const name = formName.value.trim()
+async function createToken(store: APITokensStore) {
+  const name = store.formName.value.trim()
   if (!name) return
   let expires_at: string | undefined
-  if (formExpiry.value !== 'never') {
+  if (store.formExpiry.value !== 'never') {
     const now = new Date()
-    const days = parseInt(formExpiry.value, 10)
+    const days = parseInt(store.formExpiry.value, 10)
     now.setDate(now.getDate() + days)
     expires_at = now.toISOString()
   }
   try {
     const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
-    createdToken.value = result.token
-    createdName.value = result.name
-    showCreate.value = false
-    formName.value = ''
-    formExpiry.value = 'never'
-    loadTokens()
+    store.createdToken.value = result.token
+    store.createdName.value = result.name
+    store.showCreate.value = false
+    store.formName.value = ''
+    store.formExpiry.value = 'never'
+    await loadTokens(store)
   } catch { /* empty */ }
 }
 
-async function deleteToken(id: number, name: string) {
+async function deleteToken(store: APITokensStore, id: number, name: string) {
   if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
   try {
     await api.del(`/api/tokens?id=${id}`)
-    loadTokens()
+    await loadTokens(store)
   } catch { /* empty */ }
 }
 
 export function APITokens() {
-  useEffect(() => { loadTokens() }, [])
+  const store = useAPITokensStore()
+  const { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry } = store
+
+  useEffect(() => {
+    void loadTokens(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -168,7 +186,7 @@ export function APITokens() {
                   <td class="px-4 py-3.5 text-sm text-text-secondary">{formatDate(t.expires_at)}</td>
                   <td class="px-4 py-3.5 text-right">
                     <button
-                      onClick={() => deleteToken(t.id, t.name)}
+                      onClick={() => { void deleteToken(store, t.id, t.name) }}
                       class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
                       title="Delete token"
                     >
@@ -220,7 +238,7 @@ export function APITokens() {
                 CANCEL
               </button>
               <button
-                onClick={createToken}
+                onClick={() => { void createToken(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 CREATE
@@ -255,10 +273,10 @@ export function APITokens() {
                       setTimeout(() => { copied.value = false }, 2000)
                     }).catch(() => {
                       // Fallback for non-secure contexts
-                      fallbackCopy(token)
+                      fallbackCopy(store, token)
                     })
                   } else {
-                    fallbackCopy(token)
+                    fallbackCopy(store, token)
                   }
                 }}
                 class={`border font-mono text-xs px-4 py-2.5 rounded-lg shrink-0 transition-colors ${

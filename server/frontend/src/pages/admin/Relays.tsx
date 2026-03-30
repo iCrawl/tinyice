@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { Toggle } from '../../components/Toggle'
 
@@ -11,14 +11,6 @@ interface Relay {
   active: boolean
 }
 
-const relays = signal<Relay[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const formUrl = signal('')
-const formMount = signal('')
-const formPassword = signal('')
-const formBurst = signal(65536)
-
 function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
   if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
@@ -27,37 +19,59 @@ function formatUptime(seconds: number): string {
   return `${h}h ${m}m`
 }
 
-async function load() {
-  loading.value = true
+type RelaysStore = ReturnType<typeof createRelaysStore>
+
+function createRelaysStore() {
+  const relays = signal<Relay[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const formUrl = signal('')
+  const formMount = signal('')
+  const formPassword = signal('')
+  const formBurst = signal(65536)
+
+  return { relays, loading, showForm, formUrl, formMount, formPassword, formBurst }
+}
+
+function useRelaysStore() {
+  const storeRef = useRef<RelaysStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createRelaysStore()
+  }
+  return storeRef.current
+}
+
+async function load(store: RelaysStore) {
+  store.loading.value = true
   try {
-    relays.value = await api.get<Relay[]>('/api/relays')
+    store.relays.value = await api.get<Relay[]>('/api/relays')
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function addRelay() {
+async function addRelay(store: RelaysStore) {
   await api.post('/api/relays', {
-    url: formUrl.value,
-    mount: formMount.value,
-    password: formPassword.value || undefined,
-    burst_size: formBurst.value,
+    url: store.formUrl.value,
+    mount: store.formMount.value,
+    password: store.formPassword.value || undefined,
+    burst_size: store.formBurst.value,
   })
-  showForm.value = false
-  formUrl.value = ''
-  formMount.value = ''
-  formPassword.value = ''
-  formBurst.value = 65536
-  load()
+  store.showForm.value = false
+  store.formUrl.value = ''
+  store.formMount.value = ''
+  store.formPassword.value = ''
+  store.formBurst.value = 65536
+  await load(store)
 }
 
-async function toggleRelay(mount: string) {
+async function toggleRelay(store: RelaysStore, mount: string) {
   await api.post('/api/relays/toggle', { mount })
-  load()
+  await load(store)
 }
 
-async function removeRelay(mount: string) {
+async function removeRelay(store: RelaysStore, mount: string) {
   await api.del(`/api/relays?mount=${encodeURIComponent(mount)}`)
-  load()
+  await load(store)
 }
 
 function statusColor(r: Relay): string {
@@ -67,7 +81,12 @@ function statusColor(r: Relay): string {
 }
 
 export function Relays() {
-  useEffect(() => { load() }, [])
+  const store = useRelaysStore()
+  const { relays, loading, showForm, formUrl, formMount, formPassword, formBurst } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -102,9 +121,9 @@ export function Relays() {
                   </div>
                 </div>
                 <div class="flex items-center gap-3 ml-4">
-                  <Toggle checked={r.enabled} onChange={() => toggleRelay(r.mount)} label="Enable relay" />
+                  <Toggle checked={r.enabled} onChange={() => { void toggleRelay(store, r.mount) }} label="Enable relay" />
                   <button
-                    onClick={() => removeRelay(r.mount)}
+                    onClick={() => { void removeRelay(store, r.mount) }}
                     title="Remove relay"
                     class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                   >
@@ -170,7 +189,7 @@ export function Relays() {
                 CANCEL
               </button>
               <button
-                onClick={addRelay}
+                onClick={() => { void addRelay(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE

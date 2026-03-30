@@ -32,6 +32,7 @@ function usePlayerStore(initialData: Partial<PlayerData>) {
 export function Player() {
   const store = usePlayerStore(data)
   const { playing, title, artist, volume, listeners } = store
+  const mountPath = data.mount ? (data.mount.startsWith('/') ? data.mount : `/${data.mount}`) : null
 
   const audioRef = useRef<HTMLAudioElement>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -69,15 +70,15 @@ export function Player() {
 
   const handlePlay = useCallback(() => {
     const el = audioRef.current
-    if (!el) return
+    if (!el || !mountPath) return
     resumeAudio()
     if (!analyserRef.current) {
       analyserRef.current = connectAudio(el)
     }
-    el.src = data.mount.startsWith('/') ? data.mount : `/${data.mount}`
+    el.src = mountPath
     el.play()
     playing.value = true
-  }, [])
+  }, [mountPath])
 
   const handlePause = useCallback(() => {
     const el = audioRef.current

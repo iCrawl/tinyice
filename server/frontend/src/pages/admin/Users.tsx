@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
 interface User {
@@ -7,61 +7,80 @@ interface User {
   role: 'superadmin' | 'admin'
 }
 
-const users = signal<User[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const editingUser = signal<string | null>(null)
-const formUsername = signal('')
-const formPassword = signal('')
-const formRole = signal<'superadmin' | 'admin'>('admin')
+type UsersStore = ReturnType<typeof createUsersStore>
 
-async function load() {
-  loading.value = true
+function createUsersStore() {
+  const users = signal<User[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const editingUser = signal<string | null>(null)
+  const formUsername = signal('')
+  const formPassword = signal('')
+  const formRole = signal<'superadmin' | 'admin'>('admin')
+
+  return { users, loading, showForm, editingUser, formUsername, formPassword, formRole }
+}
+
+function useUsersStore() {
+  const storeRef = useRef<UsersStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createUsersStore()
+  }
+  return storeRef.current
+}
+
+async function load(store: UsersStore) {
+  store.loading.value = true
   try {
-    users.value = await api.get<User[]>('/api/users')
+    store.users.value = await api.get<User[]>('/api/users')
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-function openAdd() {
-  editingUser.value = null
-  formUsername.value = ''
-  formPassword.value = ''
-  formRole.value = 'admin'
-  showForm.value = true
+function openAdd(store: UsersStore) {
+  store.editingUser.value = null
+  store.formUsername.value = ''
+  store.formPassword.value = ''
+  store.formRole.value = 'admin'
+  store.showForm.value = true
 }
 
-function openEdit(u: User) {
-  editingUser.value = u.username
-  formUsername.value = u.username
-  formPassword.value = ''
-  formRole.value = u.role
-  showForm.value = true
+function openEdit(store: UsersStore, u: User) {
+  store.editingUser.value = u.username
+  store.formUsername.value = u.username
+  store.formPassword.value = ''
+  store.formRole.value = u.role
+  store.showForm.value = true
 }
 
-async function saveUser() {
-  if (editingUser.value) {
-    const body: Record<string, string> = { username: editingUser.value, role: formRole.value }
-    if (formPassword.value) body.password = formPassword.value
+async function saveUser(store: UsersStore) {
+  if (store.editingUser.value) {
+    const body: Record<string, string> = { username: store.editingUser.value, role: store.formRole.value }
+    if (store.formPassword.value) body.password = store.formPassword.value
     await api.put('/api/users', body)
   } else {
     await api.post('/api/users', {
-      username: formUsername.value,
-      password: formPassword.value,
-      role: formRole.value,
+      username: store.formUsername.value,
+      password: store.formPassword.value,
+      role: store.formRole.value,
     })
   }
-  showForm.value = false
-  load()
+  store.showForm.value = false
+  await load(store)
 }
 
-async function removeUser(username: string) {
+async function removeUser(store: UsersStore, username: string) {
   await api.del(`/api/users?username=${encodeURIComponent(username)}`)
-  load()
+  await load(store)
 }
 
 export function Users() {
-  useEffect(() => { load() }, [])
+  const store = useUsersStore()
+  const { users, loading, showForm, editingUser, formUsername, formPassword, formRole } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -69,7 +88,7 @@ export function Users() {
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-xl font-bold text-text-primary">Users</h1>
         <button
-          onClick={openAdd}
+          onClick={() => openAdd(store)}
           class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
         >
           ADD USER
@@ -105,14 +124,16 @@ export function Users() {
                   <td class="px-4 py-3.5 text-right">
                     <div class="flex items-center justify-end gap-1">
                       <button
-                        onClick={() => openEdit(u)}
+                        onClick={() => openEdit(store, u)}
+                        aria-label={`Edit ${u.username}`}
                         title="Edit user"
                         class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
                       >
                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
                       </button>
                       <button
-                        onClick={() => removeUser(u.username)}
+                        onClick={() => { void removeUser(store, u.username) }}
+                        aria-label={`Remove ${u.username}`}
                         title="Remove user"
                         class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                       >
@@ -176,7 +197,7 @@ export function Users() {
                 CANCEL
               </button>
               <button
-                onClick={saveUser}
+                onClick={() => { void saveUser(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE

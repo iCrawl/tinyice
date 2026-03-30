@@ -1,6 +1,6 @@
 import type { DiagnosticHistoryEntry } from '../../types'
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
 interface Stream {
@@ -23,73 +23,97 @@ interface Stream {
   history: DiagnosticHistoryEntry[]
 }
 
-const streams = signal<Stream[]>([])
-const loading = signal(true)
-const showModal = signal(false)
-const formMount = signal('')
-const formPassword = signal('')
-const formBurst = signal(65536)
-const formMaxListeners = signal(0)
-const burstDrafts = signal<Record<string, number>>({})
-const maxListenerDrafts = signal<Record<string, number>>({})
+type StreamsStore = ReturnType<typeof createStreamsStore>
 
-function syncDrafts(nextStreams: Stream[]) {
+function createStreamsStore() {
+  const streams = signal<Stream[]>([])
+  const loading = signal(true)
+  const showModal = signal(false)
+  const formMount = signal('')
+  const formPassword = signal('')
+  const formBurst = signal(65536)
+  const formMaxListeners = signal(0)
+  const burstDrafts = signal<Record<string, number>>({})
+  const maxListenerDrafts = signal<Record<string, number>>({})
+
+  return {
+    streams,
+    loading,
+    showModal,
+    formMount,
+    formPassword,
+    formBurst,
+    formMaxListeners,
+    burstDrafts,
+    maxListenerDrafts,
+  }
+}
+
+function useStreamsStore() {
+  const storeRef = useRef<StreamsStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createStreamsStore()
+  }
+  return storeRef.current
+}
+
+function syncDrafts(store: StreamsStore, nextStreams: Stream[]) {
   const nextBursts: Record<string, number> = {}
   const nextCaps: Record<string, number> = {}
   for (const stream of nextStreams) {
     nextBursts[stream.mount] = stream.burst_size || 0
     nextCaps[stream.mount] = stream.max_listeners || 0
   }
-  burstDrafts.value = nextBursts
-  maxListenerDrafts.value = nextCaps
+  store.burstDrafts.value = nextBursts
+  store.maxListenerDrafts.value = nextCaps
 }
 
-async function load() {
-  loading.value = true
+async function load(store: StreamsStore) {
+  store.loading.value = true
   try {
-    streams.value = await api.get<Stream[]>('/api/streams')
-    syncDrafts(streams.value)
+    store.streams.value = await api.get<Stream[]>('/api/streams')
+    syncDrafts(store, store.streams.value)
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function addMount() {
+async function addMount(store: StreamsStore) {
   await api.post('/api/streams', {
-    mount: formMount.value,
-    password: formPassword.value,
-    burst_size: formBurst.value,
-    max_listeners: formMaxListeners.value,
+    mount: store.formMount.value,
+    password: store.formPassword.value,
+    burst_size: store.formBurst.value,
+    max_listeners: store.formMaxListeners.value,
   })
-  showModal.value = false
-  formMount.value = ''
-  formPassword.value = ''
-  formBurst.value = 65536
-  formMaxListeners.value = 0
-  load()
+  store.showModal.value = false
+  store.formMount.value = ''
+  store.formPassword.value = ''
+  store.formBurst.value = 65536
+  store.formMaxListeners.value = 0
+  await load(store)
 }
 
-async function updateMount(mount: string) {
+async function updateMount(store: StreamsStore, mount: string) {
   await api.put('/api/streams', {
     mount,
-    burst_size: burstDrafts.value[mount] || 0,
-    max_listeners: maxListenerDrafts.value[mount] || 0,
+    burst_size: store.burstDrafts.value[mount] || 0,
+    max_listeners: store.maxListenerDrafts.value[mount] || 0,
   })
-  load()
+  await load(store)
 }
 
-async function removeMount(mount: string) {
+async function removeMount(store: StreamsStore, mount: string) {
   await api.del(`/api/streams?mount=${encodeURIComponent(mount)}`)
-  load()
+  await load(store)
 }
 
-async function kickSource(mount: string) {
+async function kickSource(store: StreamsStore, mount: string) {
   await api.post('/api/streams/kick', { mount, type: 'source' })
-  load()
+  await load(store)
 }
 
-async function kickListeners(mount: string) {
+async function kickListeners(store: StreamsStore, mount: string) {
   await api.post('/api/streams/kick', { mount, type: 'listeners' })
-  load()
+  await load(store)
 }
 
 function statusLabel(status: string, sourceIP: string) {
@@ -122,7 +146,12 @@ function statusBadgeClass(status: string, sourceIP: string) {
 }
 
 export function Streams() {
-  useEffect(() => { load() }, [])
+  const store = useStreamsStore()
+  const { streams, loading, showModal, formMount, formPassword, formBurst, formMaxListeners, burstDrafts, maxListenerDrafts } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -137,7 +166,6 @@ export function Streams() {
         </button>
       </div>
 
-      {/* Table */}
       <div class="border border-border rounded-xl overflow-hidden">
         <table class="w-full">
           <thead>
@@ -208,28 +236,31 @@ export function Streams() {
                   <td class="px-4 py-3.5 text-right">
                     <div class="flex items-center justify-end gap-1">
                       <button
-                        onClick={() => updateMount(s.mount)}
+                        onClick={() => { void updateMount(store, s.mount) }}
                         title="Save stream settings"
                         class="border border-border text-accent font-mono text-xs px-2 py-1.5 rounded-lg hover:border-accent/40"
                       >
                         SAVE
                       </button>
                       <button
-                        onClick={() => kickSource(s.mount)}
+                        onClick={() => { void kickSource(store, s.mount) }}
+                        aria-label={`Kick source on ${s.mount}`}
                         title="Kick source"
                         class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
                       >
                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64A9 9 0 005.64 18.36M5.64 5.64A9 9 0 0018.36 18.36" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
                       </button>
                       <button
-                        onClick={() => kickListeners(s.mount)}
+                        onClick={() => { void kickListeners(store, s.mount) }}
+                        aria-label={`Kick listeners on ${s.mount}`}
                         title="Kick listeners"
                         class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
                       >
                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2" /><circle cx="9" cy="7" r="4" /><line x1="18" y1="8" x2="23" y2="13" /><line x1="23" y1="8" x2="18" y2="13" /></svg>
                       </button>
                       <button
-                        onClick={() => removeMount(s.mount)}
+                        onClick={() => { void removeMount(store, s.mount) }}
+                        aria-label={`Remove mount ${s.mount}`}
                         title="Remove mount"
                         class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                       >
@@ -244,7 +275,6 @@ export function Streams() {
         </table>
       </div>
 
-      {/* Add Mount Modal */}
       {showModal.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div class="bg-surface-overlay border border-border rounded-xl p-6 max-w-md w-full mx-4">
@@ -296,7 +326,7 @@ export function Streams() {
                 CANCEL
               </button>
               <button
-                onClick={addMount}
+                onClick={() => { void addMount(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE
