@@ -15,6 +15,16 @@ test('AutoDJ page does not subscribe to stream SSE events', async () => {
   )
 })
 
+test('AutoDJ page subscribes to the authenticated admin SSE stream', async () => {
+  const source = await readFile(autoDJPath, 'utf8')
+
+  assert.match(
+    source,
+    /createSSE\(\s*['"]\/admin\/events['"]\s*\)/,
+    'AutoDJ should consume the authenticated admin SSE stream instead of the public /events feed'
+  )
+})
+
 test('AutoDJ form preserves and submits visible state', async () => {
   const source = await readFile(autoDJPath, 'utf8')
 
@@ -30,7 +40,7 @@ test('AutoDJ form preserves and submits visible state', async () => {
   )
   assert.match(
     source,
-    /visible:\s*formVisible\.value/,
+    /visible:\s*(?:store\.)?formVisible\.value/,
     'Saving an AutoDJ should send visible to the API'
   )
 })

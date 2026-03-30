@@ -147,14 +147,16 @@ func generateToken() (string, error) {
 }
 
 func (s *Server) touchToken(tok *config.APIToken, remoteAddr string) {
-	tok.LastUsedAt = time.Now().Format(time.RFC3339)
-	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
-		tok.LastUsedIP = host
-	}
+	s.withConfigLock(func(cfg *config.Config) {
+		tok.LastUsedAt = time.Now().Format(time.RFC3339)
+		if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+			tok.LastUsedIP = host
+		}
+	})
 	s.tokenSaveMu.Lock()
 	if s.tokenSaveTimer == nil {
-		s.tokenSaveTimer = time.AfterFunc(60*time.Second, func() {
-			s.Config.SaveConfig()
+		s.tokenSaveTimer = time.AfterFunc(s.effectiveTokenSaveDelay(), func() {
+			_ = s.saveConfig()
 			s.tokenSaveMu.Lock()
 			s.tokenSaveTimer = nil
 			s.tokenSaveMu.Unlock()

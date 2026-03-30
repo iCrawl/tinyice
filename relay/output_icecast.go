@@ -7,7 +7,8 @@ import (
 
 // IcecastOutputAdapter provides progressive HTTP streaming (Icecast-compatible).
 // The actual serving logic remains in server/handlers_stream.go.
-// This adapter provides the OutputAdapter interface for pipeline registration.
+// This adapter only satisfies pipeline registration; it does not replace the
+// Relay-backed listener path used by the production server.
 type IcecastOutputAdapter struct {
 	contentType string
 	tracks      []*Track

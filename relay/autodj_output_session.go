@@ -41,22 +41,17 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 	}
 
 	stream := streamer.relay.GetOrCreateStream(streamer.OutputMount)
-	stream.Name = streamer.Name
-	stream.Bitrate = fmt.Sprintf("%d", streamer.Bitrate)
-	stream.Visible = streamer.Visible
 
 	sampleRate := 44100
 	frameSize := 1152
-	stream.ContentType = "audio/mpeg"
-	stream.IsOggStream = false
+	contentType := "audio/mpeg"
 
 	var writer PCMFrameWriter
 	var err error
 	if streamer.Format == "opus" {
 		sampleRate = 48000
 		frameSize = 960
-		stream.ContentType = "audio/ogg"
-		stream.IsOggStream = true
+		contentType = "audio/ogg"
 		writer, err = NewOpusEncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, 2, &streamer.BytesStreamed)
 	} else {
 		writer, err = NewMP3EncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, &streamer.BytesStreamed)
@@ -64,6 +59,8 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	stream.ConfigureAutoDJOutput(streamer.Name, fmt.Sprintf("%d", streamer.Bitrate), contentType, streamer.Visible)
 
 	return &AutoDJOutputSession{
 		streamer:    streamer,

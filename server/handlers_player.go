@@ -161,14 +161,16 @@ func (s *Server) handlePlayerLoadPlaylist(w http.ResponseWriter, r *http.Request
 	}
 
 	playlistCopy := streamer.GetPlaylist()
-	for _, adj := range s.Config.AutoDJs {
-		if adj.Mount == mount {
-			adj.Playlist = playlistCopy
-			adj.LastPlaylist = playlistName
-			s.Config.SaveConfig()
-			break
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		for _, adj := range cfg.AutoDJs {
+			if adj.Mount == mount {
+				adj.Playlist = playlistCopy
+				adj.LastPlaylist = playlistName
+				break
+			}
 		}
-	}
+		return nil
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -199,13 +201,15 @@ func (s *Server) handlePlayerReorder(w http.ResponseWriter, r *http.Request) {
 	streamer.MovePlaylistItem(from, to)
 
 	playlistCopy := streamer.GetPlaylist()
-	for _, adj := range s.Config.AutoDJs {
-		if adj.Mount == mount {
-			adj.Playlist = playlistCopy
-			s.Config.SaveConfig()
-			break
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		for _, adj := range cfg.AutoDJs {
+			if adj.Mount == mount {
+				adj.Playlist = playlistCopy
+				break
+			}
 		}
-	}
+		return nil
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -293,13 +297,15 @@ func (s *Server) handlePlayerLoop(w http.ResponseWriter, r *http.Request) {
 	streamer.ToggleLoop()
 	loopState := streamer.GetStats().Loop
 
-	for _, adj := range s.Config.AutoDJs {
-		if adj.Mount == mount {
-			adj.Loop = loopState
-			s.Config.SaveConfig()
-			break
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		for _, adj := range cfg.AutoDJs {
+			if adj.Mount == mount {
+				adj.Loop = loopState
+				break
+			}
 		}
-	}
+		return nil
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -323,13 +329,15 @@ func (s *Server) handlePlayerMetadata(w http.ResponseWriter, r *http.Request) {
 	streamer.ToggleInjectMetadata()
 	metaState := streamer.GetStats().InjectMetadata
 
-	for _, adj := range s.Config.AutoDJs {
-		if adj.Mount == mount {
-			adj.InjectMetadata = metaState
-			s.Config.SaveConfig()
-			break
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		for _, adj := range cfg.AutoDJs {
+			if adj.Mount == mount {
+				adj.InjectMetadata = metaState
+				break
+			}
 		}
-	}
+		return nil
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -536,14 +544,16 @@ func (s *Server) handlePlayerPlaylistAction(w http.ResponseWriter, r *http.Reque
 
 	streamer.SavePlaylist()
 
-	for _, adj := range s.Config.AutoDJs {
-		if adj.Mount == mount {
-			adj.Playlist = playlistCopy
-			adj.LastPlaylist = lastPl
-			s.Config.SaveConfig()
-			break
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		for _, adj := range cfg.AutoDJs {
+			if adj.Mount == mount {
+				adj.Playlist = playlistCopy
+				adj.LastPlaylist = lastPl
+				break
+			}
 		}
-	}
+		return nil
+	})
 
 	w.WriteHeader(http.StatusOK)
 }
@@ -603,8 +613,10 @@ func (s *Server) handleAddAutoDJ(w http.ResponseWriter, r *http.Request) {
 		Visible:        visible,
 	}
 
-	s.Config.AutoDJs = append(s.Config.AutoDJs, adj)
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.AutoDJs = append(cfg.AutoDJs, adj)
+		return nil
+	})
 
 	streamer, err := s.StreamerM.StartStreamer(adj.Name, adj.Mount, adj.MusicDir, adj.Loop, adj.Format, adj.Bitrate, adj.InjectMetadata, nil, adj.MPDEnabled, adj.MPDPort, adj.MPDPassword, adj.Visible, "", adj.SongCommand, adj.SongCommandTimeout)
 	if err == nil {
@@ -638,8 +650,10 @@ func (s *Server) handleDeleteAutoDJ(w http.ResponseWriter, r *http.Request) {
 			s.StreamerM.RemoveStreamer(mount)
 		}
 	}
-	s.Config.AutoDJs = newADJs
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.AutoDJs = newADJs
+		return nil
+	})
 
 	http.Redirect(w, r, "/admin#tab-streamer", http.StatusSeeOther)
 }
@@ -696,7 +710,7 @@ func (s *Server) handleToggleAutoDJ(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.Config.SaveConfig()
+	_ = s.saveConfig()
 	http.Redirect(w, r, "/admin#tab-streamer", http.StatusSeeOther)
 }
 
@@ -799,6 +813,6 @@ func (s *Server) handleUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	s.Config.SaveConfig()
+	_ = s.saveConfig()
 	http.Redirect(w, r, "/admin#tab-streamer", http.StatusSeeOther)
 }

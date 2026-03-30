@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,9 +21,6 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/crypto/acme/autocert"
 )
-
-//go:embed all:templates
-var templateFS embed.FS
 
 //go:embed all:assets
 var assetFS embed.FS
@@ -58,14 +54,13 @@ type Server struct {
 	Relay       *relay.Relay             // Core relay/streaming engine
 	RelayM      *relay.RelayManager      // Relay stream management
 	TranscoderM *relay.TranscoderManager // Transcoding management
-	HealthM     *relay.HealthMonitor      // Stream health monitoring
+	HealthM     *relay.HealthMonitor     // Stream health monitoring
 	WebRTCM     *relay.WebRTCManager     // WebRTC connection management
 	StreamerM   *relay.StreamerManager   // AutoDJ/streamer management
-	RTMP        *relay.RTMPServer         // RTMP ingest server (optional)
-	SRT         *relay.SRTServer          // SRT ingest server (optional)
-	TenantM     *relay.TenantManager      // Multi-tenant management
+	RTMP        *relay.RTMPServer        // RTMP ingest server (optional)
+	SRT         *relay.SRTServer         // SRT ingest server (optional)
+	TenantM     *relay.TenantManager     // Multi-tenant management
 	mpdServer   *relay.MPDServer         // MPD protocol server (optional)
-	tmpl        *template.Template       // HTML template for web interface (legacy)
 	shell       *ShellRenderer           // New Preact frontend renderer
 	Version     string                   // TinyIce version
 	Commit      string                   // Git commit hash
@@ -100,17 +95,12 @@ type Server struct {
 
 	tokenSaveTimer *time.Timer
 	tokenSaveMu    sync.Mutex
+	tokenSaveDelay time.Duration
 
 	deadStreamRecovery func(string)
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
-	tmpl := template.New("base")
-	tmpl, err := tmpl.ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		logger.L.Fatalf("Error loading embedded templates: %v", err)
-	}
-
 	hm, err := relay.NewHistoryManager("history.db")
 	if err != nil {
 		logger.L.Fatalf("Failed to initialize history manager: %v", err)
@@ -149,25 +139,24 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 	healthM := relay.NewHealthMonitor(r)
 	hlsCtx, hlsCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		Config:       cfg,
-		Relay:        r,
-		HealthM:      healthM,
-		RelayM:       relay.NewRelayManager(r),
-		TranscoderM:  relay.NewTranscoderManager(r),
-		WebRTCM:      relay.NewWebRTCManager(r),
-		StreamerM:    relay.NewStreamerManager(r, cfg),
-		RTMP:         relay.NewRTMPServer(r, cfg),
-		SRT:          relay.NewSRTServer(r, cfg),
-		TenantM:      relay.NewTenantManager(),
-		tmpl:         tmpl,
-		shell:        NewShellRenderer(),
-		Version:      version,
-		Commit:       commit,
-		startTime:    time.Now(),
-		AuthLog:      authLog,
-		sessions:     make(map[string]*session),
-		authAttempts: make(map[string]*authAttempt),
-		scanAttempts: make(map[string]*scanAttempt),
+		Config:           cfg,
+		Relay:            r,
+		HealthM:          healthM,
+		RelayM:           relay.NewRelayManager(r),
+		TranscoderM:      relay.NewTranscoderManager(r),
+		WebRTCM:          relay.NewWebRTCManager(r),
+		StreamerM:        relay.NewStreamerManager(r, cfg),
+		RTMP:             relay.NewRTMPServer(r, cfg),
+		SRT:              relay.NewSRTServer(r, cfg),
+		TenantM:          relay.NewTenantManager(),
+		shell:            NewShellRenderer(),
+		Version:          version,
+		Commit:           commit,
+		startTime:        time.Now(),
+		AuthLog:          authLog,
+		sessions:         make(map[string]*session),
+		authAttempts:     make(map[string]*authAttempt),
+		scanAttempts:     make(map[string]*scanAttempt),
 		hlsOutputs:       make(map[string]*relay.HLSOutput),
 		hlsCtx:           hlsCtx,
 		hlsCancel:        hlsCancel,
@@ -194,431 +183,6 @@ func (s *Server) handleStreamHealthEvent(e relay.StreamHealthEvent) {
 	if e.NewStatus == relay.StatusDead && s.deadStreamRecovery != nil {
 		s.deadStreamRecovery(e.Mount)
 	}
-}
-
-func (s *Server) setupRoutes() *http.ServeMux {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/admin", s.handleAdmin)
-	mux.HandleFunc("/admin/golive", s.handleGoLive)
-	mux.HandleFunc("/admin/golive/chunk", s.handleGoLiveChunk)
-	mux.HandleFunc("/admin/add-mount", s.handleAddMount)
-	mux.HandleFunc("/admin/toggle-latency", s.handleToggleLatency)
-	mux.HandleFunc("/admin/stats", s.handleStats)
-	mux.HandleFunc("/admin/events", s.handleEvents)
-	mux.HandleFunc("/admin/metadata", s.handleMetadata)
-	mux.HandleFunc("/admin/kick", s.handleKick)
-	mux.HandleFunc("/admin/remove-mount", s.handleRemoveMount)
-	mux.HandleFunc("/admin/hotswap", s.handleHotSwap)
-	mux.HandleFunc("/admin/kick-all-listeners", s.handleKickAllListeners)
-	mux.HandleFunc("/admin/toggle-mount", s.handleToggleMount)
-	mux.HandleFunc("/admin/toggle-visible", s.handleToggleVisible)
-	mux.HandleFunc("/admin/update-fallback", s.handleUpdateFallback)
-	mux.HandleFunc("/admin/add-user", s.handleAddUser)
-	mux.HandleFunc("/admin/remove-user", s.handleRemoveUser)
-	mux.HandleFunc("/admin/add-banned-ip", s.handleAddBannedIP)
-	mux.HandleFunc("/admin/remove-banned-ip", s.handleRemoveBannedIP)
-	mux.HandleFunc("/admin/add-whitelisted-ip", s.handleAddWhitelistedIP)
-	mux.HandleFunc("/admin/remove-whitelisted-ip", s.handleRemoveWhitelistedIP)
-	mux.HandleFunc("/admin/clear-auth-lockout", s.handleClearAuthLockout)
-	mux.HandleFunc("/admin/clear-scan-lockout", s.handleClearScanLockout)
-	mux.HandleFunc("/admin/add-webhook", s.handleAddWebhook)
-	mux.HandleFunc("/admin/delete-webhook", s.handleDeleteWebhook)
-	mux.HandleFunc("/admin/player/toggle", s.handlePlayerToggle)
-	mux.HandleFunc("/admin/player/restart", s.handlePlayerRestart)
-	mux.HandleFunc("/admin/player/scan", s.handlePlayerScan)
-	mux.HandleFunc("/admin/player/clear-playlist", s.handlePlayerClearPlaylist)
-	mux.HandleFunc("/admin/player/clear-queue", s.handlePlayerClearQueue)
-	mux.HandleFunc("/admin/player/save-playlist", s.handlePlayerSavePlaylist)
-	mux.HandleFunc("/admin/player/playlist-info", s.handlePlayerPlaylistInfo)
-	mux.HandleFunc("/admin/player/load-playlist", s.handlePlayerLoadPlaylist)
-	mux.HandleFunc("/admin/player/reorder", s.handlePlayerReorder)
-	mux.HandleFunc("/admin/player/queue", s.handlePlayerQueue)
-	mux.HandleFunc("/admin/player/shuffle", s.handlePlayerShuffle)
-	mux.HandleFunc("/admin/player/loop", s.handlePlayerLoop)
-	mux.HandleFunc("/admin/player/metadata", s.handlePlayerMetadata)
-	mux.HandleFunc("/admin/player/next", s.handlePlayerNext)
-	mux.HandleFunc("/admin/player/files", s.handlePlayerFiles)
-	mux.HandleFunc("/admin/player/playlist-action", s.handlePlayerPlaylistAction)
-	mux.HandleFunc("/admin/autodj/add", s.handleAddAutoDJ)
-	mux.HandleFunc("/admin/autodj/delete", s.handleDeleteAutoDJ)
-	mux.HandleFunc("/admin/autodj/toggle", s.handleToggleAutoDJ)
-	mux.HandleFunc("/admin/autodj/studio", s.handleAutoDJStudio)
-	mux.HandleFunc("/admin/autodj/update", s.handleUpdateAutoDJ)
-	mux.HandleFunc("/admin/add-relay", s.handleAddRelay)
-	mux.HandleFunc("/admin/toggle-relay", s.handleToggleRelay)
-	mux.HandleFunc("/admin/restart-relay", s.handleRestartRelay)
-	mux.HandleFunc("/admin/delete-relay", s.handleDeleteRelay)
-	mux.HandleFunc("/admin/add-transcoder", s.handleAddTranscoder)
-	mux.HandleFunc("/admin/toggle-transcoder", s.handleToggleTranscoder)
-	mux.HandleFunc("/admin/delete-transcoder", s.handleDeleteTranscoder)
-	mux.HandleFunc("/admin/transcoder-stats", s.handleTranscoderStats)
-	mux.HandleFunc("/admin/security-stats", s.handleGetSecurityStats)
-	mux.HandleFunc("/admin/history", s.handleHistory)
-	mux.HandleFunc("/admin/statistics", s.handleGetStats)
-	mux.HandleFunc("/admin/insights", s.handleInsights)
-	mux.HandleFunc("/login", s.handleLogin)
-	mux.HandleFunc("/logout", s.handleLogout)
-
-	// Setup wizard endpoints
-	mux.HandleFunc("/setup", s.handleSetup)
-	mux.HandleFunc("/setup/verify-token", s.handleSetupVerifyToken)
-	mux.HandleFunc("/setup/complete", s.handleSetupComplete)
-
-	// Passkey (WebAuthn) endpoints
-	mux.HandleFunc("/api/passkey/register/begin", s.handlePasskeyRegisterBegin)
-	mux.HandleFunc("/api/passkey/register/finish", s.handlePasskeyRegisterFinish)
-	mux.HandleFunc("/api/passkey/login/begin", s.handlePasskeyLoginBegin)
-	mux.HandleFunc("/api/passkey/login/finish", s.handlePasskeyLoginFinish)
-	mux.HandleFunc("/api/passkey", s.handlePasskeyDelete)
-
-	// OIDC / OAuth2 endpoints
-	mux.HandleFunc("/auth/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/auth/")
-		if strings.HasSuffix(path, "/callback") {
-			s.handleOIDCCallback(w, r)
-		} else {
-			s.handleOIDCRedirect(w, r)
-		}
-	})
-	mux.HandleFunc("/api/oidc/providers", s.handleOIDCProvidersList)
-
-	// Pending user management
-	mux.HandleFunc("/api/pending-users", s.handleGetPendingUsers)
-	mux.HandleFunc("/api/pending-users/approve", s.handleApprovePendingUser)
-	mux.HandleFunc("/api/pending-users/deny", s.handleDenyPendingUser)
-
-	mux.HandleFunc("/explore", s.handleExplore)
-	mux.HandleFunc("/webrtc/offer", s.handleWebRTCOffer)
-	mux.HandleFunc("/webrtc/source-offer", s.handleWebRTCSourceOffer)
-	mux.HandleFunc("/player/", s.handlePlayer)
-	mux.HandleFunc("/player-webrtc/", s.handleWebRTCPlayer)
-	mux.HandleFunc("/embed/", s.handleEmbed)
-	mux.HandleFunc("/api/tenants", s.handleListTenants)
-	mux.HandleFunc("/api/tenants/usage", s.handleTenantUsage)
-	// HLS routes (must be before the catch-all "/" handler)
-	mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-		// Setup mode guard: redirect everything to /setup except setup/assets paths
-		if !s.Config.SetupComplete {
-			path := r.URL.Path
-			if path == "/setup" || strings.HasPrefix(path, "/setup/") {
-				// Let the registered setup handlers handle these
-				if path == "/setup" {
-					s.handleSetup(w, r)
-				} else if path == "/setup/verify-token" {
-					s.handleSetupVerifyToken(w, r)
-				} else if path == "/setup/complete" {
-					s.handleSetupComplete(w, r)
-				} else {
-					http.NotFound(w, r)
-				}
-				return
-			}
-			if strings.HasPrefix(path, "/assets/") || strings.HasPrefix(path, "/api/passkey/") {
-				// Allow through for assets and passkey API during setup
-			} else {
-				http.Redirect(w, r, "/setup", http.StatusTemporaryRedirect)
-				return
-			}
-		}
-
-		path := r.URL.Path
-		if strings.HasSuffix(path, "/playlist.m3u8") {
-			s.handleHLSPlaylist(w, r)
-			return
-		}
-		if strings.HasSuffix(path, ".ts") && strings.Contains(path, "/segment-") {
-			s.handleHLSSegment(w, r)
-			return
-		}
-		s.handleRoot(w, r)
-	})
-	mux.HandleFunc("/events", s.handlePublicEvents)
-	mux.HandleFunc("/events/metadata", s.handleMetadataEvents)
-	mux.HandleFunc("/status-json.xsl", s.handleLegacyStats)
-	mux.HandleFunc("/metrics", s.handleMetrics)
-	// Serve frontend assets (Vite build output) at /assets/ — takes priority
-	// Falls back to legacy assets (logo, lucide, sortable) if not found in dist
-	mux.Handle("/assets/", http.StripPrefix("/assets/", s.shell.AssetHandler()))
-
-	// Developer portal (new page)
-	mux.HandleFunc("/developers", s.handleDevelopers)
-
-	// JSON REST API v2
-	mux.HandleFunc("/api/streams", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetStreams(w, r)
-		case http.MethodPost:
-			s.apiCreateStream(w, r)
-		case http.MethodDelete:
-			s.apiDeleteStream(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/api/streams/kick", s.apiKickStream)
-	mux.HandleFunc("/api/streams/diagnostics", s.apiGetStreamDiagnostics)
-
-	mux.HandleFunc("/api/autodj", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetAutoDJ(w, r)
-		case http.MethodPost:
-			s.apiCreateAutoDJ(w, r)
-		case http.MethodDelete:
-			s.apiDeleteAutoDJ(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/api/autodj/play", s.apiAutoDJPlay)
-	mux.HandleFunc("/api/autodj/pause", s.apiAutoDJPause)
-	mux.HandleFunc("/api/autodj/next", s.apiAutoDJNext)
-	mux.HandleFunc("/api/autodj/shuffle", s.apiAutoDJShuffle)
-	mux.HandleFunc("/api/autodj/loop", s.apiAutoDJLoop)
-
-	mux.HandleFunc("/api/autodj/playlist", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetPlaylist(w, r)
-		case http.MethodPost:
-			s.apiAddToPlaylist(w, r)
-		case http.MethodDelete:
-			s.apiRemoveFromPlaylist(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/api/autodj/playlist/clear", s.apiClearPlaylist)
-	mux.HandleFunc("/api/autodj/playlist/reorder", s.apiReorderPlaylist)
-
-	mux.HandleFunc("/api/autodj/queue", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetQueue(w, r)
-		case http.MethodPost:
-			s.apiAddToQueue(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/autodj/files", s.apiGetFiles)
-	// Handle /api/autodj/{mount}/... paths (frontend uses path-based mount routing)
-	// The frontend sends mount names URL-encoded (e.g. %2Fdemo for /demo),
-	// so we use RawPath to preserve the encoding before splitting.
-	mux.HandleFunc("/api/autodj/", func(w http.ResponseWriter, r *http.Request) {
-		rawPath := r.URL.RawPath
-		if rawPath == "" {
-			rawPath = r.URL.Path
-		}
-		path := strings.TrimPrefix(rawPath, "/api/autodj/")
-
-		// Find the action by looking for known suffixes
-		// Path format: {encoded-mount}/{action} e.g. "%2Fdemo/files" or "bob/playlist/add"
-		var mount, action string
-		actionSuffixes := []string{
-			"/playlist/add", "/playlist/remove", "/playlist/clear",
-			"/playlist/reorder", "/playlist/playnext",
-			"/playlist/save", "/playlist/load",
-			"/files", "/playlist", "/queue",
-			"/play", "/pause", "/next", "/shuffle", "/loop",
-			"/metadata", "/volume",
-		}
-		for _, suffix := range actionSuffixes {
-			if strings.HasSuffix(path, suffix) {
-				encodedMount := strings.TrimSuffix(path, suffix)
-				// URL-decode the mount name
-				decoded, err := url.PathUnescape(encodedMount)
-				if err != nil {
-					decoded = encodedMount
-				}
-				// Ensure mount starts with /
-				if !strings.HasPrefix(decoded, "/") {
-					decoded = "/" + decoded
-				}
-				mount = decoded
-				action = strings.TrimPrefix(suffix, "/")
-				break
-			}
-		}
-		if mount == "" {
-			http.NotFound(w, r)
-			return
-		}
-
-		// Inject mount as query param for existing handlers
-		q := r.URL.Query()
-		q.Set("mount", mount)
-		r.URL.RawQuery = q.Encode()
-
-		switch action {
-		case "files":
-			s.apiGetFiles(w, r)
-		case "playlist":
-			switch r.Method {
-			case http.MethodGet:
-				s.apiGetPlaylist(w, r)
-			case http.MethodPost:
-				s.apiAddToPlaylist(w, r)
-			case http.MethodDelete:
-				s.apiRemoveFromPlaylist(w, r)
-			}
-		case "playlist/add":
-			s.apiAddToPlaylist(w, r)
-		case "playlist/remove":
-			s.apiRemoveFromPlaylist(w, r)
-		case "playlist/clear":
-			s.apiClearPlaylist(w, r)
-		case "playlist/reorder":
-			s.apiReorderPlaylist(w, r)
-		case "playlist/playnext":
-			s.apiAddToQueue(w, r) // playnext adds to front of queue
-		case "playlist/save":
-			s.handlePlayerSavePlaylist(w, r)
-		case "playlist/load":
-			s.handlePlayerLoadPlaylist(w, r)
-		case "queue":
-			switch r.Method {
-			case http.MethodGet:
-				s.apiGetQueue(w, r)
-			case http.MethodPost:
-				s.apiAddToQueue(w, r)
-			}
-		case "play":
-			s.apiAutoDJPlay(w, r)
-		case "pause":
-			s.apiAutoDJPause(w, r)
-		case "next":
-			s.apiAutoDJNext(w, r)
-		case "shuffle":
-			s.apiAutoDJShuffle(w, r)
-		case "loop":
-			s.apiAutoDJLoop(w, r)
-		case "metadata":
-			s.handlePlayerMetadata(w, r)
-		case "volume":
-			s.handlePlayerMetadata(w, r) // volume handled by player handler
-		default:
-			http.NotFound(w, r)
-		}
-	})
-
-	mux.HandleFunc("/api/relays", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetRelays(w, r)
-		case http.MethodPost:
-			s.apiCreateRelay(w, r)
-		case http.MethodDelete:
-			s.apiDeleteRelay(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/api/relays/toggle", s.apiToggleRelay)
-
-	mux.HandleFunc("/api/transcoders", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetTranscoders(w, r)
-		case http.MethodPost:
-			s.apiCreateTranscoder(w, r)
-		case http.MethodDelete:
-			s.apiDeleteTranscoder(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/users", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetUsers(w, r)
-		case http.MethodPost:
-			s.apiCreateUser(w, r)
-		case http.MethodPut:
-			s.apiUpdateUser(w, r)
-		case http.MethodDelete:
-			s.apiDeleteUser(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/security/bans", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetBans(w, r)
-		case http.MethodPost:
-			s.apiAddBan(w, r)
-		case http.MethodDelete:
-			s.apiRemoveBan(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-	mux.HandleFunc("/api/security/whitelist", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetWhitelist(w, r)
-		case http.MethodPost:
-			s.apiAddWhitelist(w, r)
-		case http.MethodDelete:
-			s.apiRemoveWhitelist(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/security/audit", s.apiGetAuditLog)
-
-	mux.HandleFunc("/api/branding", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetBranding(w, r)
-		case http.MethodPut:
-			s.apiUpdateBranding(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/settings", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetSettings(w, r)
-		case http.MethodPut:
-			s.apiUpdateSettings(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	mux.HandleFunc("/api/stats", s.apiGetStats)
-
-	mux.HandleFunc("/api/tokens", func(w http.ResponseWriter, r *http.Request) {
-		switch r.Method {
-		case http.MethodGet:
-			s.apiGetTokens(w, r)
-		case http.MethodPost:
-			s.apiCreateToken(w, r)
-		case http.MethodDelete:
-			s.apiDeleteToken(w, r)
-		default:
-			http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
-		}
-	})
-
-	// Logo
-	mux.HandleFunc("/api/branding/logo", s.apiUploadLogo)
-	mux.HandleFunc("/branding/logo", s.handleServeLogo)
-
-	// OpenAPI / Swagger
-	mux.HandleFunc("/api/openapi.yaml", s.handleOpenAPISpec)
-	mux.HandleFunc("/api/docs", s.handleSwaggerUI)
-
-	return mux
 }
 
 // withSetupGuard wraps a handler to enforce setup mode.

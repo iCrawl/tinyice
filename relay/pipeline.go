@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// MediaType represents the kind of media in a track
+// MediaType represents the kind of media in a track.
 type MediaType int
 
 const (
@@ -34,7 +34,10 @@ type TrackMetadata struct {
 }
 
 // Track represents a single media track (audio or video).
-// Wraps the existing Stream type for buffer/listener management.
+// It wraps the existing Stream type for buffer/listener management.
+//
+// Today this is internal groundwork for future multi-track runtime work.
+// TinyIce's production server runtime still centers Relay and Stream.
 type Track struct {
 	Type     MediaType
 	Codec    string // "opus", "mp3", "aac", "h264", "vp8"
@@ -83,7 +86,7 @@ type PipelineHealth struct {
 	Listeners  int
 }
 
-// IngestSource represents any source of media data
+// IngestSource represents any source of media data for the experimental pipeline layer.
 type IngestSource interface {
 	Protocol() string // "icecast", "webrtc", "rtmp", "srt", "autodj", "relay"
 	Mount() string
@@ -93,7 +96,7 @@ type IngestSource interface {
 	Health() SourceHealth
 }
 
-// OutputAdapter represents any output format
+// OutputAdapter represents any output format for the experimental pipeline layer.
 type OutputAdapter interface {
 	Protocol() string // "icecast", "hls", "dash", "webrtc"
 	SupportsMediaType(MediaType) bool
@@ -108,7 +111,10 @@ type HTTPOutputAdapter interface {
 	ServeListener(w http.ResponseWriter, r *http.Request) error
 }
 
-// Pipeline connects sources to outputs through a stream
+// Pipeline connects sources to outputs through a stream.
+//
+// This abstraction is currently retained as groundwork for tenant-aware and
+// multi-track evolution. It is not the primary production runtime path today.
 type Pipeline struct {
 	Mount    string
 	TenantID string // empty = default tenant

@@ -14,10 +14,11 @@ func TestSubscribeOggEmptyPageOffsetsFallsBackToBurst(t *testing.T) {
 
 	offset, _ := s.Subscribe("listener-1", 2048)
 
-	if offset >= s.Buffer.Head {
-		t.Fatalf("expected burst offset < Head(%d), got %d", s.Buffer.Head, offset)
+	head := s.Buffer.HeadPosition()
+	if offset >= head {
+		t.Fatalf("expected burst offset < Head(%d), got %d", head, offset)
 	}
-	expectedMin := s.Buffer.Head - 2048
+	expectedMin := head - 2048
 	if offset < expectedMin {
 		t.Fatalf("expected offset >= %d, got %d", expectedMin, offset)
 	}

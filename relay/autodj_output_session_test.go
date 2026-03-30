@@ -28,7 +28,7 @@ func TestAutoDJOutputSessionEmitsSilenceUntilTrackIsReady(t *testing.T) {
 	time.Sleep(150 * time.Millisecond)
 
 	stream, ok := r.GetStream("/gap")
-	if !ok || stream.Buffer.Head == 0 {
+	if !ok || stream.Buffer.HeadPosition() == 0 {
 		t.Fatal("expected encoded bytes while silence source is active")
 	}
 }

@@ -131,10 +131,10 @@ func (s *Server) handlePasskeyRegisterFinish(w http.ResponseWriter, r *http.Requ
 		LastUsed:      time.Now().Format(time.RFC3339),
 	}
 
-	s.configMu.Lock()
-	user.Passkeys = append(user.Passkeys, pk)
-	s.Config.SaveConfig()
-	s.configMu.Unlock()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		user.Passkeys = append(user.Passkeys, pk)
+		return nil
+	})
 
 	logger.L.Infow("Passkey registered", "user", user.Username, "name", name)
 	jsonResponse(w, map[string]any{"success": true, "name": name})
@@ -216,10 +216,10 @@ func (s *Server) handlePasskeyLoginFinish(w http.ResponseWriter, r *http.Request
 		for _, pk := range user.Passkeys {
 			if pk.ID == base64.RawURLEncoding.EncodeToString(credential.ID) {
 				loginUser = user
-				s.configMu.Lock()
-				pk.LastUsed = time.Now().Format(time.RFC3339)
-				s.Config.SaveConfig()
-				s.configMu.Unlock()
+				_ = s.mutateConfig(func(cfg *config.Config) error {
+					pk.LastUsed = time.Now().Format(time.RFC3339)
+					return nil
+				})
 				break
 			}
 		}
@@ -260,24 +260,25 @@ func (s *Server) handlePasskeyDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-
 	found := false
-	for i, pk := range user.Passkeys {
-		if pk.ID == passkeyID {
-			user.Passkeys = append(user.Passkeys[:i], user.Passkeys[i+1:]...)
-			found = true
-			break
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		for i, pk := range user.Passkeys {
+			if pk.ID == passkeyID {
+				user.Passkeys = append(user.Passkeys[:i], user.Passkeys[i+1:]...)
+				found = true
+				break
+			}
 		}
+		return nil
+	}); err != nil {
+		jsonError(w, "Failed to save config", http.StatusInternalServerError)
+		return
 	}
 
 	if !found {
 		jsonError(w, "Passkey not found", http.StatusNotFound)
 		return
 	}
-
-	s.Config.SaveConfig()
 	logger.L.Infow("Passkey deleted", "user", user.Username, "passkey_id", passkeyID)
 	jsonResponse(w, map[string]bool{"success": true})
 }

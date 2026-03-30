@@ -79,14 +79,19 @@ func (s *Server) handleUpdateFallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if fallback == "" {
-		delete(s.Config.FallbackMounts, mount)
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			delete(cfg.FallbackMounts, mount)
+			return nil
+		})
 	} else {
 		if fallback[0] != '/' {
 			fallback = "/" + fallback
 		}
-		s.Config.FallbackMounts[mount] = fallback
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			cfg.FallbackMounts[mount] = fallback
+			return nil
+		})
 	}
-	s.Config.SaveConfig()
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -127,12 +132,14 @@ func (s *Server) handleAddMount(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	hashed, _ := config.HashPassword(password)
-	if user.Role == config.RoleSuperAdmin {
-		s.Config.Mounts[mount] = hashed
-	} else {
-		user.Mounts[mount] = hashed
-	}
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		if user.Role == config.RoleSuperAdmin {
+			cfg.Mounts[mount] = hashed
+		} else {
+			user.Mounts[mount] = hashed
+		}
+		return nil
+	})
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -149,12 +156,14 @@ func (s *Server) handleRemoveMount(w http.ResponseWriter, r *http.Request) {
 	if !s.hasAccess(user, mount) {
 		return
 	}
-	delete(s.Config.Mounts, mount)
-	delete(s.Config.DisabledMounts, mount)
-	delete(s.Config.VisibleMounts, mount)
-	delete(user.Mounts, mount)
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		delete(cfg.Mounts, mount)
+		delete(cfg.DisabledMounts, mount)
+		delete(cfg.VisibleMounts, mount)
+		delete(user.Mounts, mount)
+		return nil
+	})
 	s.Relay.RemoveStream(mount)
-	s.Config.SaveConfig()
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -166,9 +175,11 @@ func (s *Server) handleToggleLatency(w http.ResponseWriter, r *http.Request) {
 	if !ok || user.Role != config.RoleSuperAdmin {
 		return
 	}
-	s.Config.LowLatencyMode = !s.Config.LowLatencyMode
-	s.Relay.LowLatency = s.Config.LowLatencyMode
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.LowLatencyMode = !cfg.LowLatencyMode
+		s.Relay.LowLatency = cfg.LowLatencyMode
+		return nil
+	})
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
 
@@ -233,11 +244,15 @@ func (s *Server) handleToggleMount(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	mount := r.FormValue("mount")
 	if ok && s.hasAccess(user, mount) {
-		s.Config.DisabledMounts[mount] = !s.Config.DisabledMounts[mount]
-		if s.Config.DisabledMounts[mount] {
+		disabled := false
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			cfg.DisabledMounts[mount] = !cfg.DisabledMounts[mount]
+			disabled = cfg.DisabledMounts[mount]
+			return nil
+		})
+		if disabled {
 			s.Relay.RemoveStream(mount)
 		}
-		s.Config.SaveConfig()
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -249,12 +264,16 @@ func (s *Server) handleToggleVisible(w http.ResponseWriter, r *http.Request) {
 	}
 	mount := r.FormValue("mount")
 	if ok && s.hasAccess(user, mount) {
-		s.Config.VisibleMounts[mount] = !s.Config.VisibleMounts[mount]
+		visible := false
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			cfg.VisibleMounts[mount] = !cfg.VisibleMounts[mount]
+			visible = cfg.VisibleMounts[mount]
+			return nil
+		})
 		if st, ok := s.Relay.GetStream(mount); ok {
-			st.SetVisible(s.Config.VisibleMounts[mount])
+			st.SetVisible(visible)
 		}
-		s.Config.SaveConfig()
-		logger.L.Infow("Admin toggled visibility", "mount", mount, "visible", s.Config.VisibleMounts[mount])
+		logger.L.Infow("Admin toggled visibility", "mount", mount, "visible", visible)
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -268,8 +287,10 @@ func (s *Server) handleAddUser(w http.ResponseWriter, r *http.Request) {
 		un, pw := r.FormValue("username"), r.FormValue("password")
 		if un != "" && pw != "" {
 			hp, _ := config.HashPassword(pw)
-			s.Config.Users[un] = &config.User{Username: un, Password: hp, Role: config.RoleAdmin, Mounts: make(map[string]string)}
-			s.Config.SaveConfig()
+			_ = s.mutateConfig(func(cfg *config.Config) error {
+				cfg.Users[un] = &config.User{Username: un, Password: hp, Role: config.RoleAdmin, Mounts: make(map[string]string)}
+				return nil
+			})
 		}
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -283,8 +304,10 @@ func (s *Server) handleRemoveUser(w http.ResponseWriter, r *http.Request) {
 	if ok && user.Role == config.RoleSuperAdmin {
 		un := r.FormValue("username")
 		if un != user.Username {
-			delete(s.Config.Users, un)
-			s.Config.SaveConfig()
+			_ = s.mutateConfig(func(cfg *config.Config) error {
+				delete(cfg.Users, un)
+				return nil
+			})
 		}
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -298,8 +321,10 @@ func (s *Server) handleAddBannedIP(w http.ResponseWriter, r *http.Request) {
 	if ok && user.Role == config.RoleSuperAdmin {
 		ip := r.FormValue("ip")
 		if ip != "" {
-			s.Config.BannedIPs = append(s.Config.BannedIPs, ip)
-			s.Config.SaveConfig()
+			_ = s.mutateConfig(func(cfg *config.Config) error {
+				cfg.BannedIPs = append(cfg.BannedIPs, ip)
+				return nil
+			})
 		}
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -312,13 +337,15 @@ func (s *Server) handleRemoveBannedIP(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	if ok && user.Role == config.RoleSuperAdmin {
 		ip := r.FormValue("ip")
-		for i, b := range s.Config.BannedIPs {
-			if b == ip {
-				s.Config.BannedIPs = append(s.Config.BannedIPs[:i], s.Config.BannedIPs[i+1:]...)
-				s.Config.SaveConfig()
-				break
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			for i, b := range cfg.BannedIPs {
+				if b == ip {
+					cfg.BannedIPs = append(cfg.BannedIPs[:i], cfg.BannedIPs[i+1:]...)
+					break
+				}
 			}
-		}
+			return nil
+		})
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
 }
@@ -348,10 +375,14 @@ func (s *Server) handleAddWhitelistedIP(w http.ResponseWriter, r *http.Request) 
 		}
 	}
 
-	s.Config.WhitelistedIPs = append(s.Config.WhitelistedIPs, ip)
-	// For consistency, sort the list after adding
-	sort.Strings(s.Config.WhitelistedIPs)
-	s.Config.SaveConfig()
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.WhitelistedIPs = append(cfg.WhitelistedIPs, ip)
+		sort.Strings(cfg.WhitelistedIPs)
+		return nil
+	}); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{"ip": ip, "status": "added"})
@@ -375,13 +406,18 @@ func (s *Server) handleRemoveWhitelistedIP(w http.ResponseWriter, r *http.Reques
 	}
 
 	found := false
-	for i, b := range s.Config.WhitelistedIPs {
-		if b == ip {
-			s.Config.WhitelistedIPs = append(s.Config.WhitelistedIPs[:i], s.Config.WhitelistedIPs[i+1:]...)
-			s.Config.SaveConfig()
-			found = true
-			break
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		for i, b := range cfg.WhitelistedIPs {
+			if b == ip {
+				cfg.WhitelistedIPs = append(cfg.WhitelistedIPs[:i], cfg.WhitelistedIPs[i+1:]...)
+				found = true
+				break
+			}
 		}
+		return nil
+	}); err != nil {
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
 	}
 
 	if !found {
@@ -440,12 +476,14 @@ func (s *Server) handleAddWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.Config.Webhooks = append(s.Config.Webhooks, &config.WebhookConfig{
-		URL:     url,
-		Events:  events,
-		Enabled: true,
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Webhooks = append(cfg.Webhooks, &config.WebhookConfig{
+			URL:     url,
+			Events:  events,
+			Enabled: true,
+		})
+		return nil
 	})
-	s.Config.SaveConfig()
 
 	http.Redirect(w, r, "/admin#tab-webhooks", http.StatusSeeOther)
 }
@@ -466,8 +504,10 @@ func (s *Server) handleDeleteWebhook(w http.ResponseWriter, r *http.Request) {
 			newWHs = append(newWHs, wh)
 		}
 	}
-	s.Config.Webhooks = newWHs
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Webhooks = newWHs
+		return nil
+	})
 
 	http.Redirect(w, r, "/admin#tab-webhooks", http.StatusSeeOther)
 }

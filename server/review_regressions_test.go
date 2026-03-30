@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -20,10 +21,14 @@ import (
 	"go.uber.org/zap"
 )
 
+var testLoggerOnce sync.Once
+
 func newTestServer(t *testing.T) *Server {
 	t.Helper()
 
-	logger.L = zap.NewNop().Sugar()
+	testLoggerOnce.Do(func() {
+		logger.L = zap.NewNop().Sugar()
+	})
 
 	cfgPath := filepath.Join(t.TempDir(), "tinyice.json")
 	cfg := &config.Config{
@@ -54,6 +59,7 @@ func newTestServer(t *testing.T) *Server {
 		Config:       cfg,
 		Relay:        r,
 		StreamerM:    relay.NewStreamerManager(r, cfg),
+		shell:        NewShellRenderer(),
 		sessions:     make(map[string]*session),
 		authAttempts: make(map[string]*authAttempt),
 		scanAttempts: make(map[string]*scanAttempt),
@@ -207,6 +213,67 @@ func TestHandlePublicEventsEmitsEmptyArraysWhenNoVisibleStreams(t *testing.T) {
 	}
 	if !strings.Contains(body, "event: streams\ndata: []\n\n") {
 		t.Fatalf("expected empty streams event in response, got: %s", body)
+	}
+}
+
+func TestHandleEventsEmitsAdminStreamAndAutoDJContracts(t *testing.T) {
+	s := newTestServer(t)
+	s.sessions["sid-1"] = &session{
+		User:      s.Config.Users["admin"],
+		CSRFToken: "csrf-ok",
+	}
+
+	stream := s.Relay.GetOrCreateStream("/live")
+	stream.UpdateMetadata("Station", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+	stream.SetCurrentSong("Track Title", s.Relay)
+
+	musicDir := t.TempDir()
+	streamer, err := s.StreamerM.StartStreamer("Admin AutoDJ", "/live", musicDir, false, "mp3", 128, true, nil, false, "", "", true, "", "", 0)
+	if err != nil {
+		t.Fatalf("start streamer: %v", err)
+	}
+	defer s.StreamerM.RemoveStreamer("/live")
+	streamer.PushToQueue(filepath.Join(musicDir, "next-track.mp3"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req := httptest.NewRequest(http.MethodGet, "/admin/events", nil).WithContext(ctx)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleEvents(rr, req)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("handleEvents did not return after cancellation")
+	}
+
+	body := rr.Body.String()
+	if !strings.Contains(body, "event: stats\n") {
+		t.Fatalf("expected stats event in response, got: %s", body)
+	}
+	if !strings.Contains(body, "event: stream\n") {
+		t.Fatalf("expected stream event in response, got: %s", body)
+	}
+	if !strings.Contains(body, `"format":"audio/mpeg"`) {
+		t.Fatalf("expected stream event to include format, got: %s", body)
+	}
+	if !strings.Contains(body, "event: autodj\n") {
+		t.Fatalf("expected autodj event in response, got: %s", body)
+	}
+	if !strings.Contains(body, `"currentTrack":`) {
+		t.Fatalf("expected autodj event to include currentTrack payload, got: %s", body)
+	}
+	if !strings.Contains(body, `"queue":["next-track.mp3"]`) {
+		t.Fatalf("expected autodj event to include queue titles, got: %s", body)
 	}
 }
 
@@ -433,5 +500,67 @@ func TestAPICreateAutoDJRollsBackConfigWhenStartFails(t *testing.T) {
 	}
 	if len(s.Config.AutoDJs) != 0 {
 		t.Fatalf("expected failed create to leave config unchanged, got %d entries", len(s.Config.AutoDJs))
+	}
+}
+
+func TestMutateConfigPersistsChanges(t *testing.T) {
+	s := newTestServer(t)
+
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.PageTitle = "Updated Title"
+		cfg.VisibleMounts["/live"] = true
+		return nil
+	}); err != nil {
+		t.Fatalf("mutate config: %v", err)
+	}
+
+	data, err := os.ReadFile(s.Config.ConfigPath)
+	if err != nil {
+		t.Fatalf("read saved config: %v", err)
+	}
+
+	var saved config.Config
+	if err := json.Unmarshal(data, &saved); err != nil {
+		t.Fatalf("unmarshal saved config: %v", err)
+	}
+	if saved.PageTitle != "Updated Title" {
+		t.Fatalf("expected saved page title to persist, got %q", saved.PageTitle)
+	}
+	if !saved.VisibleMounts["/live"] {
+		t.Fatalf("expected saved visible mount flag to persist")
+	}
+}
+
+func TestTouchTokenPersistsConfigThroughMutationPath(t *testing.T) {
+	s := newTestServer(t)
+	s.tokenSaveDelay = 10 * time.Millisecond
+	s.Config.APITokens = []*config.APIToken{{
+		ID:       "tok-1",
+		Name:     "test",
+		Username: "admin",
+		Role:     config.RoleSuperAdmin,
+	}}
+
+	s.touchToken(s.Config.APITokens[0], "127.0.0.1:9000")
+
+	deadline := time.Now().Add(time.Second)
+	for {
+		data, err := os.ReadFile(s.Config.ConfigPath)
+		if err != nil {
+			t.Fatalf("read saved config: %v", err)
+		}
+
+		var saved config.Config
+		if err := json.Unmarshal(data, &saved); err != nil {
+			t.Fatalf("unmarshal saved config: %v", err)
+		}
+		if len(saved.APITokens) == 1 && saved.APITokens[0].LastUsedIP == "127.0.0.1" && saved.APITokens[0].LastUsedAt != "" {
+			return
+		}
+
+		if time.Now().After(deadline) {
+			t.Fatalf("expected token usage to persist, got %#v", saved.APITokens)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

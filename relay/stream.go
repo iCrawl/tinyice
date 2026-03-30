@@ -128,6 +128,12 @@ func (s *Stream) LastDataAt() time.Time {
 	return s.LastDataReceived
 }
 
+func (s *Stream) SetLastDataAt(ts time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.LastDataReceived = ts
+}
+
 // Close closes all listeners on the stream and cleans up resources.
 //
 // This method should be called when a stream is being removed or when the source
@@ -560,6 +566,21 @@ func (s *Stream) SetVisible(visible bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Visible = visible
+}
+
+func (s *Stream) ConfigureAutoDJOutput(name, bitrate, contentType string, visible bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.Name = name
+	s.Bitrate = bitrate
+	s.Visible = visible
+
+	if contentType != "" {
+		s.ContentType = contentType
+		ct := strings.ToLower(contentType)
+		s.IsOggStream = strings.Contains(ct, "ogg") || strings.Contains(ct, "opus")
+	}
 }
 
 // ListenersCount returns the number of active listeners

@@ -20,7 +20,7 @@ test('Dashboard hydrates listener traffic from persisted insights data for the s
 
   assert.match(
     source,
-    /\/admin\/insights\?range=\$\{timeRange\.value\}/,
+    /\/admin\/insights\?range=\$\{(?:timeRange\.value|range)\}/,
     'Dashboard must load persisted listener history for the selected range instead of rebuilding the chart from live SSE only'
   )
 })

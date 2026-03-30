@@ -25,23 +25,24 @@ func (s *Server) handleAddRelay(w http.ResponseWriter, r *http.Request) {
 			burst := 20
 			fmt.Sscanf(bs, "%d", &burst)
 
-			found := false
-			for _, rc := range s.Config.Relays {
-				if rc.Mount == m {
-					rc.URL = u
-					rc.Password = pw
-					rc.BurstSize = burst
-					found = true
-					break
+			_ = s.mutateConfig(func(cfg *config.Config) error {
+				found := false
+				for _, rc := range cfg.Relays {
+					if rc.Mount == m {
+						rc.URL = u
+						rc.Password = pw
+						rc.BurstSize = burst
+						found = true
+						break
+					}
 				}
-			}
 
-			if !found {
-				rc := &config.RelayConfig{URL: u, Mount: m, Password: pw, BurstSize: burst, Enabled: true}
-				s.Config.Relays = append(s.Config.Relays, rc)
-			}
-
-			s.Config.SaveConfig()
+				if !found {
+					rc := &config.RelayConfig{URL: u, Mount: m, Password: pw, BurstSize: burst, Enabled: true}
+					cfg.Relays = append(cfg.Relays, rc)
+				}
+				return nil
+			})
 			s.RelayM.StartRelay(u, m, pw, burst, s.Config.VisibleMounts[m])
 		}
 	}
@@ -55,16 +56,24 @@ func (s *Server) handleToggleRelay(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	mount := r.FormValue("mount")
 	if ok && user.Role == config.RoleSuperAdmin {
-		for _, rc := range s.Config.Relays {
-			if rc.Mount == mount {
-				rc.Enabled = !rc.Enabled
-				if rc.Enabled {
-					s.RelayM.StartRelay(rc.URL, rc.Mount, rc.Password, rc.BurstSize, s.Config.VisibleMounts[mount])
-				} else {
-					s.RelayM.StopRelay(mount)
+		var selected config.RelayConfig
+		found := false
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			for _, rc := range cfg.Relays {
+				if rc.Mount == mount {
+					rc.Enabled = !rc.Enabled
+					selected = *rc
+					found = true
+					break
 				}
-				s.Config.SaveConfig()
-				break
+			}
+			return nil
+		})
+		if found {
+			if selected.Enabled {
+				s.RelayM.StartRelay(selected.URL, selected.Mount, selected.Password, selected.BurstSize, s.Config.VisibleMounts[mount])
+			} else {
+				s.RelayM.StopRelay(mount)
 			}
 		}
 	}
@@ -78,13 +87,19 @@ func (s *Server) handleDeleteRelay(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	mount := r.FormValue("mount")
 	if ok && user.Role == config.RoleSuperAdmin {
-		for i, rc := range s.Config.Relays {
-			if rc.Mount == mount {
-				s.Config.Relays = append(s.Config.Relays[:i], s.Config.Relays[i+1:]...)
-				s.Config.SaveConfig()
-				s.RelayM.StopRelay(mount)
-				break
+		removed := false
+		_ = s.mutateConfig(func(cfg *config.Config) error {
+			for i, rc := range cfg.Relays {
+				if rc.Mount == mount {
+					cfg.Relays = append(cfg.Relays[:i], cfg.Relays[i+1:]...)
+					removed = true
+					break
+				}
 			}
+			return nil
+		})
+		if removed {
+			s.RelayM.StopRelay(mount)
 		}
 	}
 	http.Redirect(w, r, "/admin", http.StatusSeeOther)
@@ -133,8 +148,10 @@ func (s *Server) handleAddTranscoder(w http.ResponseWriter, r *http.Request) {
 		Enabled:     true,
 	}
 
-	s.Config.Transcoders = append(s.Config.Transcoders, tc)
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Transcoders = append(cfg.Transcoders, tc)
+		return nil
+	})
 	s.TranscoderM.StartTranscoder(tc)
 
 	http.Redirect(w, r, "/admin#tab-transcoding", http.StatusSeeOther)
@@ -157,7 +174,7 @@ func (s *Server) handleToggleTranscoder(w http.ResponseWriter, r *http.Request) 
 			break
 		}
 	}
-	s.Config.SaveConfig()
+	_ = s.saveConfig()
 	http.Redirect(w, r, "/admin#tab-transcoding", http.StatusSeeOther)
 }
 
@@ -175,8 +192,10 @@ func (s *Server) handleDeleteTranscoder(w http.ResponseWriter, r *http.Request) 
 			s.TranscoderM.StopTranscoder(tc.OutputMount)
 		}
 	}
-	s.Config.Transcoders = newTCs
-	s.Config.SaveConfig()
+	_ = s.mutateConfig(func(cfg *config.Config) error {
+		cfg.Transcoders = newTCs
+		return nil
+	})
 	http.Redirect(w, r, "/admin#tab-transcoding", http.StatusSeeOther)
 }
 

@@ -63,40 +63,45 @@ func (s *Server) handleApprovePendingUser(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-
 	var pending *config.PendingUser
-	var pendingIdx int
-	for i, p := range s.Config.PendingUsers {
-		if p.ID == req.ID {
-			pending = p
-			pendingIdx = i
-			break
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		var pendingIdx int
+		for i, p := range cfg.PendingUsers {
+			if p.ID == req.ID {
+				pending = p
+				pendingIdx = i
+				break
+			}
 		}
-	}
 
-	if pending == nil {
-		jsonError(w, "Pending user not found", http.StatusNotFound)
+		if pending == nil {
+			return errPendingUserNotFound
+		}
+
+		if _, exists := cfg.Users[req.Username]; exists {
+			return errUsernameTaken
+		}
+
+		cfg.Users[req.Username] = &config.User{
+			Username:     req.Username,
+			Password:     "",
+			Role:         role,
+			Mounts:       make(map[string]string),
+			LinkedEmails: []string{pending.Email},
+		}
+		cfg.PendingUsers = append(cfg.PendingUsers[:pendingIdx], cfg.PendingUsers[pendingIdx+1:]...)
+		return nil
+	}); err != nil {
+		switch err {
+		case errPendingUserNotFound:
+			jsonError(w, "Pending user not found", http.StatusNotFound)
+		case errUsernameTaken:
+			jsonError(w, "Username already taken", http.StatusConflict)
+		default:
+			jsonError(w, "Failed to save config", http.StatusInternalServerError)
+		}
 		return
 	}
-
-	if _, exists := s.Config.Users[req.Username]; exists {
-		jsonError(w, "Username already taken", http.StatusConflict)
-		return
-	}
-
-	newUser := &config.User{
-		Username:     req.Username,
-		Password:     "",
-		Role:         role,
-		Mounts:       make(map[string]string),
-		LinkedEmails: []string{pending.Email},
-	}
-	s.Config.Users[req.Username] = newUser
-
-	s.Config.PendingUsers = append(s.Config.PendingUsers[:pendingIdx], s.Config.PendingUsers[pendingIdx+1:]...)
-	s.Config.SaveConfig()
 
 	logger.L.Infow("Pending user approved", "email", pending.Email, "username", req.Username, "role", role, "approved_by", user.Username)
 	jsonResponse(w, map[string]any{"success": true, "username": req.Username})
@@ -122,19 +127,26 @@ func (s *Server) handleDenyPendingUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-
-	for _, p := range s.Config.PendingUsers {
-		if p.ID == req.ID {
-			p.DeniedAt = time.Now().Format(time.RFC3339)
-			s.Config.SaveConfig()
-			logger.L.Infow("Pending user denied", "email", p.Email, "denied_by", user.Username)
-			jsonResponse(w, map[string]bool{"success": true})
-			s.Audit(r, "pending_denied", "user", p.Email, "")
+	var deniedEmail string
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		for _, p := range cfg.PendingUsers {
+			if p.ID == req.ID {
+				p.DeniedAt = time.Now().Format(time.RFC3339)
+				deniedEmail = p.Email
+				return nil
+			}
+		}
+		return errPendingUserNotFound
+	}); err != nil {
+		if err == errPendingUserNotFound {
+			jsonError(w, "Pending user not found", http.StatusNotFound)
 			return
 		}
+		jsonError(w, "Failed to save config", http.StatusInternalServerError)
+		return
 	}
 
-	jsonError(w, "Pending user not found", http.StatusNotFound)
+	logger.L.Infow("Pending user denied", "email", deniedEmail, "denied_by", user.Username)
+	jsonResponse(w, map[string]bool{"success": true})
+	s.Audit(r, "pending_denied", "user", deniedEmail, "")
 }

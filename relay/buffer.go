@@ -44,6 +44,13 @@ type CircularBuffer struct {
 	kfCapacity int     // Max tracked keyframes
 }
 
+// HeadPosition returns the absolute write position.
+func (cb *CircularBuffer) HeadPosition() int64 {
+	cb.mu.RLock()
+	defer cb.mu.RUnlock()
+	return cb.Head
+}
+
 // NewCircularBuffer creates a new CircularBuffer with the specified size.
 //
 // The size parameter determines the maximum amount of audio data that can be

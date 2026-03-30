@@ -23,7 +23,7 @@ func TestEncodeMP3UsesConfiguredBitrate(t *testing.T) {
 		t.Fatal("expected encoded MP3 bytes")
 	}
 
-	data := make([]byte, stream.Buffer.Head)
+	data := make([]byte, stream.Buffer.HeadPosition())
 	n, _, skipped := stream.Buffer.ReadAt(0, data)
 	if skipped {
 		t.Fatal("unexpected buffer skip")
@@ -76,7 +76,7 @@ func TestMP3EncoderSessionWritesFramesIncrementally(t *testing.T) {
 		t.Fatalf("WriteFrame #1: %v", err)
 	}
 
-	headAfterFirst := stream.Buffer.Head
+	headAfterFirst := stream.Buffer.HeadPosition()
 	if headAfterFirst == 0 {
 		t.Fatal("expected encoded bytes after first frame")
 	}
@@ -84,12 +84,16 @@ func TestMP3EncoderSessionWritesFramesIncrementally(t *testing.T) {
 	if err := session.WriteFrame(frame); err != nil {
 		t.Fatalf("WriteFrame #2: %v", err)
 	}
-	if stream.Buffer.Head <= headAfterFirst {
+	if stream.Buffer.HeadPosition() <= headAfterFirst {
 		t.Fatal("expected second frame to append encoded bytes")
 	}
 }
 
 func TestOpusEncoderSessionWritesHeadersOnlyOnce(t *testing.T) {
+	if raceEnabled {
+		t.Skip("opus-go encoder is not race-safe under the Go race detector")
+	}
+
 	r := NewRelay(false, nil)
 	stream := r.GetOrCreateStream("/opus-session")
 
@@ -105,12 +109,12 @@ func TestOpusEncoderSessionWritesHeadersOnlyOnce(t *testing.T) {
 	}
 
 	oggHead := append([]byte(nil), stream.OggHead...)
-	headAfterFirst := stream.Buffer.Head
+	headAfterFirst := stream.Buffer.HeadPosition()
 
 	if err := session.WriteFrame(frame); err != nil {
 		t.Fatalf("WriteFrame #2: %v", err)
 	}
-	if stream.Buffer.Head <= headAfterFirst {
+	if stream.Buffer.HeadPosition() <= headAfterFirst {
 		t.Fatal("expected second frame to append opus packets")
 	}
 	if len(stream.OggHead) != len(oggHead) {
@@ -179,7 +183,7 @@ func TestAutoDJTransitionContinuityFeedsTranscoderOutput(t *testing.T) {
 	time.Sleep(250 * time.Millisecond)
 
 	out, ok := r.GetStream("/fallback")
-	if !ok || out.Buffer.Head == 0 {
+	if !ok || out.Buffer.HeadPosition() == 0 {
 		t.Fatal("expected transcoder output to accumulate bytes from a continuous source")
 	}
 }
@@ -202,7 +206,7 @@ func TestTranscoderPacingDoesNotDrainBufferedBurstImmediately(t *testing.T) {
 		}
 	}
 
-	sourceHead := source.Buffer.Head
+	sourceHead := source.Buffer.HeadPosition()
 	if sourceHead == 0 {
 		t.Fatal("expected buffered source audio")
 	}
@@ -228,10 +232,10 @@ func TestTranscoderPacingDoesNotDrainBufferedBurstImmediately(t *testing.T) {
 	if !ok {
 		t.Fatal("expected transcoder output stream")
 	}
-	if out.Buffer.Head == 0 {
+	if out.Buffer.HeadPosition() == 0 {
 		t.Fatal("expected paced transcoder to emit some output")
 	}
-	if out.Buffer.Head >= sourceHead/2 {
-		t.Fatalf("expected paced transcoder to avoid draining buffered burst immediately, got %d bytes from %d-byte source buffer", out.Buffer.Head, sourceHead)
+	if out.Buffer.HeadPosition() >= sourceHead/2 {
+		t.Fatalf("expected paced transcoder to avoid draining buffered burst immediately, got %d bytes from %d-byte source buffer", out.Buffer.HeadPosition(), sourceHead)
 	}
 }

@@ -6,7 +6,11 @@ import (
 	"time"
 )
 
-// PipelineManager manages pipelines, wrapping the existing Relay for backward compatibility.
+// PipelineManager manages experimental Pipeline instances while delegating the
+// actual production runtime path to Relay.
+//
+// It exists to keep pipeline groundwork isolated and backward-compatible
+// without implying that the server has migrated away from Relay.
 type PipelineManager struct {
 	relay     *Relay
 	pipelines map[string]*Pipeline // key is mount
@@ -27,7 +31,7 @@ func (pm *PipelineManager) Relay() *Relay {
 }
 
 // GetOrCreatePipeline returns an existing pipeline or creates a new one.
-// For backward compat, also creates the underlying Stream via Relay.
+// For backward compatibility, it also creates the underlying Stream via Relay.
 func (pm *PipelineManager) GetOrCreatePipeline(mount string) *Pipeline {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
@@ -36,10 +40,10 @@ func (pm *PipelineManager) GetOrCreatePipeline(mount string) *Pipeline {
 		return p
 	}
 
-	// Create underlying stream via Relay (backward compat)
+	// Create underlying stream via Relay to preserve the live runtime path.
 	stream := pm.relay.GetOrCreateStream(mount)
 
-	// Wrap in pipeline with an audio track
+	// Wrap the existing runtime stream in a pipeline-owned audio track.
 	p := NewPipeline(mount)
 	codec := "mp3" // default
 	if stream.IsOgg() {
@@ -77,7 +81,8 @@ func (pm *PipelineManager) RemovePipeline(mount string) {
 }
 
 // GetOrCreateStream provides backward compatibility with the Relay interface.
-// Returns the Stream from the pipeline's audio track.
+// It returns the Stream from the pipeline's audio track, keeping Relay as the
+// underlying runtime owner.
 func (pm *PipelineManager) GetOrCreateStream(mount string) *Stream {
 	p := pm.GetOrCreatePipeline(mount)
 	if t := p.GetAudioTrack(); t != nil {
@@ -117,13 +122,13 @@ func (pm *PipelineManager) PipelineCount() int {
 
 // PipelineStats is a snapshot of a pipeline's state.
 type PipelineStats struct {
-	Mount    string
-	TenantID string
-	Protocol string // source protocol
-	Tracks   []TrackStats
+	Mount     string
+	TenantID  string
+	Protocol  string // source protocol
+	Tracks    []TrackStats
 	Listeners int
-	Created  time.Time
-	Health   PipelineHealth
+	Created   time.Time
+	Health    PipelineHealth
 }
 
 // TrackStats is a snapshot of a track's state.

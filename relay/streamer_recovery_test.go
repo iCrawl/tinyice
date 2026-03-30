@@ -72,7 +72,7 @@ func TestRecoverDeadSongCommandMountRetriesUntilActivationSucceeds(t *testing.T)
 	}
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	var execs int32
 	var activationCalls int32
@@ -90,7 +90,7 @@ func TestRecoverDeadSongCommandMountRetriesUntilActivationSucceeds(t *testing.T)
 	}
 	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
 		atomic.AddInt32(&activationCalls, 1)
-		stream.LastDataReceived = time.Now()
+		stream.SetLastDataAt(time.Now())
 		return nil
 	}
 
@@ -127,7 +127,7 @@ func TestRecoverDeadSongCommandMountExitsWhenMountRecoversNaturally(t *testing.T
 	}
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	blocked := make(chan struct{})
 	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
@@ -141,7 +141,7 @@ func TestRecoverDeadSongCommandMountExitsWhenMountRecoversNaturally(t *testing.T
 	}
 
 	sm.RecoverDeadSongCommandMount("/dead")
-	stream.LastDataReceived = time.Now()
+	stream.SetLastDataAt(time.Now())
 	close(blocked)
 
 	deadline := time.After(500 * time.Millisecond)
@@ -169,7 +169,7 @@ func TestRecoverDeadSongCommandMountRestartsNonManualStoppedMount(t *testing.T) 
 	}
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	var activationCalls int32
 	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
@@ -182,7 +182,7 @@ func TestRecoverDeadSongCommandMountRestartsNonManualStoppedMount(t *testing.T) 
 	}
 	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
 		atomic.AddInt32(&activationCalls, 1)
-		stream.LastDataReceived = time.Now()
+		stream.SetLastDataAt(time.Now())
 		s.mu.Lock()
 		s.State = StatePlaying
 		s.mu.Unlock()
@@ -225,7 +225,7 @@ func TestRecoverDeadSongCommandMountSkipsManualStop(t *testing.T) {
 	sm.instances["/dead"] = streamer
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	var activationCalls int32
 	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
@@ -269,7 +269,7 @@ func TestRecoverDeadSongCommandMountRecordsRecoveryStartAndSuccess(t *testing.T)
 	}
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
 		return "/tmp/recovered.mp3", nil
@@ -280,7 +280,7 @@ func TestRecoverDeadSongCommandMountRecordsRecoveryStartAndSuccess(t *testing.T)
 		return ch
 	}
 	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
-		stream.LastDataReceived = time.Now()
+		stream.SetLastDataAt(time.Now())
 		return nil
 	}
 
@@ -324,7 +324,7 @@ func TestRecoverDeadSongCommandMountRecordsRecoveryFailure(t *testing.T) {
 	}
 
 	stream := r.GetOrCreateStream("/dead")
-	stream.LastDataReceived = time.Now().Add(-time.Minute)
+	stream.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	waitCh := make(chan time.Time)
 	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {

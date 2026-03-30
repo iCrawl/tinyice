@@ -6,7 +6,7 @@
 **TinyIce** is a modern, standalone audio streaming server compatible with the Icecast protocol.
 *   **Goal:** Provide a "single binary" radio station solution (Server + AutoDJ + Transcoder + SSL).
 *   **Philosophy:** Minimal external dependencies (Pure Go preferred), zero-allocation broadcasting paths, and high concurrency.
-*   **Aesthetic:** Professional, dark-mode "Cyberpunk/Studio" interfaces using vanilla HTML/CSS/JS (no heavy frontend frameworks).
+*   **Aesthetic:** Professional, dark-mode "Cyberpunk/Studio" interfaces implemented as an embedded Preact frontend with a single-binary deployment model.
 
 ## 2. Core Subsystems
 
@@ -17,6 +17,7 @@ The heart of TinyIce is the **Relay**. It manages the lifecycle of streams (`rel
     *   **Global Lock:** `Relay` uses a `sync.RWMutex` to manage the map of streams.
     *   **Stream Lock:** Each `Stream` has its own `sync.RWMutex` to protect metadata and listener maps.
     *   **Atomic Stats:** Bandwidth (`BytesIn`, `BytesOut`) is tracked via `sync/atomic` for performance.
+*   **Current Runtime Boundary:** `Relay` and `Stream` remain the production runtime abstraction. The newer pipeline types in `relay/pipeline.go` are retained as internal groundwork for future tenant-aware or multi-track work, but the server does not route normal runtime traffic through `PipelineManager` today.
 
 ### B. AutoDJ & Streamer (`relay/streamer.go`)
 The **Streamer** is an internal audio source that behaves like an external source client.
@@ -45,10 +46,10 @@ TinyIce exposes a secured **Prometheus** exporter at `/metrics`.
     *   **Whitelisting:** Bypassing security checks for trusted IPs (e.g., local admin, monitoring nodes).
     *   **404 Scanning Protection:** Automatic temporary lockout for IPs performing path scanning.
 
-### D. Web Interface (`server/templates/`)
-*   **Technology:** Server-Side Rendered (SSR) Go templates + Vanilla JS.
-*   **Real-time:** Uses **Server-Sent Events (SSE)** (`/admin/events`) to push JSON state updates (listeners, current song, VU meters) to the frontend.
-*   **Studio UI:** A specific focus on "app-like" behavior using AJAX forms (`submitForm`) to avoid full page reloads during broadcast operations.
+### D. Web Interface (`server/frontend/`, `server/shell.go`)
+*   **Technology:** Embedded Preact application served by the Go binary. `server/shell.go` renders the app shell and injects page bootstrap data, while the built frontend assets are embedded into the binary.
+*   **Real-time:** Uses **Server-Sent Events (SSE)** with separate public (`/events`) and admin (`/admin/events`) streams to push JSON state updates into the frontend.
+*   **Studio UI:** The admin interface is implemented as SPA-style pages that use JSON APIs plus SSE instead of Go template rendering.
 *   **Go Live Studio:** Enables direct browser-to-server streaming using WebAudio API.
     *   **WebRTC Mode:** Uses `pion/webrtc` for ultra-low latency Opus streaming.
     *   **HTTP Fallback:** Uses `MediaRecorder` to stream chunks via POST requests.
@@ -68,6 +69,7 @@ tinyice/
 │   ├── io.go               # Reusable I/O components (StreamWriter, StreamReader).
 │   ├── interfaces.go       # Core interfaces for better abstraction and testability.
 │   ├── relay.go            # Core Relay management and stream coordination.
+│   ├── pipeline*.go        # Experimental pipeline groundwork; not the primary runtime path.
 │   ├── streamer.go         # AutoDJ logic (playlist, queue, playback loop).
 │   ├── transcode.go        # Native MP3/Opus encoding logic.
 │   ├── mpd.go              # Minimal implementation of MPD protocol.
@@ -75,13 +77,17 @@ tinyice/
 │   ├── client.go           # Logic for pulling external relay streams.
 │   └── history.go          # GORM Models and database logic.
 ├── server/                 # HTTP/TCP LAYER.
-│   ├── server.go           # Server initialization and routing logic.
+│   ├── server.go           # Server initialization and runtime wiring.
+│   ├── routes.go           # Route registration by domain.
+│   ├── api_*.go            # Domain-specific JSON API handlers.
 │   ├── auth.go             # Authentication, sessions, and IP security.
 │   ├── listener.go         # Streaming listener lifecycle management.
 │   ├── handlers_*.go       # Domain-specific HTTP handlers (admin, api, player, etc).
+│   ├── shell.go            # Preact shell rendering and page bootstrap payloads.
+│   ├── frontend/           # Embedded Preact application source and build output.
 │   ├── tasks.go            # Background tasks (reporting, stats recording).
 │   ├── socket_*.go         # OS-specific socket syscalls (SO_REUSEPORT).
-│   └── templates/          # HTML/CSS/JS assets.
+│   └── assets/             # Embedded static assets served by the Go runtime.
 └── updater/                # Self-update mechanism (GitHub Releases).
 ```
 

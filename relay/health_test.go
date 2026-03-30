@@ -34,7 +34,7 @@ func TestHealthStatus(t *testing.T) {
 func TestHealthMonitorDetectsStateChange(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/test-health")
-	s.LastDataReceived = time.Now().Add(-10 * time.Second)
+	s.SetLastDataAt(time.Now().Add(-10 * time.Second))
 
 	hm := NewHealthMonitor(r)
 	var gotEvent *StreamHealthEvent
@@ -55,7 +55,7 @@ func TestHealthMonitorDetectsStateChange(t *testing.T) {
 func TestHealthMonitorEmitsDeadEvent(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/dead")
-	s.LastDataReceived = time.Now().Add(-time.Minute)
+	s.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	hm := NewHealthMonitor(r)
 	var gotEvent *StreamHealthEvent
@@ -75,7 +75,7 @@ func TestHealthMonitorEmitsDeadEvent(t *testing.T) {
 func TestHealthMonitorWritesDeadDiagnosticReason(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/dead")
-	s.LastDataReceived = time.Now().Add(-time.Minute)
+	s.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	hm := NewHealthMonitor(r)
 	hm.check()
@@ -98,12 +98,12 @@ func TestHealthMonitorWritesDeadDiagnosticReason(t *testing.T) {
 func TestHealthMonitorMarksRecoveredMountRunningAgain(t *testing.T) {
 	r := NewRelay(false, nil)
 	s := r.GetOrCreateStream("/recover")
-	s.LastDataReceived = time.Now().Add(-time.Minute)
+	s.SetLastDataAt(time.Now().Add(-time.Minute))
 
 	hm := NewHealthMonitor(r)
 	hm.check()
 
-	s.LastDataReceived = time.Now()
+	s.SetLastDataAt(time.Now())
 	hm.check()
 
 	current, ok := r.Diagnostics.Current("/recover")
@@ -124,7 +124,7 @@ func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
 
 	base := time.Unix(1_000, 0)
 	s.Started = base
-	s.LastDataReceived = base
+	s.SetLastDataAt(base)
 
 	s.recordHealthInputAt(1000, base)
 	s.recordHealthDropAt(200, base)
@@ -135,7 +135,7 @@ func TestSnapshotHealthUsesRollingWindowAndCanRecover(t *testing.T) {
 	}
 
 	recoveredAt := base.Add(healthWindow + time.Second)
-	s.LastDataReceived = recoveredAt
+	s.SetLastDataAt(recoveredAt)
 	s.recordHealthInputAt(1000, recoveredAt)
 
 	recovered := s.snapshotAt(recoveredAt)

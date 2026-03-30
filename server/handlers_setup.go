@@ -83,27 +83,25 @@ func (s *Server) handleSetupComplete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.configMu.Lock()
-	defer s.configMu.Unlock()
-
-	s.Config.AdminUser = req.Username
-	s.Config.AdminPassword = hashed
-	s.Config.SetupComplete = true
-	s.Config.Users[req.Username] = &config.User{
-		Username: req.Username,
-		Password: hashed,
-		Role:     config.RoleSuperAdmin,
-		Mounts:   make(map[string]string),
-	}
-
 	defaultSourcePass := generateRandomString(12)
 	liveMountPass := generateRandomString(12)
 	hDefaultSource, _ := config.HashPassword(defaultSourcePass)
 	hLiveMount, _ := config.HashPassword(liveMountPass)
-	s.Config.DefaultSourcePassword = hDefaultSource
-	s.Config.Mounts["/live"] = hLiveMount
 
-	if err := s.Config.SaveConfig(); err != nil {
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		cfg.AdminUser = req.Username
+		cfg.AdminPassword = hashed
+		cfg.SetupComplete = true
+		cfg.Users[req.Username] = &config.User{
+			Username: req.Username,
+			Password: hashed,
+			Role:     config.RoleSuperAdmin,
+			Mounts:   make(map[string]string),
+		}
+		cfg.DefaultSourcePassword = hDefaultSource
+		cfg.Mounts["/live"] = hLiveMount
+		return nil
+	}); err != nil {
 		jsonError(w, "Failed to save config", http.StatusInternalServerError)
 		return
 	}

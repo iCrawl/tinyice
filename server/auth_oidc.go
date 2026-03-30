@@ -236,42 +236,40 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Create pending user request
-	s.configMu.Lock()
-
-	for _, pu := range s.Config.PendingUsers {
-		if strings.EqualFold(pu.Email, email) {
-			if pu.DeniedAt != "" {
-				deniedTime, _ := time.Parse(time.RFC3339, pu.DeniedAt)
-				if time.Since(deniedTime) < 24*time.Hour {
-					s.configMu.Unlock()
-					s.renderAccessDenied(w, "Your access request was denied. You can try again later.")
-					return
+	var pending *config.PendingUser
+	if err := s.mutateConfig(func(cfg *config.Config) error {
+		for _, pu := range cfg.PendingUsers {
+			if strings.EqualFold(pu.Email, email) {
+				if pu.DeniedAt != "" {
+					deniedTime, _ := time.Parse(time.RFC3339, pu.DeniedAt)
+					if time.Since(deniedTime) < 24*time.Hour {
+						return errPendingUserDeniedRecently
+					}
+					pu.DeniedAt = ""
 				}
-				pu.DeniedAt = ""
 				pu.RequestedAt = time.Now().Format(time.RFC3339)
-				s.Config.SaveConfig()
-				s.configMu.Unlock()
-				s.renderAccessPending(w)
-				return
+				pending = pu
+				return nil
 			}
-			pu.RequestedAt = time.Now().Format(time.RFC3339)
-			s.Config.SaveConfig()
-			s.configMu.Unlock()
-			s.renderAccessPending(w)
+		}
+
+		pending = &config.PendingUser{
+			ID:          uuid.New().String(),
+			Email:       email,
+			Name:        name,
+			Provider:    providerID,
+			RequestedAt: time.Now().Format(time.RFC3339),
+		}
+		cfg.PendingUsers = append(cfg.PendingUsers, pending)
+		return nil
+	}); err != nil {
+		if err == errPendingUserDeniedRecently {
+			s.renderAccessDenied(w, "Your access request was denied. You can try again later.")
 			return
 		}
+		http.Error(w, "Failed to save config", http.StatusInternalServerError)
+		return
 	}
-
-	pending := &config.PendingUser{
-		ID:          uuid.New().String(),
-		Email:       email,
-		Name:        name,
-		Provider:    providerID,
-		RequestedAt: time.Now().Format(time.RFC3339),
-	}
-	s.Config.PendingUsers = append(s.Config.PendingUsers, pending)
-	s.Config.SaveConfig()
-	s.configMu.Unlock()
 
 	logger.L.Infow("New pending user request", "email", email, "provider", providerID)
 	go s.notifyAdminsNewPendingUser(pending)

@@ -13,11 +13,30 @@ type SSECallback<K extends keyof SSEEventMap> = (data: SSEEventMap[K]) => void
 export function createSSE(url: string) {
   let source: EventSource | null = null
   const listeners = new Map<string, Set<Function>>()
+  const namedHandlers = new Map<string, (e: Event) => void>()
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
 
+  function dispatch(event: string, data: unknown) {
+    listeners.get(event)?.forEach((cb) => cb(data))
+  }
+
+  function ensureNamedListener(event: string) {
+    if (!source || event === 'message' || namedHandlers.has(event)) return
+
+    const handler = (e: Event) => {
+      try {
+        dispatch(event, JSON.parse((e as MessageEvent).data))
+      } catch {}
+    }
+
+    namedHandlers.set(event, handler)
+    source.addEventListener(event, handler)
+  }
+
   function connect() {
     source = new EventSource(url)
+    namedHandlers.clear()
     source.onopen = () => { reconnectDelay = 1000 }
     source.onerror = () => {
       source?.close()
@@ -27,19 +46,11 @@ export function createSSE(url: string) {
     // Legacy untyped messages
     source.onmessage = (e) => {
       try {
-        const data = JSON.parse(e.data)
-        listeners.get('message')?.forEach(cb => cb(data))
+        dispatch('message', JSON.parse(e.data))
       } catch {}
     }
-    // Register typed listeners on new source
-    for (const [type, cbs] of listeners) {
-      if (type === 'message') continue
-      source.addEventListener(type, (e: Event) => {
-        try {
-          const data = JSON.parse((e as MessageEvent).data)
-          cbs.forEach(cb => cb(data))
-        } catch {}
-      })
+    for (const type of listeners.keys()) {
+      ensureNamedListener(type)
     }
   }
 
@@ -48,11 +59,7 @@ export function createSSE(url: string) {
   function on(event: string, callback: Function): () => void {
     if (!listeners.has(event)) listeners.set(event, new Set())
     listeners.get(event)!.add(callback)
-    if (source && event !== 'message') {
-      source.addEventListener(event, (e: Event) => {
-        try { callback(JSON.parse((e as MessageEvent).data)) } catch {}
-      })
-    }
+    ensureNamedListener(event)
     return () => { listeners.get(event)?.delete(callback) }
   }
 

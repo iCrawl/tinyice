@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { createSSE } from '../../lib/sse'
 import { api } from '../../lib/api'
 import { StatCard } from '../../components/StatCard'
@@ -16,29 +16,47 @@ import {
   upsertLiveTrafficSample,
 } from './dashboardTraffic'
 
-// Reactive state
-const stats = signal<StatsEvent>({
-  listeners: 0,
-  streams: 0,
-  bandwidth: 0,
-  bandwidth_in: 0,
-  bandwidth_out: 0,
-  uptime: 0,
-  goroutines: 0,
-  memory: 0,
-  gc: 0,
-})
-
-const streams = signal<StreamEvent[]>([])
-const connected = signal(false)
-const timeRange = signal<TrafficRange>('1H')
-const listenerHistory = signal<number[]>([])
-const trafficBucketStartedAt = signal(0)
-
+type DashboardStore = ReturnType<typeof createDashboardStore>
 type HistoricalTrafficResponse = Record<string, Array<TrafficHistorySample & {
   bytes_in: number
   bytes_out: number
 }>>
+
+function createDashboardStore() {
+  const stats = signal<StatsEvent>({
+    listeners: 0,
+    streams: 0,
+    bandwidth: 0,
+    bandwidth_in: 0,
+    bandwidth_out: 0,
+    uptime: 0,
+    goroutines: 0,
+    memory: 0,
+    gc: 0,
+  })
+  const streams = signal<StreamEvent[]>([])
+  const connected = signal(false)
+  const timeRange = signal<TrafficRange>('1H')
+  const listenerHistory = signal<number[]>([])
+  const trafficBucketStartedAt = signal(0)
+
+  return {
+    stats,
+    streams,
+    connected,
+    timeRange,
+    listenerHistory,
+    trafficBucketStartedAt,
+  }
+}
+
+function useDashboardStore() {
+  const storeRef = useRef<DashboardStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createDashboardStore()
+  }
+  return storeRef.current
+}
 
 function formatUptime(seconds: number): string {
   if (seconds < 60) return `${seconds}s`
@@ -63,38 +81,40 @@ function formatListenerCount(listeners: number): string {
   return `${listeners.toLocaleString()} listener${listeners === 1 ? '' : 's'}`
 }
 
+async function loadTrafficHistory(store: DashboardStore, range: TrafficRange, cancelledRef: { current: boolean }) {
+  try {
+    const historyByMount = await api.get<HistoricalTrafficResponse>(`/admin/insights?range=${range}`)
+    if (cancelledRef.current) return
+
+    const now = Date.now()
+    const collapsedHistory = collapseTrafficSources(historyByMount)
+    const persistedHistory = bucketTrafficSamples(collapsedHistory, range, now)
+    const liveHistory = upsertLiveTrafficSample(
+      persistedHistory,
+      store.stats.value.listeners,
+      range,
+      alignTrafficBucketStart(range, now),
+      now,
+    )
+
+    store.listenerHistory.value = liveHistory.history
+    store.trafficBucketStartedAt.value = liveHistory.bucketStartedAt
+  } catch {
+    if (cancelledRef.current) return
+    store.trafficBucketStartedAt.value = alignTrafficBucketStart(range)
+  }
+}
+
 export function Dashboard() {
+  const store = useDashboardStore()
+  const { stats, streams, connected, timeRange, listenerHistory, trafficBucketStartedAt } = store
+
   useEffect(() => {
-    let cancelled = false
-
-    async function loadTrafficHistory(range: TrafficRange) {
-      try {
-        const historyByMount = await api.get<HistoricalTrafficResponse>(`/admin/insights?range=${timeRange.value}`)
-        if (cancelled) return
-
-        const now = Date.now()
-        const collapsedHistory = collapseTrafficSources(historyByMount)
-        const persistedHistory = bucketTrafficSamples(collapsedHistory, range, now)
-        const liveHistory = upsertLiveTrafficSample(
-          persistedHistory,
-          stats.value.listeners,
-          range,
-          alignTrafficBucketStart(range, now),
-          now,
-        )
-
-        listenerHistory.value = liveHistory.history
-        trafficBucketStartedAt.value = liveHistory.bucketStartedAt
-      } catch {
-        if (cancelled) return
-        trafficBucketStartedAt.value = alignTrafficBucketStart(range)
-      }
-    }
-
-    void loadTrafficHistory(timeRange.value)
+    const cancelledRef = { current: false }
+    void loadTrafficHistory(store, timeRange.value, cancelledRef)
 
     return () => {
-      cancelled = true
+      cancelledRef.current = true
     }
   }, [timeRange.value])
 
@@ -120,7 +140,7 @@ export function Dashboard() {
 
     const offStream = sse.on('stream', (data: StreamEvent) => {
       streams.value = [
-        ...streams.value.filter((s) => s.mount !== data.mount),
+        ...streams.value.filter((stream) => stream.mount !== data.mount),
         data,
       ].sort((a, b) => a.mount.localeCompare(b.mount))
     })
@@ -133,18 +153,17 @@ export function Dashboard() {
   }, [])
 
   const totalStreams = streams.value.length
-  const activeStreams = streams.value.filter((s) => s.listeners > 0).length
+  const activeStreams = streams.value.filter((stream) => stream.listeners > 0).length
   const trafficBars = getTrafficBarHeights(listenerHistory.value)
   const paddedTrafficHistory = listenerHistory.value.length >= trafficBars.length
     ? listenerHistory.value.slice(-trafficBars.length)
     : [...Array(trafficBars.length - listenerHistory.value.length).fill(0), ...listenerHistory.value]
   const trafficScaleLabels = getTrafficScaleLabels(paddedTrafficHistory)
   const trafficRangeEnd = Date.now()
-  const hasTrafficData = listenerHistory.value.some((listeners) => listeners > 0)
+  const hasTrafficData = listenerHistory.value.some((listenersCount) => listenersCount > 0)
 
   return (
     <div class="p-7 max-w-[1400px]">
-      {/* Header */}
       <div class="flex items-center justify-between mb-6">
         <div>
           <div class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1">
@@ -166,7 +185,6 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* Stats row */}
       <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-4 mb-6">
         <StatCard
           label="Listeners"
@@ -196,7 +214,6 @@ export function Dashboard() {
         />
       </div>
 
-      {/* Traffic chart placeholder */}
       <div class="rounded-lg border border-border bg-surface-raised p-4 mb-6">
         <div class="flex items-center justify-between mb-4">
           <span class="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
@@ -206,7 +223,7 @@ export function Dashboard() {
             {(['1H', '24H', '7D'] as const).map((range) => (
               <button
                 key={range}
-                onClick={() => (timeRange.value = range)}
+                onClick={() => { timeRange.value = range }}
                 class={`
                   px-2 py-1 rounded font-mono text-[10px] tracking-wider transition-colors
                   ${
@@ -221,7 +238,6 @@ export function Dashboard() {
             ))}
           </div>
         </div>
-        {/* Listener traffic chart */}
         <div class="flex gap-3">
           {hasTrafficData ? (
             <div class="h-32 w-12 shrink-0 flex flex-col justify-between text-right font-mono text-[9px] text-text-tertiary">
@@ -243,8 +259,8 @@ export function Dashboard() {
                 </div>
                 <div class="relative flex h-full items-end gap-px">
                   {trafficBars.map((height, i) => {
-                    const listeners = paddedTrafficHistory[i]
-                    const hoverLabel = `${formatListenerCount(listeners)}\n${formatTrafficBucketLabel(i, timeRange.value, trafficRangeEnd, trafficBars.length)}`
+                    const listenersCount = paddedTrafficHistory[i]
+                    const hoverLabel = `${formatListenerCount(listenersCount)}\n${formatTrafficBucketLabel(i, timeRange.value, trafficRangeEnd, trafficBars.length)}`
 
                     return (
                       <div
@@ -277,7 +293,6 @@ export function Dashboard() {
         </div>
       </div>
 
-      {/* Streams table */}
       <div class="rounded-lg border border-border bg-surface-raised overflow-hidden">
         <div class="px-4 py-3 border-b border-border">
           <span class="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
@@ -305,7 +320,6 @@ export function Dashboard() {
                   key={stream.mount}
                   class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
                 >
-                  {/* Status dot */}
                   <td class="px-4 py-3">
                     <span
                       class="w-2 h-2 rounded-full inline-block"
@@ -317,7 +331,6 @@ export function Dashboard() {
                       }}
                     />
                   </td>
-                  {/* Mount */}
                   <td class="px-4 py-3">
                     <span class="font-mono font-bold text-sm text-text-primary">
                       {stream.mount}
@@ -328,7 +341,6 @@ export function Dashboard() {
                       </div>
                     )}
                   </td>
-                  {/* Format */}
                   <td class="px-4 py-3">
                     <span class="font-mono text-xs text-text-secondary uppercase">
                       {stream.format}
@@ -339,13 +351,11 @@ export function Dashboard() {
                       </span>
                     )}
                   </td>
-                  {/* Listeners */}
                   <td class="px-4 py-3">
                     <span class="font-mono text-sm text-text-primary">
                       {stream.listeners}
                     </span>
                   </td>
-                  {/* Health bar */}
                   <td class="px-4 py-3">
                     <div class="flex items-center gap-2">
                       <div class="h-1 w-16 rounded-full bg-surface-overlay overflow-hidden">
@@ -374,7 +384,6 @@ export function Dashboard() {
         )}
       </div>
 
-      {/* System info footer */}
       <div class="flex gap-6 mt-4 text-text-tertiary font-mono text-[10px] tracking-wider">
         <span>MEM {(stats.value.memory / 1048576).toFixed(1)} MB</span>
         <span>GR {stats.value.goroutines}</span>

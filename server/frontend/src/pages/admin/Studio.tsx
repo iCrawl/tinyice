@@ -11,54 +11,89 @@ import { PlaylistItem as PlaylistItemComp } from '@/components/PlaylistItem'
 import { FileItem } from '@/components/FileItem'
 import type { PlaylistItem, FileInfo, AutoDJEvent } from '@/types'
 
-// ── Current mount ──────────────────────────────────────────
-const currentMount = signal('')
-const availableMounts = signal<string[]>([])
-const loadingMounts = signal(true)
+type StudioStore = ReturnType<typeof createStudioStore>
 
-// ── State signals ──────────────────────────────────────────
-const state = signal<'playing' | 'paused' | 'stopped'>('stopped')
-const trackTitle = signal('No Track')
-const trackArtist = signal('Unknown Artist')
-const position = signal(0)
-const duration = signal(0)
-const listeners = signal(0)
-const uptime = signal(0)
-const volume = signal(80)
-const metadataEnabled = signal(true)
-const format = signal('mp3')
+function createStudioStore() {
+  const currentMount = signal('')
+  const availableMounts = signal<string[]>([])
+  const loadingMounts = signal(true)
 
-// ── Library state ──────────────────────────────────────────
-const libraryPath = signal('')
-const libraryFiles = signal<FileInfo[]>([])
-const librarySearch = signal('')
-const selectedFile = signal<string | null>(null)
+  const state = signal<'playing' | 'paused' | 'stopped'>('stopped')
+  const trackTitle = signal('No Track')
+  const trackArtist = signal('Unknown Artist')
+  const position = signal(0)
+  const duration = signal(0)
+  const listeners = signal(0)
+  const uptime = signal(0)
+  const volume = signal(80)
+  const metadataEnabled = signal(true)
+  const format = signal('mp3')
 
-// ── Playlist/Queue/History ─────────────────────────────────
-const activeTab = signal<'playlist' | 'queue' | 'history'>('playlist')
-const playlist = signal<PlaylistItem[]>([])
-const queue = signal<PlaylistItem[]>([])
-const history = signal<PlaylistItem[]>([])
-const currentTrackId = signal<string | null>(null)
+  const libraryPath = signal('')
+  const libraryFiles = signal<FileInfo[]>([])
+  const librarySearch = signal('')
+  const selectedFile = signal<string | null>(null)
 
-const filteredFiles = computed(() => {
-  const search = librarySearch.value.toLowerCase()
-  if (!search) return libraryFiles.value
-  return libraryFiles.value.filter(
-    (f) =>
-      f.name.toLowerCase().includes(search) ||
-      f.artist?.toLowerCase().includes(search) ||
-      f.title?.toLowerCase().includes(search)
-  )
-})
+  const activeTab = signal<'playlist' | 'queue' | 'history'>('playlist')
+  const playlist = signal<PlaylistItem[]>([])
+  const queue = signal<PlaylistItem[]>([])
+  const history = signal<PlaylistItem[]>([])
+  const currentTrackId = signal<string | null>(null)
 
-const breadcrumbs = computed(() => {
-  const parts = libraryPath.value.split('/').filter(Boolean)
-  return [{ name: 'Root', path: '' }, ...parts.map((p, i) => ({
-    name: p,
-    path: parts.slice(0, i + 1).join('/'),
-  }))]
-})
+  const filteredFiles = computed(() => {
+    const search = librarySearch.value.toLowerCase()
+    if (!search) return libraryFiles.value
+    return libraryFiles.value.filter(
+      (f) =>
+        f.name.toLowerCase().includes(search) ||
+        f.artist?.toLowerCase().includes(search) ||
+        f.title?.toLowerCase().includes(search)
+    )
+  })
+
+  const breadcrumbs = computed(() => {
+    const parts = libraryPath.value.split('/').filter(Boolean)
+    return [{ name: 'Root', path: '' }, ...parts.map((p, i) => ({
+      name: p,
+      path: parts.slice(0, i + 1).join('/'),
+    }))]
+  })
+
+  return {
+    currentMount,
+    availableMounts,
+    loadingMounts,
+    state,
+    trackTitle,
+    trackArtist,
+    position,
+    duration,
+    listeners,
+    uptime,
+    volume,
+    metadataEnabled,
+    format,
+    libraryPath,
+    libraryFiles,
+    librarySearch,
+    selectedFile,
+    activeTab,
+    playlist,
+    queue,
+    history,
+    currentTrackId,
+    filteredFiles,
+    breadcrumbs,
+  }
+}
+
+function useStudioStore() {
+  const storeRef = useRef<StudioStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createStudioStore()
+  }
+  return storeRef.current
+}
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60)
@@ -79,56 +114,84 @@ function totalDuration(items: PlaylistItem[]): string {
   return h > 0 ? `${h}h ${m}m` : `${m}m`
 }
 
-function enc() { return encodeURIComponent(currentMount.value) }
+function enc(store: StudioStore) { return encodeURIComponent(store.currentMount.value) }
 
-function resetState() {
-  state.value = 'stopped'
-  trackTitle.value = 'No Track'
-  trackArtist.value = 'Unknown Artist'
-  position.value = 0
-  duration.value = 0
-  listeners.value = 0
-  uptime.value = 0
-  volume.value = 80
-  metadataEnabled.value = true
-  format.value = 'mp3'
-  libraryPath.value = ''
-  libraryFiles.value = []
-  librarySearch.value = ''
-  selectedFile.value = null
-  activeTab.value = 'playlist'
-  playlist.value = []
-  queue.value = []
-  history.value = []
-  currentTrackId.value = null
+function resetState(store: StudioStore) {
+  store.state.value = 'stopped'
+  store.trackTitle.value = 'No Track'
+  store.trackArtist.value = 'Unknown Artist'
+  store.position.value = 0
+  store.duration.value = 0
+  store.listeners.value = 0
+  store.uptime.value = 0
+  store.volume.value = 80
+  store.metadataEnabled.value = true
+  store.format.value = 'mp3'
+  store.libraryPath.value = ''
+  store.libraryFiles.value = []
+  store.librarySearch.value = ''
+  store.selectedFile.value = null
+  store.activeTab.value = 'playlist'
+  store.playlist.value = []
+  store.queue.value = []
+  store.history.value = []
+  store.currentTrackId.value = null
 }
 
-function fetchLibrary(path: string) {
-  libraryPath.value = path
-  api.get<FileInfo[]>(`/api/autodj/${enc()}/files?path=${encodeURIComponent(path)}`)
-    .then((data) => { libraryFiles.value = data })
-    .catch(() => { libraryFiles.value = [] })
+function fetchLibrary(store: StudioStore, path: string) {
+  store.libraryPath.value = path
+  api.get<FileInfo[]>(`/api/autodj/${enc(store)}/files?path=${encodeURIComponent(path)}`)
+    .then((data) => { store.libraryFiles.value = data })
+    .catch(() => { store.libraryFiles.value = [] })
 }
 
-function fetchPlaylist() {
-  api.get<PlaylistItem[]>(`/api/autodj/${enc()}/playlist`)
-    .then((data) => { playlist.value = data })
-    .catch(() => { playlist.value = [] })
+function fetchPlaylist(store: StudioStore) {
+  api.get<PlaylistItem[]>(`/api/autodj/${enc(store)}/playlist`)
+    .then((data) => { store.playlist.value = data })
+    .catch(() => { store.playlist.value = [] })
 }
 
-function fetchQueue() {
-  api.get<PlaylistItem[]>(`/api/autodj/${enc()}/queue`)
-    .then((data) => { queue.value = data })
-    .catch(() => { queue.value = [] })
+function fetchQueue(store: StudioStore) {
+  api.get<PlaylistItem[]>(`/api/autodj/${enc(store)}/queue`)
+    .then((data) => { store.queue.value = data })
+    .catch(() => { store.queue.value = [] })
 }
 
-function fetchAllData() {
-  fetchLibrary('')
-  fetchPlaylist()
-  fetchQueue()
+function fetchAllData(store: StudioStore) {
+  fetchLibrary(store, '')
+  fetchPlaylist(store)
+  fetchQueue(store)
 }
 
 export function Studio() {
+  const store = useStudioStore()
+  const {
+    currentMount,
+    availableMounts,
+    loadingMounts,
+    state,
+    trackTitle,
+    trackArtist,
+    position,
+    duration,
+    listeners,
+    uptime,
+    volume,
+    metadataEnabled,
+    format,
+    libraryPath,
+    libraryFiles,
+    librarySearch,
+    selectedFile,
+    activeTab,
+    playlist,
+    queue,
+    history,
+    currentTrackId,
+    filteredFiles,
+    breadcrumbs,
+  } = store
+
   const sseRef = useRef<ReturnType<typeof createSSE> | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -179,14 +242,14 @@ export function Studio() {
     window.history.replaceState(null, '', url.toString())
 
     // Reset state for new mount
-    resetState()
-    fetchAllData()
+    resetState(store)
+    fetchAllData(store)
 
     // Reconnect SSE for new mount
     if (sseRef.current) sseRef.current.close()
     if (timerRef.current) clearInterval(timerRef.current)
 
-    const sse = createSSE('/events')
+    const sse = createSSE('/admin/events')
     sseRef.current = sse
 
     sse.on('autodj', (evt: AutoDJEvent) => {
@@ -212,55 +275,55 @@ export function Studio() {
   }, [])
 
   const handleTransport = useCallback((action: string) => {
-    api.post(`/api/autodj/${enc()}/${action}`)
+    api.post(`/api/autodj/${enc(store)}/${action}`)
   }, [])
 
   const handleVolumeChange = useCallback((v: number) => {
     volume.value = v
-    api.post(`/api/autodj/${enc()}/volume`, { volume: v })
+    api.post(`/api/autodj/${enc(store)}/volume`, { volume: v })
   }, [])
 
   const handleMetadataToggle = useCallback((checked: boolean) => {
     metadataEnabled.value = checked
-    api.post(`/api/autodj/${enc()}/metadata`, { enabled: checked })
+    api.post(`/api/autodj/${enc(store)}/metadata`, { enabled: checked })
   }, [])
 
   const handleAddFile = useCallback((file: FileInfo) => {
-    api.post(`/api/autodj/${enc()}/playlist/add`, { path: file.path })
-      .then(() => fetchPlaylist())
+    api.post(`/api/autodj/${enc(store)}/playlist/add`, { path: file.path })
+      .then(() => fetchPlaylist(store))
   }, [])
 
   const handleAddAll = useCallback(() => {
     const files = libraryFiles.value.filter((f) => !f.isDir)
-    api.post(`/api/autodj/${enc()}/playlist/add`, { paths: files.map((f) => f.path) })
-      .then(() => fetchPlaylist())
+    api.post(`/api/autodj/${enc(store)}/playlist/add`, { paths: files.map((f) => f.path) })
+      .then(() => fetchPlaylist(store))
   }, [])
 
   const handleRemoveTrack = useCallback((id: string) => {
-    api.post(`/api/autodj/${enc()}/playlist/remove`, { id })
-      .then(() => fetchPlaylist())
+    api.post(`/api/autodj/${enc(store)}/playlist/remove`, { id })
+      .then(() => fetchPlaylist(store))
   }, [])
 
   const handlePlayNext = useCallback((id: string) => {
-    api.post(`/api/autodj/${enc()}/playlist/playnext`, { id })
+    api.post(`/api/autodj/${enc(store)}/playlist/playnext`, { id })
   }, [])
 
   const handleClear = useCallback(() => {
-    api.post(`/api/autodj/${enc()}/playlist/clear`)
-      .then(() => fetchPlaylist())
+    api.post(`/api/autodj/${enc(store)}/playlist/clear`)
+      .then(() => fetchPlaylist(store))
   }, [])
 
   const handleSavePlaylist = useCallback(() => {
-    api.post(`/api/autodj/${enc()}/playlist/save`)
+    api.post(`/api/autodj/${enc(store)}/playlist/save`)
   }, [])
 
   const handleLoadPlaylist = useCallback(() => {
-    api.post(`/api/autodj/${enc()}/playlist/load`)
-      .then(() => fetchPlaylist())
+    api.post(`/api/autodj/${enc(store)}/playlist/load`)
+      .then(() => fetchPlaylist(store))
   }, [])
 
   const handleFolderClick = useCallback((file: FileInfo) => {
-    if (file.isDir) fetchLibrary(file.path)
+    if (file.isDir) fetchLibrary(store, file.path)
   }, [])
 
   const getFreqData = useCallback(() => null, [])
@@ -368,7 +431,7 @@ export function Studio() {
                 <span key={crumb.path} class="flex items-center gap-1">
                   {i > 0 && <span>/</span>}
                   <button
-                    onClick={() => fetchLibrary(crumb.path)}
+                    onClick={() => fetchLibrary(store, crumb.path)}
                     class="hover:text-text-primary transition-colors"
                   >
                     {crumb.name}
@@ -466,7 +529,7 @@ export function Studio() {
             {(['playlist', 'queue', 'history'] as const).map((tab) => (
               <button
                 key={tab}
-                onClick={() => { activeTab.value = tab; if (tab === 'queue') fetchQueue() }}
+                onClick={() => { activeTab.value = tab; if (tab === 'queue') fetchQueue(store) }}
                 class={`flex-1 py-3 font-mono text-[10px] tracking-widest uppercase transition-colors relative ${
                   activeTab.value === tab
                     ? 'text-text-primary'

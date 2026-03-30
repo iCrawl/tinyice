@@ -55,6 +55,45 @@ type streamerEventInfo struct {
 	Playlist    []relay.PlaylistItem `json:"playlist"`
 }
 
+type adminStatsEvent struct {
+	Listeners    int    `json:"listeners"`
+	Streams      int    `json:"streams"`
+	Bandwidth    int64  `json:"bandwidth"`
+	BandwidthIn  int64  `json:"bandwidth_in"`
+	BandwidthOut int64  `json:"bandwidth_out"`
+	Uptime       int    `json:"uptime"`
+	Goroutines   int    `json:"goroutines"`
+	Memory       uint64 `json:"memory"`
+	GC           uint32 `json:"gc"`
+}
+
+type adminStreamEvent struct {
+	Mount        string  `json:"mount"`
+	Title        string  `json:"title"`
+	Artist       string  `json:"artist"`
+	Format       string  `json:"format"`
+	Bitrate      string  `json:"bitrate"`
+	Listeners    int     `json:"listeners"`
+	Health       float64 `json:"health"`
+	Status       string  `json:"status"`
+	StatusReason string  `json:"status_reason"`
+}
+
+type adminAutoDJTrack struct {
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
+	File   string `json:"file"`
+}
+
+type adminAutoDJEvent struct {
+	Mount        string           `json:"mount"`
+	State        string           `json:"state"`
+	CurrentTrack adminAutoDJTrack `json:"currentTrack"`
+	Position     int              `json:"position"`
+	Duration     float64          `json:"duration"`
+	Queue        []string         `json:"queue"`
+}
+
 func (s *Server) collectStatsPayload(user *config.User) ([]byte, error) {
 	bi, bo := s.Relay.GetMetrics()
 	allStreams := s.Relay.Snapshot()
@@ -157,6 +196,107 @@ func parseInsightsDuration(rawRange string) (time.Duration, error) {
 	}
 }
 
+func streamerStateLabel(state relay.StreamerState) string {
+	switch state {
+	case relay.StatePlaying:
+		return "playing"
+	case relay.StatePaused:
+		return "paused"
+	default:
+		return "stopped"
+	}
+}
+
+func (s *Server) buildAdminStatsEvent(user *config.User) adminStatsEvent {
+	bi, bo := s.Relay.GetMetrics()
+	allStreams := s.Relay.Snapshot()
+	totalListeners := 0
+	totalStreams := 0
+
+	for _, st := range allStreams {
+		if !s.hasAccess(user, st.MountName) {
+			continue
+		}
+		totalListeners += st.ListenersCount
+		totalStreams++
+	}
+
+	if user.Role != config.RoleSuperAdmin {
+		var visibleIn int64
+		var visibleOut int64
+		for _, st := range allStreams {
+			if !s.hasAccess(user, st.MountName) {
+				continue
+			}
+			visibleIn += st.BytesIn
+			visibleOut += st.BytesOut
+		}
+		bi, bo = visibleIn, visibleOut
+	}
+
+	var m runtime.MemStats
+	runtime.ReadMemStats(&m)
+
+	return adminStatsEvent{
+		Listeners:    totalListeners,
+		Streams:      totalStreams,
+		Bandwidth:    bo,
+		BandwidthIn:  bi,
+		BandwidthOut: bo,
+		Uptime:       int(time.Since(s.startTime).Seconds()),
+		Goroutines:   runtime.NumGoroutine(),
+		Memory:       m.HeapAlloc,
+		GC:           m.NumGC,
+	}
+}
+
+func (s *Server) buildAdminStreamEvents(user *config.User) []adminStreamEvent {
+	allStreams := s.Relay.Snapshot()
+	events := make([]adminStreamEvent, 0, len(allStreams))
+	for _, st := range allStreams {
+		if !s.hasAccess(user, st.MountName) {
+			continue
+		}
+		events = append(events, adminStreamEvent{
+			Mount:        st.MountName,
+			Title:        st.CurrentSong,
+			Artist:       "",
+			Format:       st.ContentType,
+			Bitrate:      st.Bitrate,
+			Listeners:    st.ListenersCount,
+			Health:       st.Health,
+			Status:       "",
+			StatusReason: "",
+		})
+	}
+	return events
+}
+
+func (s *Server) buildAdminAutoDJEvents(user *config.User) []adminAutoDJEvent {
+	activeStreamers := s.StreamerM.GetStreamers()
+	events := make([]adminAutoDJEvent, 0, len(activeStreamers))
+	for _, st := range activeStreamers {
+		if !s.hasAccess(user, st.OutputMount) {
+			continue
+		}
+
+		stats := st.GetStats()
+		events = append(events, adminAutoDJEvent{
+			Mount: st.OutputMount,
+			State: streamerStateLabel(stats.State),
+			CurrentTrack: adminAutoDJTrack{
+				Title:  stats.CurrentSong,
+				Artist: "",
+				File:   "",
+			},
+			Position: 0,
+			Duration: stats.Duration.Seconds(),
+			Queue:    st.GetQueueNames(),
+		})
+	}
+	return events
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.checkAuth(r); !ok {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
@@ -190,47 +330,17 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return err
 		}
 
-		// Also send named events for the new Preact frontend
-		var full map[string]interface{}
-		json.Unmarshal(payload, &full)
-
-		// stats event
-		statsJSON, _ := json.Marshal(map[string]interface{}{
-			"listeners":     full["total_listeners"],
-			"streams":       full["total_sources"],
-			"bandwidth_in":  full["bytes_in"],
-			"bandwidth_out": full["bytes_out"],
-			"bandwidth":     full["bytes_out"], // backwards compat
-			"uptime":        int(time.Since(s.startTime).Seconds()),
-			"goroutines":    full["goroutines"],
-			"memory":        full["heap_alloc"],
-			"gc":            full["num_gc"],
-		})
+		statsJSON, _ := json.Marshal(s.buildAdminStatsEvent(user))
 		fmt.Fprintf(w, "event: stats\ndata: %s\n\n", statsJSON)
 
-		// stream events
-		if streams, ok := full["streams"].([]interface{}); ok {
-			for _, st := range streams {
-				stMap := st.(map[string]interface{})
-				streamJSON, _ := json.Marshal(map[string]interface{}{
-					"mount":     stMap["mount"],
-					"format":    stMap["content_type"],
-					"bitrate":   stMap["bitrate"],
-					"listeners": stMap["listeners"],
-					"health":    stMap["health"],
-					"title":     stMap["song"],
-					"artist":    "",
-				})
-				fmt.Fprintf(w, "event: stream\ndata: %s\n\n", streamJSON)
-			}
+		for _, streamEvent := range s.buildAdminStreamEvents(user) {
+			streamJSON, _ := json.Marshal(streamEvent)
+			fmt.Fprintf(w, "event: stream\ndata: %s\n\n", streamJSON)
 		}
 
-		// autodj events
-		if streamers, ok := full["streamers"].([]interface{}); ok {
-			for _, st := range streamers {
-				stJSON, _ := json.Marshal(st)
-				fmt.Fprintf(w, "event: autodj\ndata: %s\n\n", stJSON)
-			}
+		for _, autodjEvent := range s.buildAdminAutoDJEvents(user) {
+			autodjJSON, _ := json.Marshal(autodjEvent)
+			fmt.Fprintf(w, "event: autodj\ndata: %s\n\n", autodjJSON)
 		}
 
 		flusher.Flush()

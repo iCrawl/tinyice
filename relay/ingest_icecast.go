@@ -8,7 +8,8 @@ import (
 
 // IcecastIngestSource wraps an Icecast PUT/SOURCE connection as an IngestSource.
 // The actual source handling remains in server/handlers_stream.go.
-// This adapter provides pipeline-compatible metadata and health.
+// This adapter only provides pipeline-compatible metadata and health while
+// Relay remains the active runtime path.
 type IcecastIngestSource struct {
 	mount   string
 	stream  *Stream

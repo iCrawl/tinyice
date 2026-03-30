@@ -9,13 +9,30 @@ import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
 
-const playing = signal(false)
-const title = signal(data.title || 'Untitled')
-const artist = signal(data.artist || 'Unknown Artist')
-const volume = signal(80)
-const listeners = signal(data.listeners || 0)
+type PlayerStore = ReturnType<typeof createPlayerStore>
+
+function createPlayerStore(initialData: Partial<PlayerData>) {
+  const playing = signal(false)
+  const title = signal(initialData.title || 'Untitled')
+  const artist = signal(initialData.artist || 'Unknown Artist')
+  const volume = signal(80)
+  const listeners = signal(initialData.listeners || 0)
+
+  return { playing, title, artist, volume, listeners }
+}
+
+function usePlayerStore(initialData: Partial<PlayerData>) {
+  const storeRef = useRef<PlayerStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createPlayerStore(initialData)
+  }
+  return storeRef.current
+}
 
 export function Player() {
+  const store = usePlayerStore(data)
+  const { playing, title, artist, volume, listeners } = store
+
   const audioRef = useRef<HTMLAudioElement>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const albumArt = useAlbumArt(artist.value, title.value)
@@ -70,13 +87,12 @@ export function Player() {
     playing.value = false
   }, [])
 
-  const handleVolumeChange = useCallback((v: number) => {
-    volume.value = v
+  const handleVolumeChange = useCallback((nextVolume: number) => {
+    volume.value = nextVolume
   }, [])
 
   return (
     <div class="min-h-screen bg-surface-base relative overflow-hidden flex flex-col items-center justify-center">
-      {/* Dot grid texture */}
       <div
         class="fixed inset-0 pointer-events-none z-0"
         style={{
@@ -85,7 +101,6 @@ export function Player() {
         }}
       />
 
-      {/* Ambient accent glow behind visualizer */}
       <div
         class="fixed pointer-events-none z-0"
         style={{
@@ -98,10 +113,8 @@ export function Player() {
         }}
       />
 
-      {/* Hidden audio element */}
       <audio ref={audioRef} crossOrigin="anonymous" preload="none" />
 
-      {/* Mini nav top-left */}
       <div class="fixed top-0 left-0 z-20 flex items-center gap-3 px-5 py-4">
         <a href="/" class="font-heading text-sm font-bold text-text-primary tracking-tight">
           Ti
@@ -115,12 +128,9 @@ export function Player() {
         </div>
       </div>
 
-      {/* Main content */}
       <main class="relative z-10 flex flex-col items-center gap-8">
-        {/* Visualizer */}
         <Visualizer size={260} getFreqData={getFreqData} albumArt={albumArt} />
 
-        {/* Track info */}
         <div class="flex flex-col items-center gap-1.5 max-w-xs text-center">
           <h1 class="text-[22px] font-bold text-text-primary leading-tight truncate w-full">
             {title}
@@ -130,7 +140,6 @@ export function Player() {
           </p>
         </div>
 
-        {/* Play / Pause — radio only needs this */}
         <button
           onClick={playing.value ? handlePause : handlePlay}
           class="w-14 h-14 rounded-full bg-accent flex items-center justify-center accent-shadow-control"
@@ -147,11 +156,9 @@ export function Player() {
           )}
         </button>
 
-        {/* Volume */}
         <VolumeKnob value={volume.value} onChange={handleVolumeChange} />
       </main>
 
-      {/* Bottom strip */}
       <div class="fixed bottom-0 inset-x-0 z-20 border-t border-border">
         <div class="mx-auto max-w-7xl px-4 py-3 flex items-center justify-center gap-8">
           <span class="font-mono text-[9px] tracking-widest text-text-tertiary/50 uppercase">
@@ -161,7 +168,7 @@ export function Player() {
             {data.bitrate}kbps {data.format}
           </span>
           <span class="font-mono text-[9px] tracking-widest text-text-tertiary/50 uppercase">
-            {listeners} {listeners.value === 1 ? 'listener' : 'listeners'}
+            {listeners.value} {listeners.value === 1 ? 'listener' : 'listeners'}
           </span>
         </div>
       </div>
