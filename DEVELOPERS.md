@@ -6,7 +6,7 @@ Welcome to the TinyIce codebase! This document provides an architectural overvie
 
 - **Language**: Go 1.21+
 - **Database**: SQLite (via `modernc.org/sqlite` pure-Go driver) for persistent song history.
-- **Frontend**: Vanilla JavaScript + HTML5 Templates (embedded via `embed.FS`).
+- **Frontend**: Preact + Vite, embedded into the Go binary via `embed.FS`.
 - **Real-time**: Server-Sent Events (SSE) for dashboard metrics.
 - **Security**: Argon2/Bcrypt for password hashing, TLS via ACME (autocert).
 
@@ -25,7 +25,7 @@ TinyIce is built around a central **Pub/Sub** engine located in the `relay/` pac
 TinyIce is designed for high-density streaming. Below are approximate resource requirements based on current architecture:
 
 ### Memory Usage (RAM)
-- **Base Footprint**: ~15MB (Static binary + embedded templates + SQLite overhead).
+- **Base Footprint**: ~15MB (Static binary + embedded frontend bundle + SQLite overhead).
 - **Per Listener Connection**: **~15KB to 30KB**.
     - Since transitioning to the **Shared Circular Buffer**, per-listener overhead is minimized to the TCP connection state and a small signal channel.
     - 10,000 listeners $\approx$ 250MB RAM.
@@ -84,7 +84,7 @@ rm -f tinyice.json history.db && go run main.go
 ### Adding New Features
 1.  **Backend**: Add logic to `relay/` or `config/` first.
 2.  **API**: Expose the logic via a new handler in `server/server.go`.
-3.  **UI**: Add a new tab or element in `server/templates/admin.html` and update the SSE `onmessage` handler if real-time data is needed.
+3.  **UI**: Add or update the relevant Preact page in `server/frontend/src/pages/` or `server/frontend/src/pages/admin/`, then wire any new admin route in `server/frontend/src/pages/admin/AdminLayout.tsx` if needed.
 
 ## Performance Tuning
 
@@ -96,7 +96,7 @@ When testing high-load scenarios:
 ## Contributing
 
 1.  Keep it **CGO-free**.
-2.  Ensure templates remain **self-contained** (no external CDNs).
+2.  Ensure the embedded frontend remains **self-contained** (no external CDNs).
 3.  Update `DEVELOPERS.md` if you change core architectural patterns.
 
 ---

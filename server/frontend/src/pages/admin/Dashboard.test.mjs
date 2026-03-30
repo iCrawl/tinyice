@@ -44,3 +44,31 @@ test('Dashboard attaches hover text to listener traffic bars', async () => {
     'Dashboard must expose per-bar hover text with the exact listener count and time bucket'
   )
 })
+
+test('Dashboard labels inbound and outbound cards as totals with byte units', async () => {
+  const source = await readFile(dashboardPath, 'utf8')
+
+  assert.match(
+    source,
+    /label="Inbound Total"/,
+    'Dashboard should label inbound traffic as a cumulative total so it matches the backend counters'
+  )
+
+  assert.match(
+    source,
+    /label="Outbound Total"/,
+    'Dashboard should label outbound traffic as a cumulative total so it matches the backend counters'
+  )
+
+  assert.match(
+    source,
+    /function formatBytes\(/,
+    'Dashboard should format cumulative traffic with byte units instead of bandwidth-rate units'
+  )
+
+  assert.doesNotMatch(
+    source,
+    /B\/s|KB\/s|MB\/s/,
+    'Dashboard should not render rate units for cumulative inbound and outbound totals'
+  )
+})

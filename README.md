@@ -46,7 +46,7 @@
 Traditional streaming servers can be complex to configure and resource-heavy. TinyIce aims to solve this by providing:
 
 -   **Massive Scalability**: Built with a **Shared Circular Buffer** architecture that allows a single stream to be broadcast to hundreds of thousands of listeners with near-zero memory allocations.
--   **Instant Deployment**: A single binary with all assets (templates, icons, frontend) embedded.
+-   **Instant Deployment**: A single binary with the frontend bundle, icons, and server assets embedded.
 -   **Zero-Config Security**: Unique secure credentials automatically generated on first run.
 -   **Multi-Tenant Ready**: Create multiple admin users who can only manage their own mount points.
 -   **Edge-Ready Relaying**: Pull streams from other servers with automatic reconnection and in-stream ICY metadata parsing.

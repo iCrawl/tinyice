@@ -11,10 +11,15 @@ test('Streams page renders explicit diagnostic fields', async () => {
 
   assert.match(source, /status_reason/, 'Streams page should render the latest status reason')
   assert.match(source, /history/, 'Streams page should render recent diagnostic history')
+  assert.match(source, /source_kind/, 'Streams page should read runtime source kind metadata')
+  assert.match(source, /source_label/, 'Streams page should render a human-readable source label')
   assert.match(source, /Recovering|Stopped|Dead|Degraded|Running|Error/, 'Streams page should map status badges')
   assert.match(source, /max_listeners/, 'Streams page should render mount-level listener caps')
   assert.match(source, /burst_size/, 'Streams page should render mount burst size settings')
-  assert.match(source, /api\.put\('\/api\/streams'/, 'Streams page should update existing stream settings')
+  assert.match(source, /Edit Mount Settings/, 'Streams page should expose a modal for mount settings')
+  assert.match(source, /openEditModal/, 'Streams page should open mount settings from a dedicated edit action')
+  assert.match(source, /saveEditModal/, 'Streams page should save mount settings from the modal')
+  assert.doesNotMatch(source, /title:"Save stream settings"/, 'Streams page should not keep inline save actions for mount settings')
 })
 
 test('shared frontend types include diagnostics payload fields', async () => {

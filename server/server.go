@@ -33,7 +33,7 @@ var assetFS embed.FS
 //
 // Key responsibilities:
 //   - HTTP request routing and handling
-//   - Web interface rendering (templates, assets)
+//   - Web interface rendering (embedded frontend, assets)
 //   - WebSocket connections for real-time updates
 //   - Source client authentication and authorization
 //   - Listener connection management

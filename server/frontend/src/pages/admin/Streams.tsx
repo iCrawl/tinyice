@@ -6,6 +6,8 @@ import { api } from '../../lib/api'
 interface Stream {
   mount: string
   source_ip: string
+  source_kind?: string
+  source_label?: string
   content_type: string
   listeners: number
   burst_size: number
@@ -29,23 +31,25 @@ function createStreamsStore() {
   const streams = signal<Stream[]>([])
   const loading = signal(true)
   const showModal = signal(false)
+  const editingMount = signal<Stream | null>(null)
+  const editBurst = signal(0)
+  const editMaxListeners = signal(0)
   const formMount = signal('')
   const formPassword = signal('')
   const formBurst = signal(65536)
   const formMaxListeners = signal(0)
-  const burstDrafts = signal<Record<string, number>>({})
-  const maxListenerDrafts = signal<Record<string, number>>({})
 
   return {
     streams,
     loading,
     showModal,
+    editingMount,
+    editBurst,
+    editMaxListeners,
     formMount,
     formPassword,
     formBurst,
     formMaxListeners,
-    burstDrafts,
-    maxListenerDrafts,
   }
 }
 
@@ -57,22 +61,10 @@ function useStreamsStore() {
   return storeRef.current
 }
 
-function syncDrafts(store: StreamsStore, nextStreams: Stream[]) {
-  const nextBursts: Record<string, number> = {}
-  const nextCaps: Record<string, number> = {}
-  for (const stream of nextStreams) {
-    nextBursts[stream.mount] = stream.burst_size || 0
-    nextCaps[stream.mount] = stream.max_listeners || 0
-  }
-  store.burstDrafts.value = nextBursts
-  store.maxListenerDrafts.value = nextCaps
-}
-
 async function load(store: StreamsStore) {
   store.loading.value = true
   try {
     store.streams.value = await api.get<Stream[]>('/api/streams')
-    syncDrafts(store, store.streams.value)
   } catch { /* empty */ }
   store.loading.value = false
 }
@@ -92,12 +84,28 @@ async function addMount(store: StreamsStore) {
   await load(store)
 }
 
-async function updateMount(store: StreamsStore, mount: string) {
+function openEditModal(store: StreamsStore, stream: Stream) {
+  store.editingMount.value = stream
+  store.editBurst.value = stream.burst_size || 0
+  store.editMaxListeners.value = stream.max_listeners || 0
+}
+
+function closeEditModal(store: StreamsStore) {
+  store.editingMount.value = null
+  store.editBurst.value = 0
+  store.editMaxListeners.value = 0
+}
+
+async function saveEditModal(store: StreamsStore) {
+  const mount = store.editingMount.value?.mount
+  if (!mount) return
+
   await api.put('/api/streams', {
     mount,
-    burst_size: store.burstDrafts.value[mount] || 0,
-    max_listeners: store.maxListenerDrafts.value[mount] || 0,
+    burst_size: store.editBurst.value || 0,
+    max_listeners: store.editMaxListeners.value || 0,
   })
+  closeEditModal(store)
   await load(store)
 }
 
@@ -116,7 +124,12 @@ async function kickListeners(store: StreamsStore, mount: string) {
   await load(store)
 }
 
-function statusLabel(status: string, sourceIP: string) {
+function hasConnectedSource(stream: Stream) {
+  return Boolean(stream.source_ip || stream.source_kind)
+}
+
+function statusLabel(stream: Stream) {
+  const status = stream.status
   switch (status) {
     case 'running': return 'Running'
     case 'recovering': return 'Recovering'
@@ -124,12 +137,12 @@ function statusLabel(status: string, sourceIP: string) {
     case 'dead': return 'Dead'
     case 'error': return 'Error'
     case 'stopped': return 'Stopped'
-    default: return sourceIP ? 'Running' : 'Stopped'
+    default: return hasConnectedSource(stream) ? 'Running' : 'Stopped'
   }
 }
 
-function statusBadgeClass(status: string, sourceIP: string) {
-  const effective = status || (sourceIP ? 'running' : 'stopped')
+function statusBadgeClass(stream: Stream) {
+  const effective = stream.status || (hasConnectedSource(stream) ? 'running' : 'stopped')
   switch (effective) {
     case 'running':
       return 'bg-live/15 text-live'
@@ -145,9 +158,19 @@ function statusBadgeClass(status: string, sourceIP: string) {
   }
 }
 
+function sourceStatusReason(stream: Stream) {
+  if (stream.status_reason) return stream.status_reason
+  if (stream.source_label) return `${stream.source_label} connected`
+  return hasConnectedSource(stream) ? 'source connected' : 'no source'
+}
+
+function sourceDisplay(stream: Stream) {
+  return stream.source_ip || stream.source_label || 'No source'
+}
+
 export function Streams() {
   const store = useStreamsStore()
-  const { streams, loading, showModal, formMount, formPassword, formBurst, formMaxListeners, burstDrafts, maxListenerDrafts } = store
+  const { streams, loading, showModal, editingMount, editBurst, editMaxListeners, formMount, formPassword, formBurst, formMaxListeners } = store
 
   useEffect(() => {
     void load(store)
@@ -166,113 +189,91 @@ export function Streams() {
         </button>
       </div>
 
-      <div class="border border-border rounded-xl overflow-hidden">
-        <table class="w-full">
-          <thead>
-            <tr class="border-b border-border">
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Status</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Mount</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Source IP</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Format</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Listeners</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Burst</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Cap</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading.value ? (
-              <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
-            ) : streams.value.length === 0 ? (
-              <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">No streams configured</td></tr>
-            ) : (
-              streams.value.map((s) => (
-                <tr key={s.mount} class="border-b border-[rgba(255,255,255,0.03)]">
-                  <td class="px-4 py-3.5">
-                    <div class="flex flex-col gap-1.5">
-                      <span class={`inline-flex items-center rounded-full px-2 py-1 font-mono text-[10px] uppercase ${statusBadgeClass(s.status, s.source_ip)}`}>
-                        {statusLabel(s.status, s.source_ip)}
-                      </span>
-                      <span class="text-xs text-text-secondary">
-                        {s.status_reason || (s.source_ip ? 'source connected' : 'no source')}
-                      </span>
-                      {s.history?.length > 0 && (
-                        <span class="text-[11px] text-text-tertiary">
-                          Recent: {s.history.slice(-3).reverse().map((entry) => entry.reason).join(' • ')}
+      <div class="admin-table-shell">
+        <div class="admin-table-scroll">
+          <table class="w-full min-w-[980px]">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Status</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Mount</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Source IP</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Format</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Listeners</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Burst</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Cap</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading.value ? (
+                <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
+              ) : streams.value.length === 0 ? (
+                <tr><td colSpan={8} class="px-4 py-8 text-center text-text-tertiary text-sm">No streams configured</td></tr>
+              ) : (
+                streams.value.map((s) => (
+                  <tr key={s.mount} class="border-b border-[rgba(255,255,255,0.03)]">
+                    <td class="px-4 py-3.5">
+                      <div class="flex flex-col gap-1.5">
+                        <span class={`inline-flex items-center rounded-full px-2 py-1 font-mono text-[10px] uppercase ${statusBadgeClass(s)}`}>
+                          {statusLabel(s)}
                         </span>
-                      )}
-                    </div>
-                  </td>
-                  <td class="px-4 py-3.5 font-mono font-bold text-sm text-text-primary">{s.mount}</td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">{s.source_ip || 'No source'}</td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">{s.content_type || '—'}</td>
-                  <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.listeners}</td>
-                  <td class="px-4 py-3.5">
-                    <input
-                      type="number"
-                      value={burstDrafts.value[s.mount] || 0}
-                      onInput={(e) => {
-                        burstDrafts.value = {
-                          ...burstDrafts.value,
-                          [s.mount]: parseInt((e.target as HTMLInputElement).value) || 0,
-                        }
-                      }}
-                      class="w-24 bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-3 py-2 text-text-primary font-mono text-xs focus:border-accent outline-none"
-                    />
-                  </td>
-                  <td class="px-4 py-3.5">
-                    <input
-                      type="number"
-                      value={maxListenerDrafts.value[s.mount] || 0}
-                      onInput={(e) => {
-                        maxListenerDrafts.value = {
-                          ...maxListenerDrafts.value,
-                          [s.mount]: parseInt((e.target as HTMLInputElement).value) || 0,
-                        }
-                      }}
-                      class="w-20 bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-3 py-2 text-text-primary font-mono text-xs focus:border-accent outline-none"
-                    />
-                  </td>
-                  <td class="px-4 py-3.5 text-right">
-                    <div class="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => { void updateMount(store, s.mount) }}
-                        title="Save stream settings"
-                        class="border border-border text-accent font-mono text-xs px-2 py-1.5 rounded-lg hover:border-accent/40"
-                      >
-                        SAVE
-                      </button>
-                      <button
-                        onClick={() => { void kickSource(store, s.mount) }}
-                        aria-label={`Kick source on ${s.mount}`}
-                        title="Kick source"
-                        class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
-                      >
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64A9 9 0 005.64 18.36M5.64 5.64A9 9 0 0018.36 18.36" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
-                      </button>
-                      <button
-                        onClick={() => { void kickListeners(store, s.mount) }}
-                        aria-label={`Kick listeners on ${s.mount}`}
-                        title="Kick listeners"
-                        class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
-                      >
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2" /><circle cx="9" cy="7" r="4" /><line x1="18" y1="8" x2="23" y2="13" /><line x1="23" y1="8" x2="18" y2="13" /></svg>
-                      </button>
-                      <button
-                        onClick={() => { void removeMount(store, s.mount) }}
-                        aria-label={`Remove mount ${s.mount}`}
-                        title="Remove mount"
-                        class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
-                      >
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+                        <span class="text-xs text-text-secondary">
+                          {sourceStatusReason(s)}
+                        </span>
+                        {s.history?.length > 0 && (
+                          <span class="text-[11px] text-text-tertiary">
+                            Recent: {s.history.slice(-3).reverse().map((entry) => entry.reason).join(' • ')}
+                          </span>
+                        )}
+                      </div>
+                    </td>
+                    <td class="px-4 py-3.5 font-mono font-bold text-sm text-text-primary">{s.mount}</td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">{sourceDisplay(s)}</td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">{s.content_type || '—'}</td>
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.listeners}</td>
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.burst_size}</td>
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.max_listeners}</td>
+                    <td class="px-4 py-3.5 text-right">
+                      <div class="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => { openEditModal(store, s) }}
+                          title={`Edit settings for ${s.mount}`}
+                          class="border border-border text-accent font-mono text-xs px-2 py-1.5 rounded-lg hover:border-accent/40"
+                        >
+                          EDIT
+                        </button>
+                        <button
+                          onClick={() => { void kickSource(store, s.mount) }}
+                          aria-label={`Kick source on ${s.mount}`}
+                          title="Kick source"
+                          class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
+                        >
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18.36 6.64A9 9 0 005.64 18.36M5.64 5.64A9 9 0 0018.36 18.36" /><line x1="1" y1="1" x2="23" y2="23" /></svg>
+                        </button>
+                        <button
+                          onClick={() => { void kickListeners(store, s.mount) }}
+                          aria-label={`Kick listeners on ${s.mount}`}
+                          title="Kick listeners"
+                          class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
+                        >
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4-4v2" /><circle cx="9" cy="7" r="4" /><line x1="18" y1="8" x2="23" y2="13" /><line x1="23" y1="8" x2="18" y2="13" /></svg>
+                        </button>
+                        <button
+                          onClick={() => { void removeMount(store, s.mount) }}
+                          aria-label={`Remove mount ${s.mount}`}
+                          title="Remove mount"
+                          class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
+                        >
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {showModal.value && (
@@ -327,6 +328,49 @@ export function Streams() {
               </button>
               <button
                 onClick={() => { void addMount(store) }}
+                class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
+              >
+                SAVE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {editingMount.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div class="bg-surface-overlay border border-border rounded-xl p-6 max-w-md w-full mx-4">
+            <h2 class="text-lg font-bold text-text-primary mb-1">Edit Mount Settings</h2>
+            <p class="font-mono text-xs text-text-tertiary mb-4">{editingMount.value.mount}</p>
+            <div class="flex flex-col gap-3">
+              <div>
+                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">BURST SIZE</label>
+                <input
+                  type="number"
+                  value={editBurst.value}
+                  onInput={(e) => { editBurst.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
+                  class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
+                />
+              </div>
+              <div>
+                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">MAX LISTENERS</label>
+                <input
+                  type="number"
+                  value={editMaxListeners.value}
+                  onInput={(e) => { editMaxListeners.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
+                  class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
+                />
+              </div>
+            </div>
+            <div class="flex justify-end gap-2 mt-6">
+              <button
+                onClick={() => { closeEditModal(store) }}
+                class="border border-border text-text-secondary font-mono text-xs px-4 py-2.5 rounded-lg hover:border-border-hover"
+              >
+                CANCEL
+              </button>
+              <button
+                onClick={() => { void saveEditModal(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE

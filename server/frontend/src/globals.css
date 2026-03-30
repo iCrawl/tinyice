@@ -117,6 +117,23 @@ body::after {
   box-shadow: 0 0 20px rgba(var(--color-accent-rgb), 0.3);
 }
 
+.admin-table-shell {
+  border: 1px solid var(--color-border);
+  border-radius: 0.75rem;
+  overflow: hidden;
+}
+
+.admin-table-scroll {
+  overflow-x: auto;
+  overflow-y: hidden;
+  -webkit-overflow-scrolling: touch;
+  overscroll-behavior-x: contain;
+}
+
+.admin-table-scroll > table {
+  width: 100%;
+}
+
 /* Markdown prose styles */
 .markdown-content h1 { font-size: 1.5rem; font-weight: 700; color: var(--color-text-primary); margin: 1.5rem 0 0.5rem; }
 .markdown-content h2 { font-size: 1.25rem; font-weight: 700; color: var(--color-text-primary); margin: 1.25rem 0 0.5rem; }

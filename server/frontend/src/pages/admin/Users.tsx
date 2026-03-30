@@ -96,56 +96,58 @@ export function Users() {
       </div>
 
       {/* Table */}
-      <div class="border border-border rounded-xl overflow-hidden">
-        <table class="w-full">
-          <thead>
-            <tr class="border-b border-border">
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Username</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Role</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {loading.value ? (
-              <tr><td colSpan={3} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
-            ) : users.value.length === 0 ? (
-              <tr><td colSpan={3} class="px-4 py-8 text-center text-text-tertiary text-sm">No users</td></tr>
-            ) : (
-              users.value.map((u) => (
-                <tr key={u.username} class="border-b border-[rgba(255,255,255,0.03)]">
-                  <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{u.username}</td>
-                  <td class="px-4 py-3.5">
-                    <span class={`inline-block font-mono text-[10px] tracking-[1px] uppercase px-2 py-0.5 rounded ${
-                      u.role === 'superadmin' ? 'bg-accent/15 text-accent' : 'bg-surface-overlay text-text-secondary'
-                    }`}>
-                      {u.role}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3.5 text-right">
-                    <div class="flex items-center justify-end gap-1">
-                      <button
-                        onClick={() => openEdit(store, u)}
-                        aria-label={`Edit ${u.username}`}
-                        title="Edit user"
-                        class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
-                      >
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
-                      </button>
-                      <button
-                        onClick={() => { void removeUser(store, u.username) }}
-                        aria-label={`Remove ${u.username}`}
-                        title="Remove user"
-                        class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
-                      >
-                        <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div class="admin-table-shell">
+        <div class="admin-table-scroll">
+          <table class="w-full min-w-[640px]">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Username</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Role</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {loading.value ? (
+                <tr><td colSpan={3} class="px-4 py-8 text-center text-text-tertiary text-sm">Loading...</td></tr>
+              ) : users.value.length === 0 ? (
+                <tr><td colSpan={3} class="px-4 py-8 text-center text-text-tertiary text-sm">No users</td></tr>
+              ) : (
+                users.value.map((u) => (
+                  <tr key={u.username} class="border-b border-[rgba(255,255,255,0.03)]">
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{u.username}</td>
+                    <td class="px-4 py-3.5">
+                      <span class={`inline-block font-mono text-[10px] tracking-[1px] uppercase px-2 py-0.5 rounded ${
+                        u.role === 'superadmin' ? 'bg-accent/15 text-accent' : 'bg-surface-overlay text-text-secondary'
+                      }`}>
+                        {u.role}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3.5 text-right">
+                      <div class="flex items-center justify-end gap-1">
+                        <button
+                          onClick={() => openEdit(store, u)}
+                          aria-label={`Edit ${u.username}`}
+                          title="Edit user"
+                          class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
+                        >
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                        </button>
+                        <button
+                          onClick={() => { void removeUser(store, u.username) }}
+                          aria-label={`Remove ${u.username}`}
+                          title="Remove user"
+                          class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
+                        >
+                          <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
 
       {/* Add/Edit User Modal */}

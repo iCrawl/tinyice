@@ -86,6 +86,38 @@ func TestAPIGetStreamsLoadsPersistedDiagnosticsWithoutCurrentSnapshot(t *testing
 	}
 }
 
+func TestAPIGetStreamsMarksRuntimeOwnedAutoDJMountAsRunningWithoutRemoteSourceIP(t *testing.T) {
+	s := newTestServer(t)
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}
+
+	stream := s.Relay.GetOrCreateStream("/auto")
+	s.RuntimeRegistry.GetOrCreate("/auto").Stream = stream
+	s.RuntimeRegistry.AttachSource("/auto", relay.SourceAutoDJ, "default")
+
+	req := httptest.NewRequest(http.MethodGet, "/api/streams", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetStreams(rr, req)
+
+	var payload []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("expected one stream entry, got %d", len(payload))
+	}
+	if payload[0]["status"] != "running" {
+		t.Fatalf("expected running status for autodj-owned stream, got %#v", payload[0]["status"])
+	}
+	if payload[0]["source_kind"] != "autodj" {
+		t.Fatalf("expected autodj source kind, got %#v", payload[0]["source_kind"])
+	}
+	if payload[0]["source_label"] != "AutoDJ" {
+		t.Fatalf("expected AutoDJ source label, got %#v", payload[0]["source_label"])
+	}
+}
+
 func TestAPIGetAutoDJIncludesDiagnosticHistory(t *testing.T) {
 	s := newTestServer(t)
 	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}

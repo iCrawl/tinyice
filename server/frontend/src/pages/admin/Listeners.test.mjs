@@ -16,6 +16,11 @@ test('Listeners page wires list, move, and disconnect actions', async () => {
   assert.match(source, /\/api\/listeners\/move/, 'Listeners page should move listeners')
   assert.match(source, /target_mount/, 'Listeners page should submit target mounts')
   assert.match(source, /current_mount/, 'Listeners page should render current mount')
+  assert.match(source, /window\.__TINYICE__/, 'Listeners page should read injected admin mount data')
+  assert.match(source, /type="checkbox"/, 'Listeners page should support selecting listeners')
+  assert.match(source, /Move Selected/, 'Listeners page should expose a bulk move action')
+  assert.match(source, /showMoveModal/, 'Listeners page should track move modal state')
+  assert.match(source, /All \(/, 'Listeners page should surface total listener counts in the mount filter')
 })
 
 test('Admin navigation exposes the listeners page', async () => {

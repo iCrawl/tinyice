@@ -25,6 +25,8 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		Listeners          int                     `json:"listeners"`
 		MaxListeners       int                     `json:"max_listeners"`
 		SourceIP           string                  `json:"source_ip"`
+		SourceKind         string                  `json:"source_kind,omitempty"`
+		SourceLabel        string                  `json:"source_label,omitempty"`
 		Visible            bool                    `json:"visible"`
 		Enabled            bool                    `json:"enabled"`
 		Health             float64                 `json:"health"`
@@ -47,6 +49,11 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
 			diag := diagnosticInfoFor(s.Relay, st.MountName)
+			source := streamSourceInfoForRuntime(nil)
+			if rt, ok := s.runtimeForMount(st.MountName); ok {
+				source = streamSourceInfoForRuntime(rt)
+			}
+			applyDefaultStreamStatus(&diag, st.SourceIP, source)
 			ms := s.Config.AdvancedMounts[st.MountName]
 			burstSize := 0
 			maxListeners := 0
@@ -62,6 +69,8 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Listeners:          st.ListenersCount,
 				MaxListeners:       maxListeners,
 				SourceIP:           st.SourceIP,
+				SourceKind:         source.Kind,
+				SourceLabel:        source.Label,
 				Visible:            st.Visible,
 				Enabled:            st.Enabled,
 				Health:             st.Health,
@@ -86,6 +95,11 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
 			diag := diagnosticInfoFor(s.Relay, mount)
+			source := streamSourceInfoForRuntime(nil)
+			if rt, ok := s.runtimeForMount(mount); ok {
+				source = streamSourceInfoForRuntime(rt)
+			}
+			applyDefaultStreamStatus(&diag, "", source)
 			ms := s.Config.AdvancedMounts[mount]
 			burstSize := 0
 			maxListeners := 0
@@ -97,6 +111,8 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Mount:              mount,
 				BurstSize:          burstSize,
 				MaxListeners:       maxListeners,
+				SourceKind:         source.Kind,
+				SourceLabel:        source.Label,
 				Visible:            visible,
 				Enabled:            !disabled,
 				Status:             diag.Status,
@@ -117,6 +133,11 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
 				diag := diagnosticInfoFor(s.Relay, mount)
+				source := streamSourceInfoForRuntime(nil)
+				if rt, ok := s.runtimeForMount(mount); ok {
+					source = streamSourceInfoForRuntime(rt)
+				}
+				applyDefaultStreamStatus(&diag, "", source)
 				ms := s.Config.AdvancedMounts[mount]
 				burstSize := 0
 				maxListeners := 0
@@ -128,6 +149,8 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 					Mount:              mount,
 					BurstSize:          burstSize,
 					MaxListeners:       maxListeners,
+					SourceKind:         source.Kind,
+					SourceLabel:        source.Label,
 					Visible:            visible,
 					Enabled:            !disabled,
 					Status:             diag.Status,

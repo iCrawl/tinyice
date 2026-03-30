@@ -71,10 +71,11 @@ function formatUptime(seconds: number): string {
   return `${d}d ${h}h`
 }
 
-function formatBandwidth(bytesPerSec: number): string {
-  if (bytesPerSec < 1024) return `${bytesPerSec} B/s`
-  if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
-  return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`
+  return `${(bytes / 1073741824).toFixed(1)} GB`
 }
 
 function formatListenerCount(listeners: number): string {
@@ -198,14 +199,14 @@ export function Dashboard() {
           subtitle="active / total"
         />
         <StatCard
-          label="Inbound"
-          value={formatBandwidth(stats.value.bandwidth_in || 0)}
-          subtitle="from sources"
+          label="Inbound Total"
+          value={formatBytes(stats.value.bandwidth_in || 0)}
+          subtitle="received since start"
         />
         <StatCard
-          label="Outbound"
-          value={formatBandwidth(stats.value.bandwidth_out || stats.value.bandwidth || 0)}
-          subtitle="to listeners"
+          label="Outbound Total"
+          value={formatBytes(stats.value.bandwidth_out || stats.value.bandwidth || 0)}
+          subtitle="sent since start"
         />
         <StatCard
           label="Uptime"
@@ -293,7 +294,7 @@ export function Dashboard() {
         </div>
       </div>
 
-      <div class="rounded-lg border border-border bg-surface-raised overflow-hidden">
+      <div class="admin-table-shell bg-surface-raised">
         <div class="px-4 py-3 border-b border-border">
           <span class="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
             Active Streams
@@ -304,83 +305,85 @@ export function Dashboard() {
             No streams connected
           </div>
         ) : (
-          <table class="w-full">
-            <thead>
-              <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
-                <th class="px-4 py-2 font-normal">Status</th>
-                <th class="px-4 py-2 font-normal">Mount</th>
-                <th class="px-4 py-2 font-normal">Format</th>
-                <th class="px-4 py-2 font-normal">Listeners</th>
-                <th class="px-4 py-2 font-normal">Health</th>
-              </tr>
-            </thead>
-            <tbody>
-              {streams.value.map((stream) => (
-                <tr
-                  key={stream.mount}
-                  class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
-                >
-                  <td class="px-4 py-3">
-                    <span
-                      class="w-2 h-2 rounded-full inline-block"
-                      style={{
-                        backgroundColor:
-                          stream.listeners > 0
-                            ? 'var(--color-live)'
-                            : 'var(--color-text-tertiary)',
-                      }}
-                    />
-                  </td>
-                  <td class="px-4 py-3">
-                    <span class="font-mono font-bold text-sm text-text-primary">
-                      {stream.mount}
-                    </span>
-                    {stream.title && (
-                      <div class="text-xs text-text-secondary mt-0.5">
-                        {stream.artist ? `${stream.artist} - ${stream.title}` : stream.title}
-                      </div>
-                    )}
-                  </td>
-                  <td class="px-4 py-3">
-                    <span class="font-mono text-xs text-text-secondary uppercase">
-                      {stream.format}
-                    </span>
-                    {stream.bitrate > 0 && (
-                      <span class="text-text-tertiary text-xs ml-1">
-                        {stream.bitrate}k
-                      </span>
-                    )}
-                  </td>
-                  <td class="px-4 py-3">
-                    <span class="font-mono text-sm text-text-primary">
-                      {stream.listeners}
-                    </span>
-                  </td>
-                  <td class="px-4 py-3">
-                    <div class="flex items-center gap-2">
-                      <div class="h-1 w-16 rounded-full bg-surface-overlay overflow-hidden">
-                        <div
-                          class="h-full rounded-full transition-all duration-500"
-                          style={{
-                            width: `${Math.min(100, Math.max(0, stream.health))}%`,
-                            backgroundColor:
-                              stream.health >= 80
-                                ? 'var(--color-live)'
-                                : stream.health >= 50
-                                  ? 'var(--color-accent)'
-                                  : 'var(--color-danger)',
-                          }}
-                        />
-                      </div>
-                      <span class="font-mono text-[10px] text-text-tertiary">
-                        {stream.health}%
-                      </span>
-                    </div>
-                  </td>
+          <div class="admin-table-scroll">
+            <table class="w-full min-w-[700px]">
+              <thead>
+                <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
+                  <th class="px-4 py-2 font-normal">Status</th>
+                  <th class="px-4 py-2 font-normal">Mount</th>
+                  <th class="px-4 py-2 font-normal">Format</th>
+                  <th class="px-4 py-2 font-normal">Listeners</th>
+                  <th class="px-4 py-2 font-normal">Health</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {streams.value.map((stream) => (
+                  <tr
+                    key={stream.mount}
+                    class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
+                  >
+                    <td class="px-4 py-3">
+                      <span
+                        class="w-2 h-2 rounded-full inline-block"
+                        style={{
+                          backgroundColor:
+                            stream.listeners > 0
+                              ? 'var(--color-live)'
+                              : 'var(--color-text-tertiary)',
+                        }}
+                      />
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="font-mono font-bold text-sm text-text-primary">
+                        {stream.mount}
+                      </span>
+                      {stream.title && (
+                        <div class="text-xs text-text-secondary mt-0.5">
+                          {stream.artist ? `${stream.artist} - ${stream.title}` : stream.title}
+                        </div>
+                      )}
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="font-mono text-xs text-text-secondary uppercase">
+                        {stream.format}
+                      </span>
+                      {stream.bitrate > 0 && (
+                        <span class="text-text-tertiary text-xs ml-1">
+                          {stream.bitrate}k
+                        </span>
+                      )}
+                    </td>
+                    <td class="px-4 py-3">
+                      <span class="font-mono text-sm text-text-primary">
+                        {stream.listeners}
+                      </span>
+                    </td>
+                    <td class="px-4 py-3">
+                      <div class="flex items-center gap-2">
+                        <div class="h-1 w-16 rounded-full bg-surface-overlay overflow-hidden">
+                          <div
+                            class="h-full rounded-full transition-all duration-500"
+                            style={{
+                              width: `${Math.min(100, Math.max(0, stream.health))}%`,
+                              backgroundColor:
+                                stream.health >= 80
+                                  ? 'var(--color-live)'
+                                  : stream.health >= 50
+                                    ? 'var(--color-accent)'
+                                    : 'var(--color-danger)',
+                            }}
+                          />
+                        </div>
+                        <span class="font-mono text-[10px] text-text-tertiary">
+                          {stream.health}%
+                        </span>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

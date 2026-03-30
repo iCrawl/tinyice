@@ -183,34 +183,36 @@ function IpSection({
           ADD IP
         </button>
       </div>
-      <div class="border border-border rounded-xl overflow-hidden">
-        <table class="w-full">
-          <thead>
-            <tr class="border-b border-border">
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP / CIDR</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr><td colSpan={2} class="px-4 py-6 text-center text-text-tertiary text-sm">None configured</td></tr>
-            ) : (
-              items.map((ip) => (
-                <tr key={ip} class="border-b border-[rgba(255,255,255,0.03)]">
-                  <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{ip}</td>
-                  <td class="px-4 py-3.5 text-right">
-                    <button
-                      onClick={() => onRemove(ip)}
-                      class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
-                    >
-                      REMOVE
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div class="admin-table-shell">
+        <div class="admin-table-scroll">
+          <table class="w-full min-w-[640px]">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP / CIDR</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.length === 0 ? (
+                <tr><td colSpan={2} class="px-4 py-6 text-center text-text-tertiary text-sm">None configured</td></tr>
+              ) : (
+                items.map((ip) => (
+                  <tr key={ip} class="border-b border-[rgba(255,255,255,0.03)]">
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{ip}</td>
+                    <td class="px-4 py-3.5 text-right">
+                      <button
+                        onClick={() => onRemove(ip)}
+                        class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
+                      >
+                        REMOVE
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )
@@ -249,38 +251,40 @@ function AuditLog({ store }: { store: SecurityStore }) {
         <div class="text-center py-12 text-text-tertiary text-sm">No audit log entries</div>
       ) : (
         <>
-          <div class="border border-border rounded-xl overflow-hidden">
-            <table class="w-full">
-              <thead>
-                <tr class="border-b border-border">
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Time</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">User</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Action</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Resource</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {store.auditEntries.value.map((entry) => (
-                  <tr key={entry.id} class="border-b border-[rgba(255,255,255,0.03)]">
-                    <td class="px-4 py-3.5 text-sm text-text-secondary whitespace-nowrap" title={new Date(entry.timestamp).toLocaleString()}>
-                      {timeAgo(entry.timestamp)}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{entry.username}</td>
-                    <td class="px-4 py-3.5">
-                      <span class={actionBadgeClass(entry.action)}>{entry.action}</span>
-                      {entry.detail && (
-                        <div class="text-[10px] text-text-tertiary mt-1">{entry.detail}</div>
-                      )}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-secondary">
-                      {entry.resource_type}{entry.resource_id ? `: ${entry.resource_id}` : ''}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{entry.ip}</td>
+          <div class="admin-table-shell">
+            <div class="admin-table-scroll">
+              <table class="w-full min-w-[860px]">
+                <thead>
+                  <tr class="border-b border-border">
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Time</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">User</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Action</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Resource</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {store.auditEntries.value.map((entry) => (
+                    <tr key={entry.id} class="border-b border-[rgba(255,255,255,0.03)]">
+                      <td class="px-4 py-3.5 text-sm text-text-secondary whitespace-nowrap" title={new Date(entry.timestamp).toLocaleString()}>
+                        {timeAgo(entry.timestamp)}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{entry.username}</td>
+                      <td class="px-4 py-3.5">
+                        <span class={actionBadgeClass(entry.action)}>{entry.action}</span>
+                        {entry.detail && (
+                          <div class="text-[10px] text-text-tertiary mt-1">{entry.detail}</div>
+                        )}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-secondary">
+                        {entry.resource_type}{entry.resource_id ? `: ${entry.resource_id}` : ''}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{entry.ip}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
           <div class="flex items-center justify-between mt-4">

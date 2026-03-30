@@ -81,6 +81,57 @@ func diagnosticInfoFor(r *relay.Relay, mount string) diagnosticInfo {
 	return info
 }
 
+type streamSourceInfo struct {
+	Kind  string `json:"kind"`
+	Label string `json:"label"`
+}
+
+func streamSourceInfoForRuntime(rt *relay.MountRuntime) streamSourceInfo {
+	if rt == nil {
+		return streamSourceInfo{}
+	}
+
+	switch rt.Source {
+	case relay.SourceAutoDJ:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "AutoDJ"}
+	case relay.SourceIcecast:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "Icecast"}
+	case relay.SourceRelay:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "Relay"}
+	case relay.SourceWebRTC:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "WebRTC"}
+	case relay.SourceRTMP:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "RTMP"}
+	case relay.SourceSRT:
+		return streamSourceInfo{Kind: string(rt.Source), Label: "SRT"}
+	default:
+		return streamSourceInfo{}
+	}
+}
+
+func applyDefaultStreamStatus(diag *diagnosticInfo, sourceIP string, source streamSourceInfo) {
+	if diag == nil || diag.Status != "" {
+		return
+	}
+
+	if sourceIP != "" || source.Kind != "" {
+		diag.Status = string(relay.DiagnosticStatusRunning)
+		if diag.StatusReason == "" {
+			if source.Label != "" {
+				diag.StatusReason = source.Label + " connected"
+			} else {
+				diag.StatusReason = "source connected"
+			}
+		}
+		return
+	}
+
+	diag.Status = string(relay.DiagnosticStatusStopped)
+	if diag.StatusReason == "" {
+		diag.StatusReason = "no source"
+	}
+}
+
 func (s *Server) runtimeForMount(mount string) (*relay.MountRuntime, bool) {
 	if s.RuntimeRegistry == nil {
 		return nil, false

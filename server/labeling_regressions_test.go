@@ -7,21 +7,31 @@ import (
 )
 
 func TestOggOpusLabelingRemainsConsistent(t *testing.T) {
-	adminHTML, err := os.ReadFile("templates/admin.html")
+	autoDJSource, err := os.ReadFile("frontend/src/pages/admin/AutoDJ.tsx")
 	if err != nil {
-		t.Fatalf("read admin template: %v", err)
+		t.Fatalf("read AutoDJ page: %v", err)
+	}
+
+	transcodersSource, err := os.ReadFile("frontend/src/pages/admin/Transcoders.tsx")
+	if err != nil {
+		t.Fatalf("read Transcoders page: %v", err)
 	}
 
 	for _, want := range [][]byte{
 		[]byte(`<option value="opus">Ogg/Opus</option>`),
-		[]byte(`placeholder="MP3 to Ogg/Opus"`),
 	} {
-		if !bytes.Contains(adminHTML, want) {
-			t.Fatalf("admin template missing %q", want)
+		if !bytes.Contains(autoDJSource, want) {
+			t.Fatalf("AutoDJ page missing %q", want)
+		}
+		if !bytes.Contains(transcodersSource, want) {
+			t.Fatalf("Transcoders page missing %q", want)
 		}
 	}
-	if bytes.Contains(adminHTML, []byte(`<option value="ogg">OGG</option>`)) {
-		t.Fatal("admin template should not expose ogg as a separate selectable format")
+	if bytes.Contains(autoDJSource, []byte(`<option value="ogg">OGG</option>`)) {
+		t.Fatal("AutoDJ page should not expose ogg as a separate selectable format")
+	}
+	if bytes.Contains(transcodersSource, []byte(`<option value="ogg">OGG</option>`)) {
+		t.Fatal("Transcoders page should not expose ogg as a separate selectable format")
 	}
 
 	openAPI, err := os.ReadFile("openapi.yaml")
