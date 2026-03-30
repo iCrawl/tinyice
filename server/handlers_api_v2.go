@@ -48,22 +48,34 @@ func diagnosticInfoFor(r *relay.Relay, mount string) diagnosticInfo {
 		return diagnosticInfo{History: []relay.DiagnosticEntry{}}
 	}
 
-	current, ok := r.Diagnostics.Current(mount)
-	if !ok {
-		return diagnosticInfo{History: []relay.DiagnosticEntry{}}
+	info := diagnosticInfo{History: []relay.DiagnosticEntry{}}
+	if current, ok := r.Diagnostics.Current(mount); ok {
+		info = diagnosticInfo{
+			Status:             string(current.Status),
+			StatusClass:        string(current.Class),
+			StatusReason:       current.Reason,
+			LastError:          current.Error,
+			StatusUpdatedAt:    current.UpdatedAt.Unix(),
+			LastRecoveryResult: current.LastRecoveryResult,
+			History:            current.History,
+		}
+		if !current.LastRecoveryAt.IsZero() {
+			info.LastRecoveryAt = current.LastRecoveryAt.Unix()
+		}
 	}
-
-	info := diagnosticInfo{
-		Status:             string(current.Status),
-		StatusClass:        string(current.Class),
-		StatusReason:       current.Reason,
-		LastError:          current.Error,
-		StatusUpdatedAt:    current.UpdatedAt.Unix(),
-		LastRecoveryResult: current.LastRecoveryResult,
-		History:            current.History,
-	}
-	if !current.LastRecoveryAt.IsZero() {
-		info.LastRecoveryAt = current.LastRecoveryAt.Unix()
+	if r.History != nil {
+		info.History = r.History.GetDiagnostics(mount, 10)
+		if info.History == nil {
+			info.History = []relay.DiagnosticEntry{}
+		}
+		if info.Status == "" && len(info.History) > 0 {
+			latest := info.History[0]
+			info.Status = string(latest.Status)
+			info.StatusClass = string(latest.Class)
+			info.StatusReason = latest.Reason
+			info.LastError = latest.Error
+			info.StatusUpdatedAt = latest.Timestamp.Unix()
+		}
 	}
 	return info
 }
@@ -237,6 +249,36 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		result = []streamInfo{}
 	}
 	jsonResponse(w, result)
+}
+
+func (s *Server) apiGetStreamDiagnostics(w http.ResponseWriter, r *http.Request) {
+	if _, ok := s.checkAuth(r); !ok {
+		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if s.Relay.History == nil {
+		jsonError(w, "History disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+
+	limit := 10
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		fmt.Sscanf(raw, "%d", &limit)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	jsonResponse(w, s.Relay.History.GetDiagnostics(mount, limit))
 }
 
 func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {

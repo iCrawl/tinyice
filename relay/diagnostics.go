@@ -88,15 +88,21 @@ type DiagnosticsStore struct {
 	mu           sync.RWMutex
 	historyLimit int
 	mounts       map[string]*MountDiagnostic
+	history      *HistoryManager
 }
 
 func NewDiagnosticsStore(historyLimit int) *DiagnosticsStore {
+	return NewDiagnosticsStoreWithHistory(historyLimit, nil)
+}
+
+func NewDiagnosticsStoreWithHistory(historyLimit int, history *HistoryManager) *DiagnosticsStore {
 	if historyLimit <= 0 {
 		historyLimit = 10
 	}
 	return &DiagnosticsStore{
 		historyLimit: historyLimit,
 		mounts:       make(map[string]*MountDiagnostic),
+		history:      history,
 	}
 }
 
@@ -142,6 +148,10 @@ func (d *DiagnosticsStore) Record(update DiagnosticUpdate) {
 	current.History = append(current.History, entry)
 	if len(current.History) > d.historyLimit {
 		current.History = append([]DiagnosticEntry(nil), current.History[len(current.History)-d.historyLimit:]...)
+	}
+
+	if d.history != nil {
+		d.history.RecordDiagnostic(update)
 	}
 
 	if logger.L != nil {

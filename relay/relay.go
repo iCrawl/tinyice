@@ -55,7 +55,7 @@ func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
 		Streams:     make(map[string]*Stream),
 		LowLatency:  lowLatency,
 		History:     history,
-		Diagnostics: NewDiagnosticsStore(10),
+		Diagnostics: NewDiagnosticsStoreWithHistory(10, history),
 	}
 }
 

@@ -369,6 +369,40 @@ paths:
         "200":
           description: OK
 
+  /api/streams/diagnostics:
+    get:
+      tags: [Streams]
+      summary: List recent persisted diagnostics for a mount
+      security:
+        - session: []
+        - bearer: []
+      parameters:
+        - name: mount
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          required: false
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+      responses:
+        "200":
+          description: Recent diagnostic entries for the mount
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DiagnosticEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
   # ── AutoDJ ────────────────────────────────────────────────
   /api/autodj:
     get:

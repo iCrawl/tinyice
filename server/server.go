@@ -357,6 +357,7 @@ func (s *Server) setupRoutes() *http.ServeMux {
 		}
 	})
 	mux.HandleFunc("/api/streams/kick", s.apiKickStream)
+	mux.HandleFunc("/api/streams/diagnostics", s.apiGetStreamDiagnostics)
 
 	mux.HandleFunc("/api/autodj", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

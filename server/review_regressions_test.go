@@ -43,7 +43,12 @@ func newTestServer(t *testing.T) *Server {
 		t.Fatalf("seed config file: %v", err)
 	}
 
-	r := relay.NewRelay(false, nil)
+	hm, err := relay.NewHistoryManager(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatalf("history manager: %v", err)
+	}
+
+	r := relay.NewRelay(false, hm)
 
 	return &Server{
 		Config:       cfg,
