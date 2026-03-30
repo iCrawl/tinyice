@@ -12,6 +12,12 @@ type pcmFrameSource interface {
 	ReadFrame(dst []int16) (int, error)
 }
 
+type sourceBinding struct {
+	source      pcmFrameSource
+	onActivate  func()
+	activated   bool
+}
+
 type silencePCMSource struct{}
 
 func (s silencePCMSource) ReadFrame(dst []int16) (int, error) {
@@ -30,7 +36,7 @@ type AutoDJOutputSession struct {
 	sampleRate  int
 
 	mu     sync.RWMutex
-	source pcmFrameSource
+	source *sourceBinding
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
 }
@@ -74,7 +80,7 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 		frameSize:   frameSize,
 		channels:    2,
 		sampleRate:  sampleRate,
-		source:      silencePCMSource{},
+		source:      &sourceBinding{source: silencePCMSource{}},
 	}, nil
 }
 
@@ -104,10 +110,12 @@ func (s *AutoDJOutputSession) Start(ctx context.Context) error {
 			}
 
 			s.mu.RLock()
-			source := s.source
+			binding := s.source
 			s.mu.RUnlock()
-			if source == nil {
-				source = silencePCMSource{}
+
+			source := pcmFrameSource(silencePCMSource{})
+			if binding != nil && binding.source != nil {
+				source = binding.source
 			}
 
 			if _, err := source.ReadFrame(frame); err != nil {
@@ -121,6 +129,7 @@ func (s *AutoDJOutputSession) Start(ctx context.Context) error {
 			if err := s.frameWriter.WriteFrame(frame); err != nil {
 				return
 			}
+			s.markActivated(binding)
 
 			nextTick = nextTick.Add(frameDuration)
 			if sleepFor := time.Until(nextTick); sleepFor > 0 {
@@ -133,13 +142,40 @@ func (s *AutoDJOutputSession) Start(ctx context.Context) error {
 }
 
 func (s *AutoDJOutputSession) SetSource(source pcmFrameSource) {
+	s.SetSourceWithActivation(source, nil)
+}
+
+func (s *AutoDJOutputSession) SetSourceWithActivation(source pcmFrameSource, onActivate func()) {
 	if source == nil {
 		source = silencePCMSource{}
+		onActivate = nil
 	}
 
 	s.mu.Lock()
-	s.source = source
+	s.source = &sourceBinding{
+		source:     source,
+		onActivate: onActivate,
+	}
 	s.mu.Unlock()
+}
+
+func (s *AutoDJOutputSession) markActivated(binding *sourceBinding) {
+	if binding == nil {
+		return
+	}
+
+	var callback func()
+	s.mu.Lock()
+	if s.source == binding && !binding.activated {
+		binding.activated = true
+		callback = binding.onActivate
+		binding.onActivate = nil
+	}
+	s.mu.Unlock()
+
+	if callback != nil {
+		callback()
+	}
 }
 
 func (s *AutoDJOutputSession) Stop() {

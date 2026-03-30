@@ -1235,18 +1235,21 @@ func (sm *StreamerManager) activateTrackSource(ctx context.Context, s *Streamer,
 	s.CurrentFileTime = time.Now()
 	s.CurrentFileDuration = duration
 	outputSession := s.outputSession
+	metadataSong := s.CurrentFile
+	metadataMount := s.OutputMount
+	injectMetadata := s.InjectMetadata
 	s.mu.Unlock()
-
-	if s.InjectMetadata {
-		sm.relay.UpdateMetadata(s.OutputMount, s.CurrentFile)
-	}
 
 	if outputSession == nil {
 		source.Close()
 		return nil, fmt.Errorf("output session not initialized")
 	}
 
-	outputSession.SetSource(source)
+	outputSession.SetSourceWithActivation(source, func() {
+		if injectMetadata && sm.relay != nil {
+			sm.relay.UpdateMetadata(metadataMount, metadataSong)
+		}
+	})
 	return source, nil
 }
 
