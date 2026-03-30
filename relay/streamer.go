@@ -38,6 +38,7 @@ type Streamer struct {
 	Queue              []string
 	CurrentPos         int
 	State              StreamerState
+	manualStop         bool
 	Loop               bool
 	Shuffle            bool
 	InjectMetadata     bool
@@ -143,7 +144,10 @@ func (sm *StreamerManager) streamerEligibleForDeadRecovery(s *Streamer) bool {
 
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return s.State == StatePlaying
+	if s.manualStop {
+		return false
+	}
+	return s.State == StatePlaying || s.State == StateStopped
 }
 
 func (sm *StreamerManager) mountHasFreshData(mount string) bool {
@@ -194,6 +198,7 @@ func (s *Streamer) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.State = StatePlaying
+	s.manualStop = false
 	s.signalStateChange()
 }
 
@@ -210,8 +215,10 @@ func (s *Streamer) TogglePlay() {
 	defer s.mu.Unlock()
 	if s.State == StatePlaying {
 		s.State = StateStopped
+		s.manualStop = true
 	} else {
 		s.State = StatePlaying
+		s.manualStop = false
 	}
 	s.signalStateChange()
 }
@@ -244,6 +251,7 @@ func (s *Streamer) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.State = StateStopped
+	s.manualStop = true
 	if s.fileCancel != nil {
 		s.fileCancel()
 	}
@@ -899,6 +907,7 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 				s.outputSession = nil
 				s.fileCancel = nil
 				s.State = StateStopped
+				s.manualStop = false
 				s.mu.Unlock()
 				continue
 			}
@@ -1159,11 +1168,32 @@ func (sm *StreamerManager) activateTrackSource(ctx context.Context, s *Streamer,
 }
 
 func (sm *StreamerManager) activateRecoveredSongCommandPath(ctx context.Context, s *Streamer, path string) error {
+	s.mu.RLock()
+	restartStopped := s.State == StateStopped && !s.manualStop
+	s.mu.RUnlock()
+	if restartStopped {
+		return sm.resumeRecoveredStoppedMount(s, path)
+	}
 	if err := sm.ensureOutputSession(ctx, s); err != nil {
 		return err
 	}
 	_, err := sm.activateTrackSource(ctx, s, path, -1, -1)
 	return err
+}
+
+func (sm *StreamerManager) resumeRecoveredStoppedMount(s *Streamer, path string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.manualStop {
+		return fmt.Errorf("streamer was manually stopped")
+	}
+
+	s.Queue = append([]string{path}, s.Queue...)
+	s.State = StatePlaying
+	s.manualStop = false
+	s.signalStateChange()
+	return nil
 }
 
 func (sm *StreamerManager) ensureOutputSession(ctx context.Context, s *Streamer) error {

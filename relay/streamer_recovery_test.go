@@ -154,3 +154,104 @@ func TestRecoverDeadSongCommandMountExitsWhenMountRecoversNaturally(t *testing.T
 		}
 	}
 }
+
+func TestRecoverDeadSongCommandMountRestartsNonManualStoppedMount(t *testing.T) {
+	r := NewRelay(false, nil)
+	sm := NewStreamerManager(r, nil)
+	sm.instances["/dead"] = &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/dead",
+		State:              StateStopped,
+		SongCommand:        "printf track.mp3",
+		SongCommandTimeout: 1,
+		relay:              r,
+		stateCh:            make(chan struct{}, 1),
+	}
+
+	stream := r.GetOrCreateStream("/dead")
+	stream.LastDataReceived = time.Now().Add(-time.Minute)
+
+	var activationCalls int32
+	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
+		return "/tmp/recovered.mp3", nil
+	}
+	sm.recoveryAfter = func(time.Duration) <-chan time.Time {
+		ch := make(chan time.Time, 1)
+		ch <- time.Now()
+		return ch
+	}
+	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
+		atomic.AddInt32(&activationCalls, 1)
+		stream.LastDataReceived = time.Now()
+		s.mu.Lock()
+		s.State = StatePlaying
+		s.mu.Unlock()
+		return nil
+	}
+
+	sm.RecoverDeadSongCommandMount("/dead")
+
+	deadline := time.After(500 * time.Millisecond)
+	for sm.DeadRecoveryActive("/dead") {
+		select {
+		case <-deadline:
+			t.Fatal("expected recovery worker to exit after restarting non-manual stop")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := atomic.LoadInt32(&activationCalls); got != 1 {
+		t.Fatalf("expected recovery activation for non-manual stopped mount, got %d", got)
+	}
+	if state := sm.instances["/dead"].GetStats().State; state != StatePlaying {
+		t.Fatalf("expected recovery to restore playing state, got %v", state)
+	}
+}
+
+func TestRecoverDeadSongCommandMountSkipsManualStop(t *testing.T) {
+	r := NewRelay(false, nil)
+	sm := NewStreamerManager(r, nil)
+	streamer := &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/dead",
+		State:              StatePlaying,
+		SongCommand:        "printf track.mp3",
+		SongCommandTimeout: 1,
+		relay:              r,
+		stateCh:            make(chan struct{}, 1),
+	}
+	streamer.Stop()
+	sm.instances["/dead"] = streamer
+
+	stream := r.GetOrCreateStream("/dead")
+	stream.LastDataReceived = time.Now().Add(-time.Minute)
+
+	var activationCalls int32
+	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
+		return "/tmp/recovered.mp3", nil
+	}
+	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
+		atomic.AddInt32(&activationCalls, 1)
+		return nil
+	}
+
+	sm.RecoverDeadSongCommandMount("/dead")
+
+	deadline := time.After(500 * time.Millisecond)
+	for sm.DeadRecoveryActive("/dead") {
+		select {
+		case <-deadline:
+			t.Fatal("expected manual stop recovery worker to exit")
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	if got := atomic.LoadInt32(&activationCalls); got != 0 {
+		t.Fatalf("expected manual stop to suppress recovery activation, got %d", got)
+	}
+	if state := sm.instances["/dead"].GetStats().State; state != StateStopped {
+		t.Fatalf("expected manual stop to remain stopped, got %v", state)
+	}
+}
