@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -115,6 +116,40 @@ func TestHealthMonitorMarksRecoveredMountRunningAgain(t *testing.T) {
 	}
 	if current.Class != DiagnosticClassHealthRecovered {
 		t.Fatalf("expected health_recovered class, got %q", current.Class)
+	}
+}
+
+func TestHealthMonitorSeedsRunningDiagnosticForInitiallyHealthyMount(t *testing.T) {
+	history, err := NewHistoryManager(filepath.Join(t.TempDir(), "history.db"))
+	if err != nil {
+		t.Fatalf("history manager: %v", err)
+	}
+
+	r := NewRelay(false, history)
+	s := r.GetOrCreateStream("/healthy")
+	s.SetLastDataAt(time.Now())
+
+	r.History.RecordDiagnostic(DiagnosticUpdate{
+		Mount:     "/healthy",
+		Status:    DiagnosticStatusDegraded,
+		Class:     DiagnosticClassHealthDegraded,
+		Reason:    "no data for 9s",
+		Actor:     DiagnosticActorHealthMonitor,
+		Timestamp: time.Now().Add(-time.Minute),
+	})
+
+	hm := NewHealthMonitor(r)
+	hm.check()
+
+	current, ok := r.Diagnostics.Current("/healthy")
+	if !ok {
+		t.Fatal("expected current diagnostic for healthy mount after initial check")
+	}
+	if current.Status != DiagnosticStatusRunning {
+		t.Fatalf("expected running status after initial healthy check, got %q", current.Status)
+	}
+	if current.Class != DiagnosticClassHealthRecovered {
+		t.Fatalf("expected health_recovered class after initial healthy check, got %q", current.Class)
 	}
 }
 

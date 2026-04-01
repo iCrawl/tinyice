@@ -121,6 +121,18 @@ func (hm *HealthMonitor) check() {
 		newStatus := calculateHealthStatus(checkTime)
 		oldStatus, known := hm.lastStatus[ss.MountName]
 		if !known {
+			hm.lastStatus[ss.MountName] = newStatus
+			if newStatus == StatusHealthy {
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusRunning,
+					Class:     DiagnosticClassHealthRecovered,
+					Reason:    "stream healthy again",
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+				continue
+			}
 			oldStatus = StatusHealthy
 		}
 
