@@ -31,6 +31,9 @@ function createStreamsStore() {
   const streams = signal<Stream[]>([])
   const loading = signal(true)
   const showModal = signal(false)
+  const showHistoryModal = signal(false)
+  const historyMount = signal('')
+  const historyEntries = signal<DiagnosticHistoryEntry[]>([])
   const editingMount = signal<Stream | null>(null)
   const editBurst = signal(0)
   const editMaxListeners = signal(0)
@@ -43,6 +46,9 @@ function createStreamsStore() {
     streams,
     loading,
     showModal,
+    showHistoryModal,
+    historyMount,
+    historyEntries,
     editingMount,
     editBurst,
     editMaxListeners,
@@ -168,9 +174,32 @@ function sourceDisplay(stream: Stream) {
   return stream.source_ip || stream.source_label || 'No source'
 }
 
+function latestHistoryEntry(stream: Stream) {
+  return stream.history?.[0] ?? null
+}
+
+function formatHistoryTimestamp(timestamp: string | number) {
+  const value = typeof timestamp === 'number' ? timestamp * 1000 : timestamp
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Unknown time'
+  return date.toLocaleString()
+}
+
+function openHistoryModal(store: StreamsStore, stream: Stream) {
+  store.historyMount.value = stream.mount
+  store.historyEntries.value = stream.history ?? []
+  store.showHistoryModal.value = true
+}
+
+function closeHistoryModal(store: StreamsStore) {
+  store.showHistoryModal.value = false
+  store.historyMount.value = ''
+  store.historyEntries.value = []
+}
+
 export function Streams() {
   const store = useStreamsStore()
-  const { streams, loading, showModal, editingMount, editBurst, editMaxListeners, formMount, formPassword, formBurst, formMaxListeners } = store
+  const { streams, loading, showModal, showHistoryModal, historyMount, historyEntries, editingMount, editBurst, editMaxListeners, formMount, formPassword, formBurst, formMaxListeners } = store
 
   useEffect(() => {
     void load(store)
@@ -213,19 +242,33 @@ export function Streams() {
                 streams.value.map((s) => (
                   <tr key={s.mount} class="border-b border-[rgba(255,255,255,0.03)]">
                     <td class="px-4 py-3.5">
+                      {(() => {
+                        const latestEvent = latestHistoryEntry(s)
+                        return (
                       <div class="flex flex-col gap-1.5">
-                        <span class={`inline-flex items-center rounded-full px-2 py-1 font-mono text-[10px] uppercase ${statusBadgeClass(s)}`}>
+                        <span class={`inline-flex self-start items-center rounded-full px-2 py-1 font-mono text-[10px] uppercase ${statusBadgeClass(s)}`}>
                           {statusLabel(s)}
                         </span>
                         <span class="text-xs text-text-secondary">
                           {sourceStatusReason(s)}
                         </span>
-                        {s.history?.length > 0 && (
-                          <span class="text-[11px] text-text-tertiary">
-                            Recent: {s.history.slice(-3).reverse().map((entry) => entry.reason).join(' • ')}
-                          </span>
+                        {latestEvent && (
+                          <div class="flex items-center gap-2 text-[11px] text-text-tertiary">
+                            <span>Recent: {latestEvent.reason}</span>
+                            {latestEvent.error && <span class="truncate text-danger">{latestEvent.error}</span>}
+                            {s.history.length > 1 && (
+                              <button
+                                onClick={() => { openHistoryModal(store, s) }}
+                                class="font-mono uppercase tracking-[1px] text-accent hover:text-accent/80"
+                              >
+                                History
+                              </button>
+                            )}
+                          </div>
                         )}
                       </div>
+                        )
+                      })()}
                     </td>
                     <td class="px-4 py-3.5 font-mono font-bold text-sm text-text-primary">{s.mount}</td>
                     <td class="px-4 py-3.5 text-sm text-text-secondary">{sourceDisplay(s)}</td>
@@ -275,6 +318,55 @@ export function Streams() {
           </table>
         </div>
       </div>
+
+      {showHistoryModal.value && (
+        <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
+          <div class="bg-surface-overlay border border-border rounded-xl p-6 max-w-2xl w-full mx-4">
+            <h2 class="text-lg font-bold text-text-primary mb-1">History for {historyMount.value}</h2>
+            <p class="text-sm text-text-secondary mb-4">Most recent diagnostic events for this mount.</p>
+            <div class="max-h-[60vh] overflow-y-auto border border-border rounded-lg">
+              {historyEntries.value.length === 0 ? (
+                <div class="px-4 py-8 text-center text-text-tertiary text-sm">No recent diagnostic events</div>
+              ) : (
+                <div class="divide-y divide-border">
+                  {historyEntries.value.map((entry, index) => (
+                    <div key={`${entry.timestamp}-${index}`} class="px-4 py-3">
+                      <div class="flex items-center justify-between gap-4">
+                        <span class="font-mono text-[10px] uppercase tracking-[1px] text-text-tertiary">
+                          {entry.status}
+                        </span>
+                        <span class="font-mono text-[10px] text-text-tertiary">
+                          {formatHistoryTimestamp(entry.timestamp)}
+                        </span>
+                      </div>
+                      <div class="text-sm text-text-primary mt-1">{entry.reason}</div>
+                      {entry.error && (
+                        <div class="text-xs text-danger mt-1 break-all">{entry.error}</div>
+                      )}
+                      {entry.details?.path && (
+                        <div class="text-xs text-text-secondary mt-1 break-all">
+                          Path: <span class="font-mono text-text-primary">{entry.details.path}</span>
+                        </div>
+                      )}
+                      <div class="text-[11px] text-text-tertiary mt-1">
+                        {entry.actor}{entry.class ? ` • ${entry.class}` : ''}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+            <div class="flex justify-end gap-2 mt-6">
+              <button
+                onClick={() => { closeHistoryModal(store) }}
+                class="border border-border text-text-secondary font-mono text-xs px-4 py-2.5 rounded-lg hover:border-border-hover"
+              >
+                CLOSE
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {showModal.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -247,10 +248,21 @@ func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *St
 
 func (s *Streamer) Play() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	shouldRecord := s.State != StatePlaying || s.manualStop
 	s.State = StatePlaying
 	s.manualStop = false
+	if shouldRecord && s.relay != nil && s.OutputMount != "" {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     s.OutputMount,
+			Status:    DiagnosticStatusRunning,
+			Class:     DiagnosticClassPlaybackStarted,
+			Reason:    "autodj playback active",
+			Actor:     DiagnosticActorAutoDJ,
+			Timestamp: time.Now(),
+		})
+	}
 	s.signalStateChange()
+	s.mu.Unlock()
 }
 
 func (s *Streamer) Next() {
@@ -1060,6 +1072,7 @@ func (s *Streamer) nextTrackCandidate() (string, int, int, bool) {
 				Reason:    songCommandReason(err),
 				Error:     err.Error(),
 				Actor:     DiagnosticActorAutoDJ,
+				Details:   songCommandDiagnosticDetails(err),
 				Timestamp: time.Now(),
 			})
 		}
@@ -1327,4 +1340,30 @@ func songCommandReason(err error) string {
 	default:
 		return "song_command failed"
 	}
+}
+
+func songCommandDiagnosticDetails(err error) map[string]string {
+	if err == nil || classifySongCommandError(err) != DiagnosticClassSongCommandInvalid {
+		return nil
+	}
+
+	msg := err.Error()
+	const prefix = "song command returned invalid file "
+	if !strings.HasPrefix(msg, prefix) {
+		return nil
+	}
+
+	rest := strings.TrimPrefix(msg, prefix)
+	end := strings.Index(rest, ":")
+	if end < 0 {
+		return nil
+	}
+
+	quoted := strings.TrimSpace(rest[:end])
+	path, unquoteErr := strconv.Unquote(quoted)
+	if unquoteErr != nil || path == "" {
+		return nil
+	}
+
+	return map[string]string{"path": path}
 }

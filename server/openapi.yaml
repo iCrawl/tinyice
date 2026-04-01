@@ -1890,6 +1890,10 @@ components:
           type: string
         actor:
           type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
 
     PlaylistItem:
       type: object

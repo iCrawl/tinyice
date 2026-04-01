@@ -3,6 +3,8 @@ package relay
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -385,5 +387,44 @@ func TestNextTrackCandidateUsesPlaylistExhaustedOnlyWithoutSongCommand(t *testin
 	}
 	if current.Class != DiagnosticClassPlaylistExhausted {
 		t.Fatalf("expected playlist_exhausted, got %q", current.Class)
+	}
+}
+
+func TestNextTrackCandidateStoresInvalidSongCommandPathInDiagnosticDetails(t *testing.T) {
+	r := NewRelay(false, nil)
+	musicDir := t.TempDir()
+	badFile := filepath.Join(musicDir, "bad.txt")
+	if err := os.WriteFile(badFile, []byte("not audio"), 0600); err != nil {
+		t.Fatalf("write invalid file: %v", err)
+	}
+
+	s := &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/bad",
+		State:              StatePlaying,
+		MusicDir:           musicDir,
+		SongCommand:        "printf bad.txt",
+		SongCommandTimeout: 1,
+		relay:              r,
+	}
+
+	_, _, _, ok := s.nextTrackCandidate()
+	if ok {
+		t.Fatal("expected no valid track candidate")
+	}
+
+	current, ok := r.Diagnostics.Current("/bad")
+	if !ok {
+		t.Fatal("expected diagnostics for invalid song_command file")
+	}
+	if current.Class != DiagnosticClassSongCommandInvalid {
+		t.Fatalf("expected song_command_invalid_file, got %q", current.Class)
+	}
+	if len(current.History) == 0 {
+		t.Fatal("expected diagnostic history entry")
+	}
+	latest := current.History[len(current.History)-1]
+	if latest.Details["path"] != badFile {
+		t.Fatalf("expected invalid path detail %q, got %#v", badFile, latest.Details)
 	}
 }

@@ -32,6 +32,7 @@ const (
 	DiagnosticClassSongCommandInvalid DiagnosticClass = "song_command_invalid_file"
 	DiagnosticClassPlaylistExhausted  DiagnosticClass = "playlist_exhausted"
 	DiagnosticClassStartupFailure     DiagnosticClass = "startup_failure"
+	DiagnosticClassPlaybackStarted    DiagnosticClass = "playback_started"
 	DiagnosticClassRecoveryStarted    DiagnosticClass = "recovery_started"
 	DiagnosticClassRecoverySucceeded  DiagnosticClass = "recovery_succeeded"
 	DiagnosticClassRecoveryFailed     DiagnosticClass = "recovery_failed"

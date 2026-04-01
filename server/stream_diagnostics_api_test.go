@@ -164,6 +164,54 @@ func TestAPIGetAutoDJIncludesDiagnosticHistory(t *testing.T) {
 	}
 }
 
+func TestAPIGetAutoDJPrefersFreshRunningStateOverPersistedManualStop(t *testing.T) {
+	s := newTestServer(t)
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}
+	s.Config.AutoDJs = []*config.AutoDJConfig{{
+		Name:     "Auto",
+		Mount:    "/auto",
+		MusicDir: t.TempDir(),
+		Format:   "mp3",
+		Bitrate:  128,
+		Enabled:  true,
+	}}
+
+	s.Relay.History.RecordDiagnostic(relay.DiagnosticUpdate{
+		Mount:     "/auto",
+		Status:    relay.DiagnosticStatusStopped,
+		Class:     relay.DiagnosticClassManualStop,
+		Reason:    "manual stop requested",
+		Actor:     relay.DiagnosticActorAdmin,
+		Timestamp: time.Now().Add(-time.Minute),
+	})
+
+	streamer, err := s.StreamerM.StartStreamer("Auto", "/auto", t.TempDir(), false, "mp3", 128, true, nil, false, "", "", true, "", "", 0)
+	if err != nil {
+		t.Fatalf("start streamer: %v", err)
+	}
+	streamer.Play()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/autodj", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetAutoDJ(rr, req)
+
+	var payload []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload) != 1 {
+		t.Fatalf("expected one autodj entry, got %d", len(payload))
+	}
+	if payload[0]["status"] != "running" {
+		t.Fatalf("expected running status for restarted autodj, got %#v", payload[0]["status"])
+	}
+	if payload[0]["status_reason"] == "manual stop requested" {
+		t.Fatalf("expected fresh running reason to override stale manual stop, got %#v", payload[0]["status_reason"])
+	}
+}
+
 func TestAPIGetStreamDiagnosticsReturnsPersistedEntries(t *testing.T) {
 	s := newTestServer(t)
 	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}

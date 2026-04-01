@@ -64,6 +64,7 @@ export interface DiagnosticHistoryEntry {
   reason: string
   error?: string
   actor: string
+  details?: Record<string, string>
 }
 
 // SSE Events
