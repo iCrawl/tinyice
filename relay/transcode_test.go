@@ -188,6 +188,178 @@ func TestAutoDJTransitionContinuityFeedsTranscoderOutput(t *testing.T) {
 	}
 }
 
+func TestTranscoderSeedsOutputMetadataFromCurrentInputSong(t *testing.T) {
+	if raceEnabled {
+		t.Skip("opus-go encoder is not race-safe under the Go race detector")
+	}
+
+	r := NewRelay(false, nil)
+	source := r.GetOrCreateStream("/source")
+	source.ContentType = "audio/ogg"
+	source.SetCurrentSong("Artist - Title", r)
+
+	session, err := NewOpusEncoderSession(source, r, 96, 48000, 2, nil)
+	if err != nil {
+		t.Fatalf("NewOpusEncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	tm := NewTranscoderManager(r)
+	defer tm.StopAll()
+	cfg := &config.TranscoderConfig{
+		Name:        "metadata-seed",
+		InputMount:  "/source",
+		OutputMount: "/fallback",
+		Format:      "mp3",
+		Bitrate:     64,
+	}
+	tm.StartTranscoder(cfg)
+
+	frame := make([]int16, (48000/50)*2)
+	time.Sleep(50 * time.Millisecond)
+	if err := session.WriteFrame(frame); err != nil {
+		t.Fatalf("WriteFrame: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out, ok := r.GetStream("/fallback")
+		if ok && out.GetCurrentSong() == "Artist - Title" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	out, ok := r.GetStream("/fallback")
+	if !ok {
+		t.Fatal("expected transcoder output stream")
+	}
+	t.Fatalf("expected seeded metadata on output, got %q", out.GetCurrentSong())
+}
+
+func TestTranscoderMirrorsLiveMetadataChangesFromInput(t *testing.T) {
+	if raceEnabled {
+		t.Skip("opus-go encoder is not race-safe under the Go race detector")
+	}
+
+	r := NewRelay(false, nil)
+	source := r.GetOrCreateStream("/source")
+	source.ContentType = "audio/ogg"
+	source.SetCurrentSong("Artist - Title", r)
+
+	session, err := NewOpusEncoderSession(source, r, 96, 48000, 2, nil)
+	if err != nil {
+		t.Fatalf("NewOpusEncoderSession: %v", err)
+	}
+	defer session.Close()
+
+	tm := NewTranscoderManager(r)
+	defer tm.StopAll()
+	cfg := &config.TranscoderConfig{
+		Name:        "metadata-follow",
+		InputMount:  "/source",
+		OutputMount: "/fallback",
+		Format:      "mp3",
+		Bitrate:     64,
+	}
+	tm.StartTranscoder(cfg)
+
+	frame := make([]int16, (48000/50)*2)
+	writeErrCh := make(chan error, 1)
+	stopWrites := make(chan struct{})
+	defer close(stopWrites)
+	go func() {
+		ticker := time.NewTicker(20 * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopWrites:
+				return
+			case <-ticker.C:
+				if err := session.WriteFrame(frame); err != nil {
+					select {
+					case writeErrCh <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-writeErrCh:
+			t.Fatalf("WriteFrame: %v", err)
+		default:
+		}
+		out, ok := r.GetStream("/fallback")
+		if ok && out.GetCurrentSong() == "Artist - Title" {
+			source.SetCurrentSong("Next Artist - Next Title", r)
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	deadline = time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case err := <-writeErrCh:
+			t.Fatalf("WriteFrame: %v", err)
+		default:
+		}
+		out, ok := r.GetStream("/fallback")
+		if ok && out.GetCurrentSong() == "Next Artist - Next Title" {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	out, ok := r.GetStream("/fallback")
+	if !ok {
+		t.Fatal("expected transcoder output stream")
+	}
+	t.Fatalf("expected mirrored metadata on output, got %q", out.GetCurrentSong())
+}
+
+func TestStoppedTranscoderStopsMirroringInputMetadata(t *testing.T) {
+	r := NewRelay(false, nil)
+	source := r.GetOrCreateStream("/source")
+	source.SetCurrentSong("Artist - Title", r)
+
+	tm := NewTranscoderManager(r)
+	cfg := &config.TranscoderConfig{
+		Name:        "metadata-stop",
+		InputMount:  "/source",
+		OutputMount: "/fallback",
+		Format:      "mp3",
+		Bitrate:     64,
+	}
+	tm.StartTranscoder(cfg)
+
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		out, ok := r.GetStream("/fallback")
+		if ok && out.GetCurrentSong() == "Artist - Title" {
+			tm.StopAll()
+			source.SetCurrentSong("Next Artist - Next Title", r)
+			time.Sleep(100 * time.Millisecond)
+			if out.GetCurrentSong() != "Artist - Title" {
+				t.Fatalf("expected output metadata to stop changing after transcoder stop, got %q", out.GetCurrentSong())
+			}
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	out, ok := r.GetStream("/fallback")
+	if !ok {
+		t.Fatal("expected transcoder output stream")
+	}
+	t.Fatalf("expected seeded metadata on output before stop, got %q", out.GetCurrentSong())
+}
+
 func TestTranscoderPacingDoesNotDrainBufferedBurstImmediately(t *testing.T) {
 	r := NewRelay(false, nil)
 	source := r.GetOrCreateStream("/paced-source")

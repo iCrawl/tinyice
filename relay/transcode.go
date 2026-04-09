@@ -267,6 +267,7 @@ func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	}
 	tm.instances[cfg.OutputMount] = inst
 
+	go tm.runMetadataMirror(ctx, inst)
 	go tm.runTranscoder(ctx, inst)
 }
 
@@ -466,6 +467,33 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 	} else if inst.Config.Format == "opus" {
 		output.ContentType = "audio/ogg"
 		EncodeOpus(ctx, tm.relay, output, pcmReader, inst.Config.Bitrate, &inst.BytesEncoded, true, sampleRate, 2)
+	}
+}
+
+func (tm *TranscoderManager) runMetadataMirror(ctx context.Context, inst *TranscoderInstance) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastMirrored := ""
+
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			input, ok := tm.relay.GetStream(inst.Config.InputMount)
+			if !ok {
+				continue
+			}
+			currentSong := input.GetCurrentSong()
+			if currentSong == "" || currentSong == lastMirrored {
+				continue
+			}
+
+			output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+			output.SetCurrentSong(currentSong, tm.relay)
+			lastMirrored = currentSong
+		}
 	}
 }
 
