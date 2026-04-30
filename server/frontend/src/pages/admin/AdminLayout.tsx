@@ -1,7 +1,6 @@
 import { Router, Route } from 'preact-router'
 import { useState } from 'preact/hooks'
 import { Sidebar } from '../../components/Sidebar'
-import { Toasts } from '../../components/Toasts'
 import { Dashboard } from './Dashboard'
 import { Streams } from './Streams'
 import { Listeners } from './Listeners'
@@ -22,7 +21,7 @@ export function AdminLayout() {
   return (
     <div class="flex h-screen overflow-hidden">
       <Sidebar activePath={path} />
-      <main class="flex-1 overflow-y-auto ml-[72px]">
+      <main class="flex-1 min-w-0 overflow-y-auto ml-[72px]">
         <Router onChange={(e) => setPath(e.url)}>
           <Route path="/admin" component={Dashboard} />
           <Route path="/admin/streams" component={Streams} />
@@ -39,7 +38,6 @@ export function AdminLayout() {
           <Route path="/admin/settings" component={Settings} />
         </Router>
       </main>
-      <Toasts />
     </div>
   )
 }

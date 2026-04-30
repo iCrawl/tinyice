@@ -1,10 +1,31 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 
-const copied = signal(false)
+type APITokensStore = ReturnType<typeof createAPITokensStore>
 
-function fallbackCopy(text: string) {
+function createAPITokensStore() {
+  const copied = signal(false)
+  const tokens = signal<TokenInfo[]>([])
+  const loading = signal(true)
+  const showCreate = signal(false)
+  const createdToken = signal<string | null>(null)
+  const createdName = signal('')
+  const formName = signal('')
+  const formExpiry = signal('never')
+
+  return { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry }
+}
+
+function useAPITokensStore() {
+  const storeRef = useRef<APITokensStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createAPITokensStore()
+  }
+  return storeRef.current
+}
+
+function fallbackCopy(store: APITokensStore, text: string) {
   const textarea = document.createElement('textarea')
   textarea.value = text
   textarea.style.position = 'fixed'
@@ -13,8 +34,8 @@ function fallbackCopy(text: string) {
   textarea.select()
   document.execCommand('copy')
   document.body.removeChild(textarea)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 2000)
+  store.copied.value = true
+  setTimeout(() => { store.copied.value = false }, 2000)
 }
 
 interface TokenInfo {
@@ -33,14 +54,6 @@ interface TokenCreateResponse {
   token: string
   name: string
 }
-
-const tokens = signal<TokenInfo[]>([])
-const loading = signal(true)
-const showCreate = signal(false)
-const createdToken = signal<string | null>(null)
-const createdName = signal('')
-const formName = signal('')
-const formExpiry = signal('never')
 
 function relativeTime(dateStr: string): string {
   if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
@@ -78,45 +91,50 @@ function formatDate(dateStr: string): string {
   return new Date(dateStr).toLocaleDateString()
 }
 
-async function loadTokens() {
-  loading.value = true
+async function loadTokens(store: APITokensStore) {
+  store.loading.value = true
   try {
-    tokens.value = await api.get<TokenInfo[]>('/api/tokens')
+    store.tokens.value = await api.get<TokenInfo[]>('/api/tokens')
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function createToken() {
-  const name = formName.value.trim()
+async function createToken(store: APITokensStore) {
+  const name = store.formName.value.trim()
   if (!name) return
   let expires_at: string | undefined
-  if (formExpiry.value !== 'never') {
+  if (store.formExpiry.value !== 'never') {
     const now = new Date()
-    const days = parseInt(formExpiry.value, 10)
+    const days = parseInt(store.formExpiry.value, 10)
     now.setDate(now.getDate() + days)
     expires_at = now.toISOString()
   }
   try {
     const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
-    createdToken.value = result.token
-    createdName.value = result.name
-    showCreate.value = false
-    formName.value = ''
-    formExpiry.value = 'never'
-    loadTokens()
+    store.createdToken.value = result.token
+    store.createdName.value = result.name
+    store.showCreate.value = false
+    store.formName.value = ''
+    store.formExpiry.value = 'never'
+    await loadTokens(store)
   } catch { /* empty */ }
 }
 
-async function deleteToken(id: number, name: string) {
+async function deleteToken(store: APITokensStore, id: number, name: string) {
   if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
   try {
     await api.del(`/api/tokens?id=${id}`)
-    loadTokens()
+    await loadTokens(store)
   } catch { /* empty */ }
 }
 
 export function APITokens() {
-  useEffect(() => { loadTokens() }, [])
+  const store = useAPITokensStore()
+  const { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry } = store
+
+  useEffect(() => {
+    void loadTokens(store)
+  }, [])
 
   return (
     <div class="p-7">
@@ -140,48 +158,50 @@ export function APITokens() {
       ) : tokens.value.length === 0 ? (
         <p class="text-text-tertiary text-sm text-center py-12">No API tokens created yet</p>
       ) : (
-        <div class="border border-border rounded-xl overflow-hidden">
-          <table class="w-full">
-            <thead>
-              <tr class="border-b border-border">
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Name</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Token</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Owner</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Created</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Last Used</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Expires</th>
-                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {tokens.value.map((t) => (
-                <tr key={t.id} class="border-b border-[rgba(255,255,255,0.03)]">
-                  <td class="px-4 py-3.5 text-sm font-bold text-text-primary">{t.name}</td>
-                  <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{t.prefix}...</td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">{t.username}</td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">{relativeTime(t.created_at)}</td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">
-                    {t.last_used_at && t.last_used_at !== '0001-01-01T00:00:00Z'
-                      ? <>{relativeTime(t.last_used_at)}{t.last_used_ip ? <span class="text-text-tertiary ml-1">({t.last_used_ip})</span> : null}</>
-                      : 'Never'}
-                  </td>
-                  <td class="px-4 py-3.5 text-sm text-text-secondary">{formatDate(t.expires_at)}</td>
-                  <td class="px-4 py-3.5 text-right">
-                    <button
-                      onClick={() => deleteToken(t.id, t.name)}
-                      class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
-                      title="Delete token"
-                    >
-                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                        <polyline points="3 6 5 6 21 6" />
-                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                      </svg>
-                    </button>
-                  </td>
+        <div class="admin-table-shell">
+          <div class="admin-table-scroll">
+            <table class="w-full min-w-[980px]">
+              <thead>
+                <tr class="border-b border-border">
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Name</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Token</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Owner</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Created</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Last Used</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Expires</th>
+                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {tokens.value.map((t) => (
+                  <tr key={t.id} class="border-b border-[rgba(255,255,255,0.03)]">
+                    <td class="px-4 py-3.5 text-sm font-bold text-text-primary">{t.name}</td>
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{t.prefix}...</td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">{t.username}</td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">{relativeTime(t.created_at)}</td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">
+                      {t.last_used_at && t.last_used_at !== '0001-01-01T00:00:00Z'
+                        ? <>{relativeTime(t.last_used_at)}{t.last_used_ip ? <span class="text-text-tertiary ml-1">({t.last_used_ip})</span> : null}</>
+                        : 'Never'}
+                    </td>
+                    <td class="px-4 py-3.5 text-sm text-text-secondary">{formatDate(t.expires_at)}</td>
+                    <td class="px-4 py-3.5 text-right">
+                      <button
+                        onClick={() => { void deleteToken(store, t.id, t.name) }}
+                        class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
+                        title="Delete token"
+                      >
+                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                          <polyline points="3 6 5 6 21 6" />
+                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                        </svg>
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         </div>
       )}
 
@@ -220,7 +240,7 @@ export function APITokens() {
                 CANCEL
               </button>
               <button
-                onClick={createToken}
+                onClick={() => { void createToken(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 CREATE
@@ -255,10 +275,10 @@ export function APITokens() {
                       setTimeout(() => { copied.value = false }, 2000)
                     }).catch(() => {
                       // Fallback for non-secure contexts
-                      fallbackCopy(token)
+                      fallbackCopy(store, token)
                     })
                   } else {
-                    fallbackCopy(token)
+                    fallbackCopy(store, token)
                   }
                 }}
                 class={`border font-mono text-xs px-4 py-2.5 rounded-lg shrink-0 transition-colors ${

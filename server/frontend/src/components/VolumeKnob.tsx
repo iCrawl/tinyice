@@ -7,34 +7,73 @@ interface VolumeKnobProps {
 
 export function VolumeKnob({ value, onChange }: VolumeKnobProps) {
   const trackRef = useRef<HTMLDivElement>(null)
+  const draggingRef = useRef(false)
 
   const clamp = (v: number) => Math.min(100, Math.max(0, v))
 
-  const handleClick = useCallback((e: MouseEvent) => {
+  const updateFromClientX = useCallback((clientX: number) => {
     const track = trackRef.current
     if (!track) return
     const rect = track.getBoundingClientRect()
-    const pct = ((e.clientX - rect.left) / rect.width) * 100
+    const pct = ((clientX - rect.left) / rect.width) * 100
     onChange(clamp(pct))
   }, [onChange])
 
-  const handleDrag = useCallback((e: MouseEvent) => {
+  const handlePointerDown = useCallback((e: PointerEvent) => {
     e.preventDefault()
     const track = trackRef.current
     if (!track) return
+    draggingRef.current = true
+    track.setPointerCapture?.(e.pointerId)
+    updateFromClientX(e.clientX)
+  }, [updateFromClientX])
 
-    const move = (ev: MouseEvent) => {
-      const rect = track.getBoundingClientRect()
-      const pct = ((ev.clientX - rect.left) / rect.width) * 100
-      onChange(clamp(pct))
+  const handlePointerMove = useCallback((e: PointerEvent) => {
+    if (!draggingRef.current) return
+    updateFromClientX(e.clientX)
+  }, [updateFromClientX])
+
+  const handlePointerUp = useCallback((e: PointerEvent) => {
+    draggingRef.current = false
+    const track = trackRef.current
+    track?.releasePointerCapture?.(e.pointerId)
+  }, [])
+
+  const handleKeyDown = useCallback((e: KeyboardEvent) => {
+    const largeStep = 10
+    const smallStep = 5
+
+    switch (e.key) {
+      case 'ArrowLeft':
+      case 'ArrowDown':
+        e.preventDefault()
+        onChange(clamp(value - smallStep))
+        break
+      case 'ArrowRight':
+      case 'ArrowUp':
+        e.preventDefault()
+        onChange(clamp(value + smallStep))
+        break
+      case 'PageDown':
+        e.preventDefault()
+        onChange(clamp(value - largeStep))
+        break
+      case 'PageUp':
+        e.preventDefault()
+        onChange(clamp(value + largeStep))
+        break
+      case 'Home':
+        e.preventDefault()
+        onChange(0)
+        break
+      case 'End':
+        e.preventDefault()
+        onChange(100)
+        break
+      default:
+        break
     }
-    const up = () => {
-      document.removeEventListener('mousemove', move)
-      document.removeEventListener('mouseup', up)
-    }
-    document.addEventListener('mousemove', move)
-    document.addEventListener('mouseup', up)
-  }, [onChange])
+  }, [onChange, value])
 
   return (
     <div class="flex items-center gap-3 w-full max-w-[180px]">
@@ -46,13 +85,17 @@ export function VolumeKnob({ value, onChange }: VolumeKnobProps) {
       {/* Slider track */}
       <div
         ref={trackRef}
-        onClick={handleClick}
-        onMouseDown={handleDrag}
+        onPointerDown={handlePointerDown}
+        onPointerMove={handlePointerMove}
+        onPointerUp={handlePointerUp}
+        onPointerCancel={handlePointerUp}
+        onKeyDown={handleKeyDown}
         class="relative flex-1 h-8 flex items-center cursor-pointer group"
         role="slider"
         aria-valuemin={0}
         aria-valuemax={100}
         aria-valuenow={value}
+        aria-valuetext={`${Math.round(value)}%`}
         aria-label="Volume"
         tabIndex={0}
       >

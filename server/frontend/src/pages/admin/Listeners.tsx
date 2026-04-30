@@ -144,7 +144,7 @@ export function Listeners() {
 
       <div class="admin-table-shell">
         <div class="admin-table-scroll">
-          <table class="w-full min-w-[980px]">
+          <table class="w-full min-w-[1080px]">
             <thead>
               <tr class="border-b border-border">
                 <th class="px-4 py-3 w-12">

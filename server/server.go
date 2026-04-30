@@ -4,7 +4,6 @@ import (
 	"context"
 	"embed"
 	"fmt"
-	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -23,9 +22,6 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
-//go:embed all:templates
-var templateFS embed.FS
-
 //go:embed all:assets
 var assetFS embed.FS
 
@@ -37,7 +33,7 @@ var assetFS embed.FS
 //
 // Key responsibilities:
 //   - HTTP request routing and handling
-//   - Web interface rendering (templates, assets)
+//   - Web interface rendering (embedded frontend, assets)
 //   - WebSocket connections for real-time updates
 //   - Source client authentication and authorization
 //   - Listener connection management
@@ -66,7 +62,6 @@ type Server struct {
 	SRT             *relay.SRTServer         // SRT ingest server (optional)
 	TenantM         *relay.TenantManager     // Multi-tenant management
 	mpdServer       *relay.MPDServer         // MPD protocol server (optional)
-	tmpl            *template.Template       // HTML template for web interface (legacy)
 	shell           *ShellRenderer           // New Preact frontend renderer
 	Version         string                   // TinyIce version
 	Commit          string                   // Git commit hash
@@ -112,12 +107,6 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
-	tmpl := template.New("base")
-	tmpl, err := tmpl.ParseFS(templateFS, "templates/*.html")
-	if err != nil {
-		logger.L.Fatalf("Error loading embedded templates: %v", err)
-	}
-
 	hm, err := relay.NewHistoryManager("history.db")
 	if err != nil {
 		logger.L.Fatalf("Failed to initialize history manager: %v", err)
@@ -169,7 +158,6 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		RTMP:             relay.NewRTMPServer(r, cfg),
 		SRT:              relay.NewSRTServer(r, cfg),
 		TenantM:          relay.NewTenantManager(),
-		tmpl:             tmpl,
 		shell:            NewShellRenderer(),
 		Version:          version,
 		Commit:           commit,
