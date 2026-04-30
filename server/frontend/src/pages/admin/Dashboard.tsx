@@ -61,6 +61,11 @@ function formatBytes(bytes: number): string {
   return `${(bytes / 1073741824).toFixed(1)} GB`
 }
 
+function formatHealthPercent(health: number): string {
+  if (!Number.isFinite(health)) return '0'
+  return Math.max(0, Math.min(100, health)).toFixed(2)
+}
+
 export function Dashboard() {
   useEffect(() => {
     const sse = createSSE('/admin/events')
@@ -290,7 +295,7 @@ export function Dashboard() {
                         />
                       </div>
                       <span class="font-mono text-[10px] text-text-tertiary">
-                        {stream.health}%
+                        {formatHealthPercent(stream.health)}%
                       </span>
                     </div>
                   </td>

@@ -50,3 +50,25 @@ test('Dashboard labels inbound and outbound cards as totals with byte units', as
     'Dashboard should not render rate units for cumulative inbound and outbound totals'
   )
 })
+
+test('Dashboard formats stream health percentages to two decimals', async () => {
+  const source = await readFile(dashboardPath, 'utf8')
+
+  assert.match(
+    source,
+    /function formatHealthPercent\(health: number\)/,
+    'Dashboard should format stream health through a dedicated display helper'
+  )
+
+  assert.match(
+    source,
+    /\.toFixed\(2\)/,
+    'Dashboard stream health should be capped to two digits after the decimal point'
+  )
+
+  assert.match(
+    source,
+    /\{formatHealthPercent\(stream\.health\)\}%/,
+    'Dashboard should not render raw health values with arbitrary decimal precision'
+  )
+})
