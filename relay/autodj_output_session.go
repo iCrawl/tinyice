@@ -28,19 +28,40 @@ func (s silencePCMSource) ReadFrame(dst []int16) (int, error) {
 }
 
 type readerPCMFrameSource struct {
+	ctx    context.Context
 	reader io.Reader
+	closer io.Closer
 	done   chan struct{}
 	once   sync.Once
 }
 
-func newReaderPCMFrameSource(reader io.Reader) *readerPCMFrameSource {
-	return &readerPCMFrameSource{
+func newReaderPCMFrameSource(ctx context.Context, reader io.Reader, closer io.Closer) *readerPCMFrameSource {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s := &readerPCMFrameSource{
+		ctx:    ctx,
 		reader: reader,
+		closer: closer,
 		done:   make(chan struct{}),
 	}
+	if closer != nil {
+		go func() {
+			<-ctx.Done()
+			s.closeDone()
+		}()
+	}
+	return s
 }
 
 func (s *readerPCMFrameSource) ReadFrame(dst []int16) (int, error) {
+	select {
+	case <-s.ctx.Done():
+		s.closeDone()
+		return 0, s.ctx.Err()
+	default:
+	}
+
 	buf := make([]byte, len(dst)*2)
 	n, err := io.ReadFull(s.reader, buf)
 	if err != nil {
@@ -59,6 +80,9 @@ func (s *readerPCMFrameSource) Done() <-chan struct{} {
 
 func (s *readerPCMFrameSource) closeDone() {
 	s.once.Do(func() {
+		if s.closer != nil {
+			_ = s.closer.Close()
+		}
 		close(s.done)
 	})
 }

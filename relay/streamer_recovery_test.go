@@ -241,6 +241,43 @@ func TestStopStreamerCancelsDeadSongCommandRecovery(t *testing.T) {
 	}
 }
 
+func TestStreamerManagerShutdownCancelsRecoveryWithoutPanic(t *testing.T) {
+	r := NewRelay(false, nil)
+	sm := NewStreamerManager(r, nil)
+	sm.instances["/dead"] = &Streamer{
+		Name:               "Cmd",
+		OutputMount:        "/dead",
+		State:              StatePlaying,
+		SongCommand:        "printf track.mp3",
+		SongCommandTimeout: 1,
+		relay:              r,
+		stateCh:            make(chan struct{}, 1),
+	}
+
+	started := make(chan struct{}, 1)
+	block := make(chan time.Time)
+	sm.recoveryExecSongCommand = func(*Streamer) (string, error) {
+		started <- struct{}{}
+		return "", errors.New("still dead")
+	}
+	sm.recoveryAfter = func(time.Duration) <-chan time.Time {
+		return block
+	}
+
+	sm.RecoverDeadSongCommandMount("/dead")
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("expected recovery worker to start")
+	}
+
+	sm.Shutdown()
+
+	if sm.DeadRecoveryActive("/dead") {
+		t.Fatal("expected Shutdown to clear recovery worker")
+	}
+}
+
 func TestRecoverDeadSongCommandMountSkipsManualStop(t *testing.T) {
 	r := NewRelay(false, nil)
 	sm := NewStreamerManager(r, nil)

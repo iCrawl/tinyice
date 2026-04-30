@@ -2,6 +2,7 @@ package relay
 
 import (
 	"context"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -23,6 +24,24 @@ func (w *blockingFrameWriter) WriteFrame(frame []int16) error {
 }
 
 func (w *blockingFrameWriter) Close() error { return nil }
+
+type blockingReadCloser struct {
+	closed chan struct{}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
+}
 
 func writeTestMP3File(t *testing.T) string {
 	t.Helper()
@@ -136,6 +155,29 @@ func TestAutoDJOutputSessionRegistersMountRuntime(t *testing.T) {
 	}
 	if rt.Source != SourceAutoDJ {
 		t.Fatalf("expected autodj source, got %q", rt.Source)
+	}
+}
+
+func TestReaderPCMFrameSourceCancelsBlockedRead(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	reader := &blockingReadCloser{closed: make(chan struct{})}
+	source := newReaderPCMFrameSource(ctx, reader, reader)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := source.ReadFrame(make([]int16, 1152*2))
+		done <- err
+	}()
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected blocked ReadFrame to return after cancellation")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("expected cancellation to unblock ReadFrame")
 	}
 }
 

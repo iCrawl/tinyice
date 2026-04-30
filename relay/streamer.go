@@ -1500,7 +1500,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		}()
 	}
 
-	source := newReaderPCMFrameSource(pcm)
+	source := newReaderPCMFrameSource(ctx, pcm, f)
 	outputSession.SetSourceWithActivation(source, func() {
 		if injectMetadata && sm.relay != nil {
 			sm.relay.UpdateMetadata(metadataMount, metadataSong)
