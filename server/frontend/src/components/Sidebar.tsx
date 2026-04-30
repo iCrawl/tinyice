@@ -10,6 +10,8 @@ const NAV_ITEMS: SidebarItem[] = [
     icon: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>' },
   { id: 'streams', label: 'Streams', href: '/admin/streams',
     icon: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>' },
+  { id: 'listeners', label: 'Listeners', href: '/admin/listeners',
+    icon: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 11h-6"/><path d="M20 8l3 3-3 3"/>' },
   { id: 'autodj', label: 'AutoDJ', href: '/admin/autodj',
     icon: '<circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>' },
   { id: 'golive', label: 'Go Live', href: '/admin/golive',

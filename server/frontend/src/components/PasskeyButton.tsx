@@ -1,10 +1,27 @@
 import { signal } from '@preact/signals'
+import { useRef } from 'preact/hooks'
 import { startAuthentication } from '@simplewebauthn/browser'
 
-const loading = signal(false)
-const error = signal('')
+type PasskeyButtonStore = ReturnType<typeof createPasskeyButtonStore>
+
+function createPasskeyButtonStore() {
+  const loading = signal(false)
+  const error = signal('')
+
+  return { loading, error }
+}
+
+function usePasskeyButtonStore() {
+  const storeRef = useRef<PasskeyButtonStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createPasskeyButtonStore()
+  }
+  return storeRef.current
+}
 
 export function PasskeyButton() {
+  const { loading, error } = usePasskeyButtonStore()
+
   async function handleLogin() {
     loading.value = true
     error.value = ''
@@ -52,9 +69,9 @@ export function PasskeyButton() {
           <path d="M2 18v3c0 .6.4 1 1 1h4v-3h3v-3h2l1.4-1.4a6.5 6.5 0 1 0-4-4Z" />
           <circle cx="16.5" cy="7.5" r=".5" fill="currentColor" />
         </svg>
-        {loading.value ? 'Authenticating...' : 'Sign in with Passkey'}
+        {loading.value ? 'Authenticating…' : 'Sign in with Passkey'}
       </button>
-      {error.value && <p class="text-danger text-xs mt-2 text-center">{error.value}</p>}
+      {error.value && <p class="text-danger text-xs mt-2 text-center" aria-live="polite">{error.value}</p>}
     </div>
   )
 }

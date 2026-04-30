@@ -347,6 +347,7 @@ source.addEventListener('metadata', (e) => {
                 <a
                   href="/api/docs"
                   target="_blank"
+                  rel="noopener noreferrer"
                   class="group flex items-center gap-4 rounded-lg border border-accent/30 bg-accent/5 hover:bg-accent/10 p-5 transition-colors"
                 >
                   <div class="w-10 h-10 rounded-lg bg-accent/15 flex items-center justify-center flex-shrink-0">
@@ -371,6 +372,7 @@ source.addEventListener('metadata', (e) => {
                 <a
                   href="/api/openapi.yaml"
                   target="_blank"
+                  rel="noopener noreferrer"
                   class="group flex items-center gap-4 rounded-lg border border-border hover:border-accent/30 bg-surface-raised p-5 transition-colors"
                 >
                   <div class="w-10 h-10 rounded-lg bg-surface-overlay flex items-center justify-center flex-shrink-0">

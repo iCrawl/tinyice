@@ -1,7 +1,8 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { Toggle } from '../../components/Toggle'
+import { applyBrandingTheme } from '../../lib/brandingTheme'
 
 interface ServerSettings {
   bind_host: string
@@ -25,99 +26,106 @@ interface BrandingSettings {
   logo_path: string
 }
 
-const activeTab = signal<'server' | 'branding'>('server')
-const saving = signal(false)
+type SettingsStore = ReturnType<typeof createSettingsStore>
 
-// Server state
-const server = signal<ServerSettings>({
-  bind_host: '0.0.0.0',
-  port: 8000,
-  use_https: false,
-  max_listeners: 0,
-  hostname: '',
-  base_url: '',
-  location: '',
-  admin_email: '',
-  low_latency_mode: false,
-  directory_listing: false,
-  audit_enabled: false,
-})
+function createSettingsStore() {
+  const activeTab = signal<'server' | 'branding'>('server')
+  const saving = signal(false)
+  const server = signal<ServerSettings>({
+    bind_host: '0.0.0.0',
+    port: 8000,
+    use_https: false,
+    max_listeners: 0,
+    hostname: '',
+    base_url: '',
+    location: '',
+    admin_email: '',
+    low_latency_mode: false,
+    directory_listing: false,
+    audit_enabled: false,
+  })
+  const branding = signal<BrandingSettings>({
+    page_title: '',
+    page_subtitle: '',
+    accent_color: '#ff6600',
+    landing_markdown: '',
+    logo_path: '',
+  })
+  const loading = signal(true)
 
-// Branding state
-const branding = signal<BrandingSettings>({
-  page_title: '',
-  page_subtitle: '',
-  accent_color: '#ff6600',
-  landing_markdown: '',
-  logo_path: '',
-})
-
-const loading = signal(true)
-
-function formatUptime(seconds: number): string {
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h ${m}m`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
+  return { activeTab, saving, server, branding, loading }
 }
 
-async function load() {
-  loading.value = true
+function useSettingsStore() {
+  const storeRef = useRef<SettingsStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createSettingsStore()
+  }
+  return storeRef.current
+}
+
+const csrfToken = (window.__TINYICE__ as { csrfToken?: string } | undefined)?.csrfToken || ''
+
+async function load(store: SettingsStore) {
+  store.loading.value = true
   try {
     const [s, b] = await Promise.all([
       api.get<ServerSettings>('/api/settings'),
       api.get<BrandingSettings>('/api/branding'),
     ])
-    server.value = s
-    branding.value = b
+    store.server.value = s
+    store.branding.value = b
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function saveServer() {
-  saving.value = true
+async function saveServer(store: SettingsStore) {
+  store.saving.value = true
   try {
     await api.put('/api/settings', {
-      hostname: server.value.hostname,
-      base_url: server.value.base_url,
-      location: server.value.location,
-      admin_email: server.value.admin_email,
-      max_listeners: server.value.max_listeners,
-      low_latency_mode: server.value.low_latency_mode,
-      directory_listing: server.value.directory_listing,
-      audit_enabled: server.value.audit_enabled,
+      hostname: store.server.value.hostname,
+      base_url: store.server.value.base_url,
+      location: store.server.value.location,
+      admin_email: store.server.value.admin_email,
+      max_listeners: store.server.value.max_listeners,
+      low_latency_mode: store.server.value.low_latency_mode,
+      directory_listing: store.server.value.directory_listing,
+      audit_enabled: store.server.value.audit_enabled,
     })
   } catch { /* empty */ }
-  saving.value = false
+  store.saving.value = false
 }
 
-async function saveBranding() {
-  saving.value = true
+async function saveBranding(store: SettingsStore, branding: SettingsStore['branding']) {
+  store.saving.value = true
   try {
     await api.put('/api/branding', branding.value)
+    applyBrandingTheme(branding.value.accent_color)
   } catch { /* empty */ }
-  saving.value = false
+  store.saving.value = false
 }
 
-function updateServer<K extends keyof ServerSettings>(key: K, value: ServerSettings[K]) {
-  server.value = { ...server.value, [key]: value }
+function updateServer<K extends keyof ServerSettings>(store: SettingsStore, key: K, value: ServerSettings[K]) {
+  store.server.value = { ...store.server.value, [key]: value }
 }
 
-function updateBranding<K extends keyof BrandingSettings>(key: K, value: BrandingSettings[K]) {
-  branding.value = { ...branding.value, [key]: value }
+function updateBranding<K extends keyof BrandingSettings>(store: SettingsStore, key: K, value: BrandingSettings[K]) {
+  store.branding.value = { ...store.branding.value, [key]: value }
 }
 
 export function Settings() {
-  useEffect(() => { load() }, [])
+  const store = useSettingsStore()
+  const { activeTab, saving, server, branding, loading } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
       <div class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1">MANAGE</div>
       <h1 class="text-xl font-bold text-text-primary mb-6">Settings</h1>
 
-      {/* Tabs */}
       <div class="flex gap-1 mb-6 border-b border-border">
         {(['server', 'branding'] as const).map((tab) => (
           <button
@@ -144,7 +152,7 @@ export function Settings() {
               <input
                 type="text"
                 value={server.value.hostname}
-                onInput={(e) => updateServer('hostname', (e.target as HTMLInputElement).value)}
+                onInput={(e) => updateServer(store, 'hostname', (e.target as HTMLInputElement).value)}
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
@@ -153,7 +161,7 @@ export function Settings() {
               <input
                 type="text"
                 value={server.value.location}
-                onInput={(e) => updateServer('location', (e.target as HTMLInputElement).value)}
+                onInput={(e) => updateServer(store, 'location', (e.target as HTMLInputElement).value)}
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
@@ -162,7 +170,7 @@ export function Settings() {
               <input
                 type="email"
                 value={server.value.admin_email}
-                onInput={(e) => updateServer('admin_email', (e.target as HTMLInputElement).value)}
+                onInput={(e) => updateServer(store, 'admin_email', (e.target as HTMLInputElement).value)}
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
@@ -171,27 +179,26 @@ export function Settings() {
               <input
                 type="number"
                 value={server.value.max_listeners}
-                onInput={(e) => updateServer('max_listeners', parseInt((e.target as HTMLInputElement).value) || 0)}
+                onInput={(e) => updateServer(store, 'max_listeners', parseInt((e.target as HTMLInputElement).value) || 0)}
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
             <div class="flex items-center justify-between">
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary">LOW LATENCY MODE</label>
-              <Toggle checked={server.value.low_latency_mode} onChange={(v) => updateServer('low_latency_mode', v)} label="Low latency" />
+              <Toggle checked={server.value.low_latency_mode} onChange={(v) => updateServer(store, 'low_latency_mode', v)} label="Low latency" />
             </div>
             <div class="flex items-center justify-between">
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary">DIRECTORY LISTING</label>
-              <Toggle checked={server.value.directory_listing} onChange={(v) => updateServer('directory_listing', v)} label="Directory listing" />
+              <Toggle checked={server.value.directory_listing} onChange={(v) => updateServer(store, 'directory_listing', v)} label="Directory listing" />
             </div>
             <div class="flex items-center justify-between">
               <div>
                 <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary">AUDIT LOGGING</label>
                 <p class="text-[10px] text-text-tertiary mt-0.5">Record admin actions for security review</p>
               </div>
-              <Toggle checked={server.value.audit_enabled} onChange={(v) => updateServer('audit_enabled', v)} label="Audit logging" />
+              <Toggle checked={server.value.audit_enabled} onChange={(v) => updateServer(store, 'audit_enabled', v)} label="Audit logging" />
             </div>
 
-            {/* Read-only info */}
             <div class="border-t border-border pt-4 mt-2">
               <div class="grid grid-cols-2 gap-4">
                 <div>
@@ -206,7 +213,7 @@ export function Settings() {
             </div>
 
             <button
-              onClick={saveServer}
+              onClick={() => { void saveServer(store) }}
               disabled={saving.value}
               class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg mt-2 self-start disabled:opacity-50"
             >
@@ -217,11 +224,9 @@ export function Settings() {
       ) : (
         <div class="max-w-lg">
           <div class="flex flex-col gap-5">
-            {/* Logo */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-2 block">LOGO</label>
               <div class="flex items-center gap-4">
-                {/* Preview */}
                 <div class="w-16 h-16 rounded-xl border border-border bg-surface-overlay flex items-center justify-center overflow-hidden flex-shrink-0">
                   {branding.value.logo_path ? (
                     <img src={`/branding/logo?t=${Date.now()}`} alt="Logo" class="w-full h-full object-cover" />
@@ -245,10 +250,11 @@ export function Settings() {
                         const res = await fetch('/api/branding/logo', {
                           method: 'POST',
                           body: form,
+                          headers: csrfToken ? { 'X-CSRF-Token': csrfToken } : undefined,
                         })
                         if (res.ok) {
                           const data = await res.json()
-                          updateBranding('logo_path', data.path || file.name)
+                          updateBranding(store, 'logo_path', data.path || file.name)
                         }
                       }}
                     />
@@ -263,7 +269,7 @@ export function Settings() {
                   </label>
                   {branding.value.logo_path && (
                     <button
-                      onClick={() => updateBranding('logo_path', '')}
+                      onClick={() => updateBranding(store, 'logo_path', '')}
                       class="text-left text-danger font-mono text-[10px] tracking-wider hover:underline"
                     >
                       REMOVE LOGO
@@ -274,42 +280,38 @@ export function Settings() {
               </div>
             </div>
 
-            {/* Page Title */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">SITE NAME</label>
               <p class="text-[10px] text-text-tertiary mb-2">Shown in the navigation bar and browser tab.</p>
               <input
                 type="text"
                 value={branding.value.page_title}
-                onInput={(e) => updateBranding('page_title', (e.target as HTMLInputElement).value)}
+                onInput={(e) => updateBranding(store, 'page_title', (e.target as HTMLInputElement).value)}
                 placeholder="TinyIce"
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
 
-            {/* Subtitle */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">TAGLINE</label>
               <p class="text-[10px] text-text-tertiary mb-2">Shown above the title on the landing page.</p>
               <input
                 type="text"
                 value={branding.value.page_subtitle}
-                onInput={(e) => updateBranding('page_subtitle', (e.target as HTMLInputElement).value)}
+                onInput={(e) => updateBranding(store, 'page_subtitle', (e.target as HTMLInputElement).value)}
                 placeholder="Live Streaming Server powered by Go"
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
               />
             </div>
 
-            {/* Accent Color */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">ACCENT COLOR</label>
               <p class="text-[10px] text-text-tertiary mb-2">Primary color for buttons, links, and highlights.</p>
-              {/* Preset swatches */}
               <div class="flex items-center gap-1.5 mb-3">
                 {['#ff6600', '#e74c3c', '#e91e63', '#9b59b6', '#3498db', '#00bcd4', '#2ecc71', '#f39c12', '#1abc9c', '#6c5ce7'].map((color) => (
                   <button
                     key={color}
-                    onClick={() => updateBranding('accent_color', color)}
+                    onClick={() => updateBranding(store, 'accent_color', color)}
                     class="w-7 h-7 rounded-lg border-2 transition-all hover:scale-110"
                     style={{
                       backgroundColor: color,
@@ -320,7 +322,6 @@ export function Settings() {
                   />
                 ))}
               </div>
-              {/* Color picker + hex input */}
               <div class="flex items-center gap-3">
                 <label
                   class="w-10 h-10 rounded-lg border border-border flex-shrink-0 cursor-pointer overflow-hidden relative"
@@ -329,38 +330,35 @@ export function Settings() {
                   <input
                     type="color"
                     value={branding.value.accent_color || '#ff6600'}
-                    onInput={(e) => updateBranding('accent_color', (e.target as HTMLInputElement).value)}
+                    onInput={(e) => updateBranding(store, 'accent_color', (e.target as HTMLInputElement).value)}
                     class="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
                   />
                 </label>
                 <input
                   type="text"
                   value={branding.value.accent_color}
-                  onInput={(e) => updateBranding('accent_color', (e.target as HTMLInputElement).value)}
+                  onInput={(e) => updateBranding(store, 'accent_color', (e.target as HTMLInputElement).value)}
                   placeholder="#ff6600"
                   class="flex-1 bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
                 />
               </div>
             </div>
 
-            {/* Landing Content */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">LANDING PAGE CONTENT</label>
               <p class="text-[10px] text-text-tertiary mb-2">Supports Markdown: **bold**, *italic*, [links](url), # headings, lists, etc.</p>
               <textarea
                 value={branding.value.landing_markdown}
-                onInput={(e) => updateBranding('landing_markdown', (e.target as HTMLTextAreaElement).value)}
+                onInput={(e) => updateBranding(store, 'landing_markdown', (e.target as HTMLTextAreaElement).value)}
                 rows={10}
                 placeholder={"Welcome to our station!\n\n## Schedule\n- **Mon-Fri** 8am-10pm: Live shows\n- **Weekends**: AutoDJ\n\n[Listen now](/explore)"}
                 class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-code text-sm focus:border-accent outline-none resize-y"
               />
             </div>
 
-            {/* Live preview */}
             <div>
               <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-2 block">PREVIEW</label>
               <div class="border border-border rounded-xl bg-surface-raised overflow-hidden">
-                {/* Mini nav preview */}
                 <div class="flex items-center gap-3 px-4 py-2.5 border-b border-border">
                   <div
                     class="w-6 h-6 rounded flex items-center justify-center flex-shrink-0 overflow-hidden"
@@ -378,7 +376,6 @@ export function Settings() {
                     {branding.value.page_title || 'TINYICE'}
                   </span>
                 </div>
-                {/* Content area */}
                 <div class="p-4">
                   <span class="font-mono text-[9px] tracking-widest block mb-1" style={{ color: branding.value.accent_color || '#ff6600' }}>
                     {branding.value.page_subtitle || '— AUDIO STREAMING SERVER'}
@@ -394,7 +391,7 @@ export function Settings() {
             </div>
 
             <button
-              onClick={saveBranding}
+              onClick={() => { void saveBranding(store, branding) }}
               disabled={saving.value}
               class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg mt-2 self-start disabled:opacity-50"
             >

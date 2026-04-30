@@ -1,7 +1,6 @@
 import { useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { marked } from 'marked'
-import DOMPurify from 'dompurify'
 import { Nav } from '@/components/Nav'
 import { StreamCard } from '@/components/StreamCard'
 import { createSSE } from '@/lib/sse'
@@ -10,16 +9,19 @@ import type { LandingData, StreamInfo } from '@/types'
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
 const streams = signal<StreamInfo[]>(data.streams ?? [])
 
-// Configure marked for safe rendering
 marked.setOptions({ breaks: true, gfm: true })
 
-// Any admin can edit the landing markdown via Settings → Branding. Without
-// sanitisation, marked happily renders <script> / <img onerror=…> straight
-// into every visitor's DOM — admin-to-visitor XSS. Run every render through
-// DOMPurify before handing it to dangerouslySetInnerHTML.
-function renderSafeMarkdown(md: string): string {
-  const raw = marked.parse(md) as string
-  return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } })
+function escapeHtml(input: string): string {
+  return input
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+
+function playerPath(mount: string): string {
+  return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
 }
 
 export function Landing() {
@@ -54,14 +56,11 @@ export function Landing() {
   const customTitle = data.pageTitle && data.pageTitle !== 'TinyIce' ? data.pageTitle : ''
   const customSubtitle = data.pageSubtitle && data.pageSubtitle !== 'Live Streaming Server powered by Go' ? data.pageSubtitle : ''
   const landingMarkdown = data.branding?.landingMarkdown || ''
-  const accentColor = data.branding?.accentColor
   const isCustomized = !!(customTitle || customSubtitle || landingMarkdown)
+  const renderedMarkdown = landingMarkdown ? marked.parse(escapeHtml(landingMarkdown)) as string : ''
 
   return (
-    <div
-      class="min-h-screen bg-surface-base relative overflow-hidden"
-      style={accentColor ? { '--color-accent': accentColor } as any : undefined}
-    >
+    <div class="min-h-screen bg-surface-base relative overflow-hidden">
       {/* Dot grid texture */}
       <div
         class="fixed inset-0 pointer-events-none z-0"
@@ -71,16 +70,16 @@ export function Landing() {
         }}
       />
 
-      {/* Ambient glow */}
+      {/* Ambient accent glow */}
       <div
         class="fixed top-0 right-0 w-[800px] h-[800px] pointer-events-none z-0"
         style={{
-          background: 'radial-gradient(ellipse at 80% 20%, rgba(255,102,0,0.06) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse at 80% 20%, rgba(var(--color-accent-rgb), 0.06) 0%, transparent 70%)',
         }}
       />
 
       {/* Nav */}
-      <Nav branding={data.branding ?? { logoUrl: null, accentColor: '#ff6600' }} pageTitle={data.pageTitle} />
+      <Nav branding={data.branding} pageTitle={data.pageTitle} />
 
       {/* Hero */}
       <main class="relative z-10 pt-14">
@@ -114,7 +113,7 @@ export function Landing() {
               {landingMarkdown ? (
                 <div
                   class="max-w-lg markdown-content"
-                  dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(landingMarkdown) }}
+                  dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
                 />
               ) : (
                 <p class="text-text-tertiary text-base leading-relaxed max-w-md">
@@ -129,7 +128,7 @@ export function Landing() {
                   <a
                     href="/admin"
                     class="font-mono text-xs tracking-widest font-bold px-6 py-3 rounded bg-accent text-surface-base hover:bg-accent/90 transition-colors"
-                    style={{ boxShadow: '0 0 20px rgba(255,102,0,0.25)' }}
+                    style={{ boxShadow: '0 0 20px rgba(var(--color-accent-rgb), 0.25)' }}
                   >
                     GET STARTED
                   </a>
@@ -188,7 +187,7 @@ export function Landing() {
                       key={stream.mount}
                       stream={stream}
                       onPlay={() => {
-                        window.location.href = `/player/${stream.mount}`
+                        window.location.href = playerPath(stream.mount)
                       }}
                     />
                   ))}

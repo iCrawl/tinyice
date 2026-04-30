@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/lib/api'
 import { createSSE } from '@/lib/sse'
@@ -45,6 +45,7 @@ interface AutoDJInstance {
   shuffle: boolean
   loop: boolean
   injectMetadata: boolean
+  visible: boolean
   musicDir: string
   songCommand: string
   songCommandTimeout: number
@@ -67,6 +68,7 @@ function mapInstance(raw: AutoDJInstanceRaw): AutoDJInstance {
     shuffle: raw.shuffle,
     loop: raw.loop,
     injectMetadata: raw.inject_metadata,
+    visible: raw.visible,
     musicDir: raw.music_dir,
     songCommand: raw.song_command || '',
     songCommandTimeout: raw.song_command_timeout || 5,
@@ -76,102 +78,135 @@ function mapInstance(raw: AutoDJInstanceRaw): AutoDJInstance {
   }
 }
 
-const instances = signal<AutoDJInstance[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const editingMount = signal<string | null>(null) // null = creating new, string = editing existing mount
-const formName = signal('')
-const formMount = signal('')
-const formMusicDir = signal('')
-const formFormat = signal('mp3')
-const formBitrate = signal(128)
-const formLoop = signal(true)
-const formInjectMetadata = signal(true)
-const formSongCommand = signal('')
-const formSongCommandTimeout = signal(5)
-const formOnPlayCommand = signal('')
-const formOnPlayCommandTimeout = signal(10)
-const saveError = signal('')
+type AutoDJStore = ReturnType<typeof createAutoDJStore>
 
-function resetForm() {
-  saveError.value = ''
-  formName.value = ''
-  formMount.value = ''
-  formMusicDir.value = ''
-  formFormat.value = 'mp3'
-  formBitrate.value = 128
-  formLoop.value = true
-  formInjectMetadata.value = true
-  formSongCommand.value = ''
-  formSongCommandTimeout.value = 5
-  formOnPlayCommand.value = ''
-  formOnPlayCommandTimeout.value = 10
-  editingMount.value = null
+function createAutoDJStore() {
+  const instances = signal<AutoDJInstance[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const editingMount = signal<string | null>(null)
+  const formName = signal('')
+  const formMount = signal('')
+  const formMusicDir = signal('')
+  const formFormat = signal('mp3')
+  const formBitrate = signal(128)
+  const formLoop = signal(true)
+  const formInjectMetadata = signal(true)
+  const formVisible = signal(true)
+  const formSongCommand = signal('')
+  const formSongCommandTimeout = signal(5)
+  const formOnPlayCommand = signal('')
+  const formOnPlayCommandTimeout = signal(10)
+  const saveError = signal('')
+
+  return {
+    instances,
+    loading,
+    showForm,
+    editingMount,
+    formName,
+    formMount,
+    formMusicDir,
+    formFormat,
+    formBitrate,
+    formLoop,
+    formInjectMetadata,
+    formVisible,
+    formSongCommand,
+    formSongCommandTimeout,
+    formOnPlayCommand,
+    formOnPlayCommandTimeout,
+    saveError,
+  }
 }
 
-function openEditForm(inst: AutoDJInstance) {
-  formName.value = inst.name
-  formMount.value = inst.mount
-  formMusicDir.value = inst.musicDir
-  formFormat.value = inst.format
-  formBitrate.value = inst.bitrate
-  formLoop.value = inst.loop
-  formInjectMetadata.value = inst.injectMetadata
-  formSongCommand.value = inst.songCommand || ''
-  formSongCommandTimeout.value = inst.songCommandTimeout || 5
-  formOnPlayCommand.value = inst.onPlayCommand || ''
-  formOnPlayCommandTimeout.value = inst.onPlayCommandTimeout || 10
-  editingMount.value = inst.mount
-  showForm.value = true
+function useAutoDJStore() {
+  const storeRef = useRef<AutoDJStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createAutoDJStore()
+  }
+  return storeRef.current
 }
 
-async function saveAutoDJ() {
-  saveError.value = ''
+function resetForm(store: AutoDJStore) {
+  store.saveError.value = ''
+  store.formName.value = ''
+  store.formMount.value = ''
+  store.formMusicDir.value = ''
+  store.formFormat.value = 'mp3'
+  store.formBitrate.value = 128
+  store.formLoop.value = true
+  store.formInjectMetadata.value = true
+  store.formVisible.value = true
+  store.formSongCommand.value = ''
+  store.formSongCommandTimeout.value = 5
+  store.formOnPlayCommand.value = ''
+  store.formOnPlayCommandTimeout.value = 10
+  store.editingMount.value = null
+}
+
+function openEditForm(store: AutoDJStore, inst: AutoDJInstance) {
+  store.saveError.value = ''
+  store.formName.value = inst.name
+  store.formMount.value = inst.mount
+  store.formMusicDir.value = inst.musicDir
+  store.formFormat.value = inst.format
+  store.formBitrate.value = inst.bitrate
+  store.formLoop.value = inst.loop
+  store.formInjectMetadata.value = inst.injectMetadata
+  store.formVisible.value = inst.visible
+  store.formSongCommand.value = inst.songCommand || ''
+  store.formSongCommandTimeout.value = inst.songCommandTimeout || 5
+  store.formOnPlayCommand.value = inst.onPlayCommand || ''
+  store.formOnPlayCommandTimeout.value = inst.onPlayCommandTimeout || 10
+  store.editingMount.value = inst.mount
+  store.showForm.value = true
+}
+
+async function loadAutoDJ(store: AutoDJStore) {
+  store.loading.value = true
+  try {
+    const raw = await api.get<AutoDJInstanceRaw[]>('/api/autodj')
+    store.instances.value = raw.map(mapInstance)
+  } catch {
+    store.instances.value = []
+  }
+  store.loading.value = false
+}
+
+async function saveAutoDJ(store: AutoDJStore) {
+  store.saveError.value = ''
   const body = {
-    name: formName.value,
-    mount: formMount.value,
-    music_dir: formMusicDir.value,
-    format: formFormat.value,
-    bitrate: formBitrate.value,
-    loop: formLoop.value,
-    inject_metadata: formInjectMetadata.value,
-    song_command: formSongCommand.value || undefined,
-    song_command_timeout: formSongCommandTimeout.value || undefined,
-    on_play_command: formOnPlayCommand.value || undefined,
-    on_play_command_timeout: formOnPlayCommandTimeout.value || undefined,
+    name: store.formName.value,
+    mount: store.formMount.value,
+    music_dir: store.formMusicDir.value,
+    format: store.formFormat.value,
+    bitrate: store.formBitrate.value,
+    loop: store.formLoop.value,
+    inject_metadata: store.formInjectMetadata.value,
+    visible: store.formVisible.value,
+    song_command: store.formSongCommand.value || undefined,
+    song_command_timeout: store.formSongCommandTimeout.value || undefined,
+    on_play_command: store.formOnPlayCommand.value || undefined,
+    on_play_command_timeout: store.formOnPlayCommandTimeout.value || undefined,
   }
   try {
-    if (editingMount.value) {
-      // PUT updates in place — server keeps playlist/queue state and
-      // reverts cleanly if validation fails, instead of the previous
-      // delete-then-recreate which would lose the instance entirely
-      // on any 400.
-      await api.put(`/api/autodj?mount=${encodeURIComponent(editingMount.value)}`, body)
+    if (store.editingMount.value) {
+      await api.put(`/api/autodj?mount=${encodeURIComponent(store.editingMount.value)}`, body)
     } else {
       await api.post('/api/autodj', body)
     }
-    showForm.value = false
-    resetForm()
-    loadAutoDJ()
+    store.showForm.value = false
+    resetForm(store)
+    await loadAutoDJ(store)
   } catch (e) {
-    saveError.value = (e as Error).message || 'Save failed'
+    store.saveError.value = (e as Error).message || 'Save failed'
   }
 }
 
-async function deleteAutoDJ(mount: string) {
+async function deleteAutoDJ(store: AutoDJStore, mount: string) {
   await api.del(`/api/autodj?mount=${encodeURIComponent(mount)}`)
-  loadAutoDJ()
-}
-
-async function loadAutoDJ() {
-  loading.value = true
-  try {
-    const raw = await api.get<AutoDJInstanceRaw[]>('/api/autodj')
-    instances.value = raw.map(mapInstance)
-  } catch {
-    instances.value = []
-  }
-  loading.value = false
+  await loadAutoDJ(store)
 }
 
 function formatTime(seconds: number): string {
@@ -180,7 +215,7 @@ function formatTime(seconds: number): string {
   return `${m}:${s.toString().padStart(2, '0')}`
 }
 
-function InstanceCard({ inst }: { inst: AutoDJInstance }) {
+function InstanceCard({ inst, store }: { inst: AutoDJInstance, store: AutoDJStore }) {
   const isPlaying = inst.state === 'playing'
   const isPaused = inst.state === 'paused'
   const isStopped = inst.state === 'stopped'
@@ -236,7 +271,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
               </svg>
             </button>
             <button
-              onClick={() => openEditForm(inst)}
+              onClick={() => openEditForm(store, inst)}
               class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
               aria-label="Edit AutoDJ"
               title="Edit AutoDJ"
@@ -247,7 +282,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
               </svg>
             </button>
             <button
-              onClick={() => deleteAutoDJ(inst.mount)}
+              onClick={() => { void deleteAutoDJ(store, inst.mount) }}
               class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
               aria-label="Delete AutoDJ"
               title="Delete AutoDJ"
@@ -298,7 +333,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
             </button>
             <button
               onClick={() => handleTransport(isPlaying ? 'pause' : 'play')}
-              class="w-10 h-10 rounded-full bg-accent flex items-center justify-center shadow-[0_0_16px_rgba(255,102,0,0.25)] hover:shadow-[0_0_24px_rgba(255,102,0,0.4)] transition-shadow"
+              class="w-10 h-10 rounded-full bg-accent flex items-center justify-center accent-shadow-control-sm"
               aria-label={isPlaying ? 'Pause' : 'Play'}
             >
               {isPlaying ? (
@@ -334,7 +369,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
             </a>
 
             <button
-              onClick={() => openEditForm(inst)}
+              onClick={() => openEditForm(store, inst)}
               class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
               aria-label="Edit AutoDJ"
               title="Edit AutoDJ"
@@ -345,7 +380,7 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
               </svg>
             </button>
             <button
-              onClick={() => deleteAutoDJ(inst.mount)}
+              onClick={() => { void deleteAutoDJ(store, inst.mount) }}
               class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
               aria-label="Delete AutoDJ"
               title="Delete AutoDJ"
@@ -386,28 +421,43 @@ function InstanceCard({ inst }: { inst: AutoDJInstance }) {
 }
 
 export function AutoDJ() {
-  useEffect(() => {
-    loadAutoDJ()
+  const store = useAutoDJStore()
+  const {
+    instances,
+    loading,
+    showForm,
+    editingMount,
+    formName,
+    formMount,
+    formMusicDir,
+    formFormat,
+    formBitrate,
+    formLoop,
+    formInjectMetadata,
+    formVisible,
+    formSongCommand,
+    formSongCommandTimeout,
+    formOnPlayCommand,
+    formOnPlayCommandTimeout,
+    saveError,
+  } = store
 
-    const sse = createSSE('/events')
+  useEffect(() => {
+    void loadAutoDJ(store)
+
+    const sse = createSSE('/admin/events')
     sse.on('autodj', (evt: AutoDJEvent) => {
       instances.value = instances.value.map((inst) =>
         inst.mount === evt.mount
           ? {
               ...inst,
               state: evt.state,
-              currentTrack: evt.currentTrack,
-              position: evt.position,
+              currentSong: evt.currentTrack.title || evt.currentTrack.file || inst.currentSong,
               duration: evt.duration,
               queue: evt.queue,
             }
           : inst
       )
-    })
-
-    sse.on('stream', () => {
-      // Stream events update listener counts — reload data
-      loadAutoDJ()
     })
 
     return () => sse.close()
@@ -419,8 +469,8 @@ export function AutoDJ() {
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-xl font-bold text-text-primary font-heading">AutoDJ</h1>
         <button
-          onClick={() => { resetForm(); showForm.value = true }}
-          class="h-9 px-4 rounded-lg bg-accent text-surface-base text-sm font-medium flex items-center gap-2 hover:shadow-[0_0_20px_rgba(255,102,0,0.3)] transition-shadow"
+          onClick={() => { resetForm(store); showForm.value = true }}
+          class="h-9 px-4 rounded-lg bg-accent text-surface-base text-sm font-medium flex items-center gap-2 accent-shadow-hover"
         >
           <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
             <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
@@ -453,7 +503,7 @@ export function AutoDJ() {
       {!loading.value && instances.value.length > 0 && (
         <div class="grid gap-4 grid-cols-1 lg:grid-cols-2">
           {instances.value.map((inst) => (
-            <InstanceCard key={inst.mount} inst={inst} />
+            <InstanceCard key={inst.mount} inst={inst} store={store} />
           ))}
         </div>
       )}
@@ -470,7 +520,7 @@ export function AutoDJ() {
                 <input
                   type="text"
                   value={formName.value}
-                  onInput={(e) => { formName.value = (e.target as HTMLInputElement).value }}
+                onInput={(e) => { formName.value = (e.target as HTMLInputElement).value }}
                   placeholder="My AutoDJ"
                   class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none w-full"
                 />
@@ -480,7 +530,7 @@ export function AutoDJ() {
                 <input
                   type="text"
                   value={formMount.value}
-                  onInput={(e) => { formMount.value = (e.target as HTMLInputElement).value }}
+                onInput={(e) => { formMount.value = (e.target as HTMLInputElement).value }}
                   placeholder="/autodj"
                   class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none w-full"
                 />
@@ -490,7 +540,7 @@ export function AutoDJ() {
                 <input
                   type="text"
                   value={formMusicDir.value}
-                  onInput={(e) => { formMusicDir.value = (e.target as HTMLInputElement).value }}
+                onInput={(e) => { formMusicDir.value = (e.target as HTMLInputElement).value }}
                   placeholder="/path/to/music"
                   class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none w-full"
                 />
@@ -500,12 +550,11 @@ export function AutoDJ() {
                   <label class="text-text-secondary text-xs font-mono tracking-wider uppercase mb-1.5 block">FORMAT</label>
                   <select
                     value={formFormat.value}
-                    onChange={(e) => { formFormat.value = (e.target as HTMLSelectElement).value }}
+                onChange={(e) => { formFormat.value = (e.target as HTMLSelectElement).value }}
                     class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none w-full"
                   >
                     <option value="mp3">MP3</option>
-                    <option value="opus">Opus</option>
-                    <option value="ogg">OGG</option>
+                    <option value="opus">Ogg/Opus</option>
                   </select>
                 </div>
                 <div>
@@ -513,7 +562,7 @@ export function AutoDJ() {
                   <input
                     type="number"
                     value={formBitrate.value}
-                    onInput={(e) => { formBitrate.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
+                onInput={(e) => { formBitrate.value = parseInt((e.target as HTMLInputElement).value) || 0 }}
                     class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none w-full"
                   />
                 </div>
@@ -536,6 +585,15 @@ export function AutoDJ() {
                     class="accent-accent"
                   />
                   <span class="text-text-secondary text-xs font-mono tracking-wider uppercase">Inject Metadata</span>
+                </label>
+                <label class="flex items-center gap-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={formVisible.value}
+                    onChange={(e) => { formVisible.value = (e.target as HTMLInputElement).checked }}
+                    class="accent-accent"
+                  />
+                  <span class="text-text-secondary text-xs font-mono tracking-wider uppercase">Visible</span>
                 </label>
               </div>
               {/* Divider */}
@@ -600,19 +658,21 @@ export function AutoDJ() {
                   />
                 </div>
               )}
+              {saveError.value && (
+                <div class="rounded-lg border border-danger/40 bg-danger/10 px-3 py-2 text-xs text-danger">
+                  {saveError.value}
+                </div>
+              )}
             </div>
-            {saveError.value && (
-              <div class="mt-4 text-danger font-mono text-xs">{saveError.value}</div>
-            )}
             <div class="flex justify-end gap-2 mt-6">
               <button
-                onClick={() => { showForm.value = false; resetForm() }}
+                onClick={() => { showForm.value = false; resetForm(store) }}
                 class="border border-border text-text-secondary font-mono text-xs px-5 py-2.5 rounded-lg hover:border-border-hover"
               >
                 CANCEL
               </button>
               <button
-                onClick={saveAutoDJ}
+                onClick={() => { void saveAutoDJ(store) }}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-wider px-5 py-2.5 rounded-lg"
               >
                 {editingMount.value ? 'SAVE' : 'CREATE'}
