@@ -51,3 +51,29 @@ func TestHealthMonitorDetectsStateChange(t *testing.T) {
 		t.Fatalf("expected Degraded, got %v", gotEvent.NewStatus)
 	}
 }
+
+func TestHealthMonitorRecordsDiagnosticsOnStateChange(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/diagnostic-health")
+	s.LastDataReceived = time.Now().Add(-45 * time.Second)
+
+	hm := NewHealthMonitor(r)
+	hm.check()
+
+	diag, ok := r.Diagnostics.Current("/diagnostic-health")
+	if !ok {
+		t.Fatal("expected health diagnostic")
+	}
+	if diag.Status != DiagnosticStatusDead {
+		t.Fatalf("expected dead diagnostic, got %q", diag.Status)
+	}
+	if diag.Class != DiagnosticClassHealthDead {
+		t.Fatalf("expected health_dead class, got %q", diag.Class)
+	}
+	if diag.Actor != DiagnosticActorHealthMonitor {
+		t.Fatalf("expected health monitor actor, got %q", diag.Actor)
+	}
+	if diag.Reason == "" {
+		t.Fatal("expected diagnostic reason")
+	}
+}
