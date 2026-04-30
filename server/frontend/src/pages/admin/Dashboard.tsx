@@ -14,6 +14,8 @@ const stats = signal<StatsEvent>({
   bandwidth: 0,
   bandwidth_in: 0,
   bandwidth_out: 0,
+  bytes_in: 0,
+  bytes_out: 0,
   uptime: 0,
   goroutines: 0,
   memory: 0,
@@ -52,10 +54,11 @@ function formatLabel(ct: string): string {
   return lower.toUpperCase()
 }
 
-function formatBandwidth(bytesPerSec: number): string {
-  if (bytesPerSec < 1024) return `${bytesPerSec} B/s`
-  if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
-  return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`
+  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
+  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`
+  return `${(bytes / 1073741824).toFixed(1)} GB`
 }
 
 export function Dashboard() {
@@ -122,14 +125,14 @@ export function Dashboard() {
           subtitle="active / total"
         />
         <StatCard
-          label="Inbound"
-          value={formatBandwidth(stats.value.bandwidth_in || 0)}
-          subtitle="from sources"
+          label="Inbound Total"
+          value={formatBytes(stats.value.bytes_in || 0)}
+          subtitle="received since start"
         />
         <StatCard
-          label="Outbound"
-          value={formatBandwidth(stats.value.bandwidth_out || stats.value.bandwidth || 0)}
-          subtitle="to listeners"
+          label="Outbound Total"
+          value={formatBytes(stats.value.bytes_out || 0)}
+          subtitle="sent since start"
         />
         <StatCard
           label="Uptime"
@@ -172,7 +175,7 @@ export function Dashboard() {
       </div>
 
       {/* Streams table */}
-      <div class="rounded-lg border border-border bg-surface-raised overflow-hidden">
+      <div class="admin-table-shell bg-surface-raised">
         <div class="px-4 py-3 border-b border-border">
           <span class="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
             Active Streams
@@ -183,22 +186,23 @@ export function Dashboard() {
             No streams connected
           </div>
         ) : (
-          <table class="w-full">
-            <thead>
-              <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
-                <th class="px-4 py-2 font-normal">Status</th>
-                <th class="px-4 py-2 font-normal">Mount</th>
-                <th class="px-4 py-2 font-normal">Format</th>
-                <th class="px-4 py-2 font-normal">Listeners</th>
-                <th class="px-4 py-2 font-normal">Health</th>
-              </tr>
-            </thead>
-            <tbody>
-              {streams.value.map((stream) => (
-                <tr
-                  key={stream.mount}
-                  class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
-                >
+          <div class="admin-table-scroll">
+            <table class="w-full min-w-[700px]">
+              <thead>
+                <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
+                  <th class="px-4 py-2 font-normal">Status</th>
+                  <th class="px-4 py-2 font-normal">Mount</th>
+                  <th class="px-4 py-2 font-normal">Format</th>
+                  <th class="px-4 py-2 font-normal">Listeners</th>
+                  <th class="px-4 py-2 font-normal">Health</th>
+                </tr>
+              </thead>
+              <tbody>
+                {streams.value.map((stream) => (
+                  <tr
+                    key={stream.mount}
+                    class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
+                  >
                   {/* Status dot */}
                   <td class="px-4 py-3">
                     <span
@@ -290,10 +294,11 @@ export function Dashboard() {
                       </span>
                     </div>
                   </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
 

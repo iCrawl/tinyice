@@ -41,7 +41,7 @@ func TestNewServerWiresAutoDJRuntimeRegistry(t *testing.T) {
 		t.Fatalf("write wav fixture: %v", err)
 	}
 
-	streamer, err := s.StreamerM.StartStreamer("AutoDJ", "/auto", dir, true, "mp3", 128, true, []string{wavPath}, false, "", "", true, "", "", 0)
+	streamer, err := s.StreamerM.StartStreamer("AutoDJ", "/auto", dir, true, "mp3", 128, true, []string{wavPath}, false, "", "", true, "", "", 0, "", 0)
 	if err != nil {
 		t.Fatalf("StartStreamer: %v", err)
 	}

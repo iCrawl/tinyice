@@ -74,6 +74,8 @@ export interface StatsEvent {
   bandwidth: number
   bandwidth_in: number
   bandwidth_out: number
+  bytes_in: number
+  bytes_out: number
   uptime: number
   goroutines: number
   memory: number

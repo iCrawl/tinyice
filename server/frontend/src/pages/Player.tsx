@@ -636,7 +636,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
                 class="absolute inset-0 flex items-center justify-center group"
                 aria-label="Play"
               >
-                <span class="w-20 h-20 rounded-full bg-accent/90 flex items-center justify-center shadow-[0_0_32px_rgba(255,102,0,0.45)] group-hover:scale-105 transition-transform">
+                <span class="w-20 h-20 rounded-full bg-accent/90 flex items-center justify-center shadow-[0_0_32px_rgba(var(--color-accent-rgb),0.45)] group-hover:scale-105 transition-transform">
                   <svg class="w-10 h-10 text-surface-base ml-1" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M8 5v14l11-7z" />
                   </svg>
@@ -710,7 +710,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -60%)',
-          background: 'radial-gradient(ellipse, rgba(255,102,0,0.08) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse, rgba(var(--color-accent-rgb), 0.08) 0%, transparent 70%)',
         }}
       />
 
@@ -748,7 +748,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
         {/* Play / Pause — radio only needs this */}
         <button
           onClick={playing.value ? handlePause : handlePlay}
-          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center shadow-[0_0_20px_rgba(255,102,0,0.3)] hover:shadow-[0_0_28px_rgba(255,102,0,0.45)] transition-shadow"
+          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center accent-shadow-control"
           aria-label={playing.value ? 'Pause' : 'Play'}
         >
           {playing.value ? (

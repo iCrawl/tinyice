@@ -3,38 +3,46 @@ package server
 import (
 	"testing"
 	"time"
+
+	"github.com/DatanoiseTV/tinyice/relay"
 )
 
-func TestParseInsightsDurationDefaultsTo24Hours(t *testing.T) {
-	duration, err := parseInsightsDuration("")
-	if err != nil {
-		t.Fatalf("expected empty range to default, got error: %v", err)
+func TestDownsampleHistoricalPassesThroughSmallSeries(t *testing.T) {
+	series := []relay.HistoricalStat{
+		{Timestamp: time.Unix(1, 0), Listeners: 2, BytesIn: 10, BytesOut: 20},
+		{Timestamp: time.Unix(2, 0), Listeners: 4, BytesIn: 30, BytesOut: 40},
 	}
-	if duration != 24*time.Hour {
-		t.Fatalf("expected default 24h duration, got %s", duration)
+
+	got := downsampleHistorical(series, 10)
+
+	if len(got) != len(series) {
+		t.Fatalf("expected pass-through series length %d, got %d", len(series), len(got))
+	}
+	if got[0] != series[0] || got[1] != series[1] {
+		t.Fatalf("expected pass-through series, got %#v", got)
 	}
 }
 
-func TestParseInsightsDurationSupportsDashboardRanges(t *testing.T) {
-	tests := map[string]time.Duration{
-		"1H":  1 * time.Hour,
-		"24H": 24 * time.Hour,
-		"7D":  7 * 24 * time.Hour,
+func TestDownsampleHistoricalBucketsListenersAndTraffic(t *testing.T) {
+	series := []relay.HistoricalStat{
+		{Timestamp: time.Unix(1, 0), Listeners: 2, BytesIn: 10, BytesOut: 100},
+		{Timestamp: time.Unix(2, 0), Listeners: 4, BytesIn: 20, BytesOut: 200},
+		{Timestamp: time.Unix(3, 0), Listeners: 6, BytesIn: 30, BytesOut: 300},
+		{Timestamp: time.Unix(4, 0), Listeners: 8, BytesIn: 40, BytesOut: 400},
 	}
 
-	for input, expected := range tests {
-		duration, err := parseInsightsDuration(input)
-		if err != nil {
-			t.Fatalf("expected %s to parse, got error: %v", input, err)
-		}
-		if duration != expected {
-			t.Fatalf("expected %s to map to %s, got %s", input, expected, duration)
-		}
-	}
-}
+	got := downsampleHistorical(series, 2)
 
-func TestParseInsightsDurationRejectsUnknownRanges(t *testing.T) {
-	if _, err := parseInsightsDuration("2H"); err == nil {
-		t.Fatal("expected invalid range to return an error")
+	if len(got) != 2 {
+		t.Fatalf("expected 2 buckets, got %d", len(got))
+	}
+	if got[0].Listeners != 3 || got[1].Listeners != 7 {
+		t.Fatalf("expected averaged listeners [3 7], got [%d %d]", got[0].Listeners, got[1].Listeners)
+	}
+	if got[0].BytesIn != 30 || got[0].BytesOut != 300 {
+		t.Fatalf("unexpected first bucket traffic: in=%d out=%d", got[0].BytesIn, got[0].BytesOut)
+	}
+	if got[1].BytesIn != 70 || got[1].BytesOut != 700 {
+		t.Fatalf("unexpected second bucket traffic: in=%d out=%d", got[1].BytesIn, got[1].BytesOut)
 	}
 }

@@ -12,7 +12,7 @@ import (
 func TestStreamerManagerSetRuntimeRegistryPropagatesToExistingStreamers(t *testing.T) {
 	r := NewRelay(false, nil)
 	sm := NewStreamerManager(r, &config.Config{})
-	streamer, err := sm.StartStreamer("AutoDJ", "/auto", t.TempDir(), false, "mp3", 128, true, nil, false, "", "", true, "", "", 0)
+	streamer, err := sm.StartStreamer("AutoDJ", "/auto", t.TempDir(), false, "mp3", 128, true, nil, false, "", "", true, "", "", 0, "", 0)
 	if err != nil {
 		t.Fatalf("StartStreamer: %v", err)
 	}
