@@ -190,6 +190,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 
 	// Ensure default tenant exists for backward compatibility
 	srv.TenantM.GetOrCreateDefaultTenant()
+	srv.RuntimeRegistry.SetTenantManager(srv.TenantM)
 	srv.StreamerM.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.RelayM.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.WebRTCM.SetRuntimeRegistry(srv.RuntimeRegistry)
@@ -387,6 +388,7 @@ func (s *Server) setupRoutes() *http.ServeMux {
 		}
 	})
 	mux.HandleFunc("/api/streams/kick", s.apiKickStream)
+	mux.HandleFunc("/api/streams/diagnostics", s.apiGetStreamDiagnostics)
 	mux.HandleFunc("/api/listeners", s.apiGetListeners)
 	mux.HandleFunc("/api/listeners/disconnect", s.apiDisconnectListener)
 	mux.HandleFunc("/api/listeners/move", s.apiMoveListener)

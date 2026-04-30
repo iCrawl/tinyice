@@ -45,6 +45,18 @@ export interface StreamInfo {
   has_video?: boolean
 }
 
+export interface ListenerInfo {
+  id: string
+  protocol: 'http' | 'webrtc'
+  requested_mount: string
+  current_mount: string
+  remote_addr: string
+  user_agent: string
+  connected_at: number
+  duration_seconds: number
+  last_stream_switch_at?: number
+}
+
 // SSE Events
 export interface StatsEvent {
   listeners: number

@@ -21,7 +21,7 @@ func TestAPIGetStreamsIncludesDiagnosticsForOfflineConfiguredMount(t *testing.T)
 		Class:     relay.DiagnosticClassHealthDead,
 		Reason:    "no data for 91s",
 		Actor:     relay.DiagnosticActorHealthMonitor,
-		Timestamp: time.Unix(1_700_000_000, 0),
+		Timestamp: time.Now(),
 	})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/streams", nil)
@@ -60,6 +60,97 @@ func TestAPIGetStreamsIncludesDiagnosticsForOfflineConfiguredMount(t *testing.T)
 	history, ok := offline["history"].([]any)
 	if !ok || len(history) != 1 {
 		t.Fatalf("expected one history entry, got %#v", offline["history"])
+	}
+}
+
+func TestAPIGetStreamsLoadsPersistedDiagnosticsWithoutCurrentSnapshot(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	hm, err := relay.NewHistoryManager(t.TempDir() + "/history.db")
+	if err != nil {
+		t.Fatalf("NewHistoryManager: %v", err)
+	}
+	s.Relay.History = hm
+	s.Relay.Diagnostics = relay.NewDiagnosticsStoreWithHistory(10, hm)
+	s.Config.Mounts["/offline"] = "hashed"
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"]}
+	s.Relay.History.RecordDiagnostic(relay.DiagnosticUpdate{
+		Mount:     "/offline",
+		Status:    relay.DiagnosticStatusDead,
+		Class:     relay.DiagnosticClassHealthDead,
+		Reason:    "no data for 91s",
+		Actor:     relay.DiagnosticActorHealthMonitor,
+		Timestamp: time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/streams", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetStreams(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+
+	var offline map[string]any
+	for _, stream := range payload {
+		if stream["mount"] == "/offline" {
+			offline = stream
+			break
+		}
+	}
+	if offline == nil {
+		t.Fatalf("expected /offline stream entry, got %#v", payload)
+	}
+	if offline["status"] != "dead" {
+		t.Fatalf("expected dead status from persisted history, got %#v", offline["status"])
+	}
+	if offline["status_reason"] != "no data for 91s" {
+		t.Fatalf("expected persisted reason field, got %#v", offline["status_reason"])
+	}
+	historyEntries, ok := offline["history"].([]any)
+	if !ok || len(historyEntries) != 1 {
+		t.Fatalf("expected one persisted history entry, got %#v", offline["history"])
+	}
+}
+
+func TestAPIGetStreamDiagnosticsReturnsPersistedHistory(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	hm, err := relay.NewHistoryManager(t.TempDir() + "/history.db")
+	if err != nil {
+		t.Fatalf("NewHistoryManager: %v", err)
+	}
+	s.Relay.History = hm
+	s.Relay.Diagnostics = relay.NewDiagnosticsStoreWithHistory(10, hm)
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"]}
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     "/live",
+		Status:    relay.DiagnosticStatusError,
+		Class:     relay.DiagnosticClassSongCommandEmpty,
+		Reason:    "song_command returned empty output",
+		Actor:     relay.DiagnosticActorAutoDJ,
+		Timestamp: time.Now(),
+	})
+
+	req := httptest.NewRequest(http.MethodGet, "/api/streams/diagnostics?mount=/live", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetStreamDiagnostics(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	if len(payload) != 1 || payload[0]["class"] != "song_command_empty_output" {
+		t.Fatalf("expected persisted diagnostic class, got %#v", payload)
 	}
 }
 

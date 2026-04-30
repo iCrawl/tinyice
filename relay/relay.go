@@ -58,7 +58,7 @@ func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
 		LowLatency:  lowLatency,
 		History:     history,
 		Listeners:   NewListenerRegistry(),
-		Diagnostics: NewDiagnosticsStore(10),
+		Diagnostics: NewDiagnosticsStoreWithHistory(10, history),
 	}
 }
 

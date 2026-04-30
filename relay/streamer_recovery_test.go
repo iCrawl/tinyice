@@ -295,3 +295,19 @@ func TestRecoverDeadSongCommandMountRestartsNonManualStoppedMount(t *testing.T) 
 		t.Fatalf("expected recovery to restore playing state, got %v", state)
 	}
 }
+
+func TestSongCommandErrorClassification(t *testing.T) {
+	if got := classifySongCommandError(errors.New("song command returned empty output")); got != DiagnosticClassSongCommandEmpty {
+		t.Fatalf("expected empty output class, got %q", got)
+	}
+	if got := classifySongCommandError(errors.New("song command returned invalid file \"/tmp/bad\": boom")); got != DiagnosticClassSongCommandInvalid {
+		t.Fatalf("expected invalid file class, got %q", got)
+	}
+	if got := songCommandReason(errors.New("exec failed")); got != "song_command failed" {
+		t.Fatalf("expected generic reason, got %q", got)
+	}
+	details := songCommandDiagnosticDetails(errors.New("song command returned invalid file \"/tmp/bad\": boom"))
+	if details["path"] != "/tmp/bad" {
+		t.Fatalf("expected invalid file path detail, got %#v", details)
+	}
+}

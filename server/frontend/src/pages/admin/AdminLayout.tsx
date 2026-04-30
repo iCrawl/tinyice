@@ -4,6 +4,7 @@ import { Sidebar } from '../../components/Sidebar'
 import { Toasts } from '../../components/Toasts'
 import { Dashboard } from './Dashboard'
 import { Streams } from './Streams'
+import { Listeners } from './Listeners'
 import { Relays } from './Relays'
 import { Transcoders } from './Transcoders'
 import { Users } from './Users'
@@ -25,6 +26,7 @@ export function AdminLayout() {
         <Router onChange={(e) => setPath(e.url)}>
           <Route path="/admin" component={Dashboard} />
           <Route path="/admin/streams" component={Streams} />
+          <Route path="/admin/listeners" component={Listeners} />
           <Route path="/admin/autodj" component={AutoDJ} />
           <Route path="/admin/golive" component={GoLive} />
           <Route path="/admin/relays" component={Relays} />

@@ -1028,6 +1028,18 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 					filePos = -1
 				} else {
 					logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
+					if s.relay != nil && s.OutputMount != "" {
+						s.relay.Diagnostics.Record(DiagnosticUpdate{
+							Mount:     s.OutputMount,
+							Status:    DiagnosticStatusError,
+							Class:     classifySongCommandError(err),
+							Reason:    songCommandReason(err),
+							Error:     err.Error(),
+							Actor:     DiagnosticActorAutoDJ,
+							Timestamp: time.Now(),
+							Details:   songCommandDiagnosticDetails(err),
+						})
+					}
 				}
 				s.mu.Lock()
 				// If command failed, try playlist as fallback
@@ -1077,6 +1089,16 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			s.mu.Unlock()
 
 			if filePath == "" {
+				if s.SongCommand == "" && s.relay != nil && s.OutputMount != "" {
+					s.relay.Diagnostics.Record(DiagnosticUpdate{
+						Mount:     s.OutputMount,
+						Status:    DiagnosticStatusStopped,
+						Class:     DiagnosticClassPlaylistExhausted,
+						Reason:    "playlist exhausted",
+						Actor:     DiagnosticActorAutoDJ,
+						Timestamp: time.Now(),
+					})
+				}
 				outputSession.SetSource(silencePCMSource{})
 				time.Sleep(1 * time.Second)
 				continue
@@ -1289,6 +1311,51 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	case <-source.Done():
 		return nil
 	}
+}
+
+func classifySongCommandError(err error) DiagnosticClass {
+	if err == nil {
+		return DiagnosticClassSongCommandFailure
+	}
+
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "empty output"):
+		return DiagnosticClassSongCommandEmpty
+	case strings.Contains(msg, "invalid file"):
+		return DiagnosticClassSongCommandInvalid
+	default:
+		return DiagnosticClassSongCommandFailure
+	}
+}
+
+func songCommandReason(err error) string {
+	switch classifySongCommandError(err) {
+	case DiagnosticClassSongCommandEmpty:
+		return "song_command returned empty output"
+	case DiagnosticClassSongCommandInvalid:
+		return "song_command returned invalid file"
+	default:
+		return "song_command failed"
+	}
+}
+
+func songCommandDiagnosticDetails(err error) map[string]string {
+	if err == nil || classifySongCommandError(err) != DiagnosticClassSongCommandInvalid {
+		return nil
+	}
+
+	msg := err.Error()
+	start := strings.Index(msg, "\"")
+	if start < 0 {
+		return nil
+	}
+	rest := msg[start+1:]
+	end := strings.Index(rest, "\"")
+	if end < 0 {
+		return nil
+	}
+	return map[string]string{"path": rest[:end]}
 }
 
 // gainReader multiplies every S16LE stereo sample it passes through by a

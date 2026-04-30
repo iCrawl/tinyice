@@ -161,6 +161,18 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
 		diag, ok := r.Diagnostics.Current(mount)
 		if !ok {
+			if r.History != nil {
+				history := r.History.GetDiagnostics(mount, 10)
+				if len(history) > 0 {
+					latest := history[0]
+					info.Status = string(latest.Status)
+					info.StatusClass = string(latest.Class)
+					info.StatusReason = latest.Reason
+					info.LastError = latest.Error
+					info.StatusUpdatedAt = latest.Timestamp.Unix()
+					info.History = history
+				}
+			}
 			return
 		}
 		info.Status = string(diag.Status)
@@ -291,6 +303,34 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		result = []streamInfo{}
 	}
 	jsonResponse(w, result)
+}
+
+func (s *Server) apiGetStreamDiagnostics(w http.ResponseWriter, r *http.Request) {
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
+	if s.Relay.History == nil {
+		jsonError(w, "History disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	limit := 10
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		fmt.Sscanf(raw, "%d", &limit)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	jsonResponse(w, s.Relay.History.GetDiagnostics(mount, limit))
 }
 
 func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {

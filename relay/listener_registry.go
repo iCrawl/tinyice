@@ -70,6 +70,24 @@ func (l *Listener) CurrentMountName() string {
 	return l.CurrentMount
 }
 
+func (l *Listener) RequestedMountName() string {
+	l.mu.RLock()
+	defer l.mu.RUnlock()
+	return l.RequestedMount
+}
+
+func (l *Listener) SetCurrentMount(mount string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.CurrentMount = mount
+}
+
+func (l *Listener) SetRequestedMount(mount string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.RequestedMount = mount
+}
+
 type ListenerRegistry struct {
 	mu        sync.RWMutex
 	listeners map[string]*Listener
@@ -132,6 +150,17 @@ func (r *ListenerRegistry) CountForMount(mount string) int {
 	return len(r.byMount[mount])
 }
 
+func (r *ListenerRegistry) Get(id string) (ListenerSnapshot, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	l, ok := r.listeners[id]
+	if !ok {
+		return ListenerSnapshot{}, false
+	}
+	return l.snapshotAt(time.Now()), true
+}
+
 func (r *ListenerRegistry) List() []ListenerSnapshot {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -145,6 +174,32 @@ func (r *ListenerRegistry) List() []ListenerSnapshot {
 		return out[i].ConnectedAt > out[j].ConnectedAt
 	})
 	return out
+}
+
+func (r *ListenerRegistry) Move(id, target string, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	l, ok := r.listeners[id]
+	if !ok {
+		return errors.New("listener not found")
+	}
+	currentMount := l.CurrentMountName()
+	if mountListeners := r.byMount[currentMount]; mountListeners != nil {
+		delete(mountListeners, id)
+		if len(mountListeners) == 0 {
+			delete(r.byMount, currentMount)
+		}
+	}
+	if r.byMount[target] == nil {
+		r.byMount[target] = make(map[string]*Listener)
+	}
+	l.mu.Lock()
+	l.CurrentMount = target
+	l.LastStreamSwitchAt = now
+	l.mu.Unlock()
+	r.byMount[target][id] = l
+	return nil
 }
 
 func (r *ListenerRegistry) RequestMove(id, target string) error {

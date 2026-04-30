@@ -3,6 +3,8 @@ package relay
 import (
 	"sync"
 	"time"
+
+	"github.com/DatanoiseTV/tinyice/logger"
 )
 
 type DiagnosticStatus string
@@ -19,17 +21,21 @@ const (
 )
 
 const (
-	DiagnosticClassManualStop        DiagnosticClass = "manual_stop"
-	DiagnosticClassAutomaticStop     DiagnosticClass = "automatic_stop"
-	DiagnosticClassSourceDisconnect  DiagnosticClass = "source_disconnect"
-	DiagnosticClassHealthDegraded    DiagnosticClass = "health_degraded"
-	DiagnosticClassHealthDead        DiagnosticClass = "health_dead"
-	DiagnosticClassHealthRecovered   DiagnosticClass = "health_recovered"
-	DiagnosticClassStartupFailure    DiagnosticClass = "startup_failure"
-	DiagnosticClassPlaybackStarted   DiagnosticClass = "playback_started"
-	DiagnosticClassRecoveryStarted   DiagnosticClass = "recovery_started"
-	DiagnosticClassRecoverySucceeded DiagnosticClass = "recovery_succeeded"
-	DiagnosticClassRecoveryFailed    DiagnosticClass = "recovery_failed"
+	DiagnosticClassManualStop         DiagnosticClass = "manual_stop"
+	DiagnosticClassAutomaticStop      DiagnosticClass = "automatic_stop"
+	DiagnosticClassSourceDisconnect   DiagnosticClass = "source_disconnect"
+	DiagnosticClassHealthDegraded     DiagnosticClass = "health_degraded"
+	DiagnosticClassHealthDead         DiagnosticClass = "health_dead"
+	DiagnosticClassHealthRecovered    DiagnosticClass = "health_recovered"
+	DiagnosticClassSongCommandFailure DiagnosticClass = "song_command_failure"
+	DiagnosticClassSongCommandEmpty   DiagnosticClass = "song_command_empty_output"
+	DiagnosticClassSongCommandInvalid DiagnosticClass = "song_command_invalid_file"
+	DiagnosticClassPlaylistExhausted  DiagnosticClass = "playlist_exhausted"
+	DiagnosticClassStartupFailure     DiagnosticClass = "startup_failure"
+	DiagnosticClassPlaybackStarted    DiagnosticClass = "playback_started"
+	DiagnosticClassRecoveryStarted    DiagnosticClass = "recovery_started"
+	DiagnosticClassRecoverySucceeded  DiagnosticClass = "recovery_succeeded"
+	DiagnosticClassRecoveryFailed     DiagnosticClass = "recovery_failed"
 )
 
 const (
@@ -84,15 +90,21 @@ type DiagnosticsStore struct {
 	mu           sync.RWMutex
 	historyLimit int
 	mounts       map[string]*MountDiagnostic
+	history      *HistoryManager
 }
 
 func NewDiagnosticsStore(historyLimit int) *DiagnosticsStore {
+	return NewDiagnosticsStoreWithHistory(historyLimit, nil)
+}
+
+func NewDiagnosticsStoreWithHistory(historyLimit int, history *HistoryManager) *DiagnosticsStore {
 	if historyLimit <= 0 {
 		historyLimit = 10
 	}
 	return &DiagnosticsStore{
 		historyLimit: historyLimit,
 		mounts:       make(map[string]*MountDiagnostic),
+		history:      history,
 	}
 }
 
@@ -138,6 +150,31 @@ func (d *DiagnosticsStore) Record(update DiagnosticUpdate) {
 	current.History = append(current.History, entry)
 	if len(current.History) > d.historyLimit {
 		current.History = append([]DiagnosticEntry(nil), current.History[len(current.History)-d.historyLimit:]...)
+	}
+
+	if d.history != nil {
+		d.history.RecordDiagnostic(update)
+	}
+	if logger.L != nil {
+		fields := []interface{}{
+			"mount", update.Mount,
+			"status", update.Status,
+			"class", update.Class,
+			"reason", update.Reason,
+			"actor", update.Actor,
+		}
+		if update.Error != "" {
+			fields = append(fields, "error", update.Error)
+		}
+		if update.LastRecoveryResult != "" {
+			fields = append(fields, "last_recovery_result", update.LastRecoveryResult)
+		}
+		switch update.Status {
+		case DiagnosticStatusDead, DiagnosticStatusError:
+			logger.L.Warnw("Stream diagnostic transition", fields...)
+		default:
+			logger.L.Infow("Stream diagnostic transition", fields...)
+		}
 	}
 }
 

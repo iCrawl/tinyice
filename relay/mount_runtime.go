@@ -35,9 +35,10 @@ type MountRuntime struct {
 }
 
 type RuntimeRegistry struct {
-	relay    *Relay
-	runtimes map[string]*MountRuntime
-	mu       sync.RWMutex
+	relay         *Relay
+	tenantManager *TenantManager
+	runtimes      map[string]*MountRuntime
+	mu            sync.RWMutex
 }
 
 func NewRuntimeRegistry(r *Relay) *RuntimeRegistry {
@@ -45,6 +46,12 @@ func NewRuntimeRegistry(r *Relay) *RuntimeRegistry {
 		relay:    r,
 		runtimes: make(map[string]*MountRuntime),
 	}
+}
+
+func (rr *RuntimeRegistry) SetTenantManager(tm *TenantManager) {
+	rr.mu.Lock()
+	defer rr.mu.Unlock()
+	rr.tenantManager = tm
 }
 
 func (rr *RuntimeRegistry) GetOrCreate(mount string) *MountRuntime {
@@ -81,10 +88,20 @@ func (rr *RuntimeRegistry) AttachSource(mount string, src MountSource, tenantID 
 
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
+	if rr.tenantManager != nil && rt.TenantID != "" && rt.TenantID != tenantID {
+		if tenant := rr.tenantManager.GetTenant(rt.TenantID); tenant != nil {
+			tenant.DetachMount(mount)
+		}
+	}
 	rt.Source = src
 	rt.TenantID = tenantID
 	rt.UpdatedAt = time.Now()
 	rt.LastActive = rt.UpdatedAt
+	if rr.tenantManager != nil && tenantID != "" {
+		if tenant := rr.tenantManager.GetTenant(tenantID); tenant != nil {
+			tenant.AttachMount(mount)
+		}
+	}
 }
 
 func (rr *RuntimeRegistry) AttachOutput(mount string, output MountOutput) {
@@ -108,5 +125,10 @@ func (rr *RuntimeRegistry) DetachOutput(mount string, output MountOutput) {
 func (rr *RuntimeRegistry) Remove(mount string) {
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
+	if rt, ok := rr.runtimes[mount]; ok && rr.tenantManager != nil && rt.TenantID != "" {
+		if tenant := rr.tenantManager.GetTenant(rt.TenantID); tenant != nil {
+			tenant.DetachMount(mount)
+		}
+	}
 	delete(rr.runtimes, mount)
 }

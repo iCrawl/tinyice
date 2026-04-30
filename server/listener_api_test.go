@@ -161,6 +161,73 @@ func TestAPIMoveListenerQueuesHTTPMoveCommand(t *testing.T) {
 	}
 }
 
+func TestAPIMoveListenerSwitchesHTTPPlaybackMount(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}
+	live := s.Relay.GetOrCreateStream("/live")
+	live.UpdateMetadata("Live", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+	backup := s.Relay.GetOrCreateStream("/backup")
+	backup.UpdateMetadata("Backup", "Desc", "Genre", "", "128", "audio/mpeg", true, true)
+
+	req := httptest.NewRequest(http.MethodGet, "/live", nil)
+	req.RemoteAddr = "127.0.0.1:9010"
+	rr := httptest.NewRecorder()
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleListener(rr, req)
+	}()
+
+	var listenerID string
+	deadline := time.After(time.Second)
+	for listenerID == "" {
+		select {
+		case <-deadline:
+			t.Fatal("listener never registered")
+		default:
+			listeners := s.Relay.Listeners.List()
+			if len(listeners) > 0 {
+				listenerID = listeners[0].ID
+				break
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	moveReq := httptest.NewRequest(http.MethodPost, "/api/listeners/move", strings.NewReader(`{"id":"`+listenerID+`","target_mount":"/backup"}`))
+	moveReq.Header.Set("Content-Type", "application/json")
+	moveReq.Header.Set("X-CSRF-Token", "csrf-ok")
+	moveReq.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	moveRR := httptest.NewRecorder()
+
+	s.apiMoveListener(moveRR, moveReq)
+	if moveRR.Code != http.StatusOK {
+		t.Fatalf("expected move 200, got %d: %s", moveRR.Code, moveRR.Body.String())
+	}
+
+	deadline = time.After(time.Second)
+	for {
+		snap, ok := s.Relay.Listeners.Get(listenerID)
+		if ok && snap.CurrentMount == "/backup" && snap.RequestedMount == "/backup" {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("listener did not move to backup, got %#v", s.Relay.Listeners.List())
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	_ = s.Relay.Listeners.Disconnect(listenerID)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("listener handler did not exit after cleanup")
+	}
+}
+
 func TestAPIMoveListenerRejectsWebRTCMoves(t *testing.T) {
 	s := newListenerAPITestServer(t)
 	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"], CSRFToken: "csrf-ok"}
