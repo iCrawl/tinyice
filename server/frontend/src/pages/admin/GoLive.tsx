@@ -2,22 +2,51 @@ import { useEffect, useRef, useCallback } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import type { AdminData } from '@/types'
 
-// ── State signals ──────────────────────────────────────────────
-const broadcasting = signal(false)
-const status = signal<'ready' | 'connecting' | 'live'>('ready')
-const selectedMount = signal('/live')
-const selectedDeviceId = signal('')
-const audioDevices = signal<MediaDeviceInfo[]>([])
-const audioPermission = signal<'prompt' | 'granted' | 'denied'>('prompt')
-const latency = signal(0)
-const durationSec = signal(0)
-const connectionFormat = signal('')
-const levelL = signal(0)
-const levelR = signal(0)
-const headroomL = signal(-Infinity)
-const headroomR = signal(-Infinity)
-const peakL = signal(0)
-const peakR = signal(0)
+type GoLiveStore = ReturnType<typeof createGoLiveStore>
+
+function createGoLiveStore() {
+  const broadcasting = signal(false)
+  const status = signal<'ready' | 'connecting' | 'live'>('ready')
+  const selectedMount = signal('/live')
+  const selectedDeviceId = signal('')
+  const audioDevices = signal<MediaDeviceInfo[]>([])
+  const audioPermission = signal<'prompt' | 'granted' | 'denied'>('prompt')
+  const latency = signal(0)
+  const durationSec = signal(0)
+  const connectionFormat = signal('')
+  const levelL = signal(0)
+  const levelR = signal(0)
+  const headroomL = signal(-Infinity)
+  const headroomR = signal(-Infinity)
+  const peakL = signal(0)
+  const peakR = signal(0)
+
+  return {
+    broadcasting,
+    status,
+    selectedMount,
+    selectedDeviceId,
+    audioDevices,
+    audioPermission,
+    latency,
+    durationSec,
+    connectionFormat,
+    levelL,
+    levelR,
+    headroomL,
+    headroomR,
+    peakL,
+    peakR,
+  }
+}
+
+function useGoLiveStore() {
+  const storeRef = useRef<GoLiveStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createGoLiveStore()
+  }
+  return storeRef.current
+}
 
 function getMounts(): string[] {
   const data = window.__TINYICE__ as AdminData | undefined
@@ -33,6 +62,25 @@ function formatDuration(sec: number): string {
 }
 
 export function GoLive() {
+  const store = useGoLiveStore()
+  const {
+    broadcasting,
+    status,
+    selectedMount,
+    selectedDeviceId,
+    audioDevices,
+    audioPermission,
+    latency,
+    durationSec,
+    connectionFormat,
+    levelL,
+    levelR,
+    headroomL,
+    headroomR,
+    peakL,
+    peakR,
+  } = store
+
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -62,9 +110,7 @@ export function GoLive() {
 
   async function requestAudioPermission() {
     try {
-      // getUserMedia triggers the browser permission prompt and unlocks device labels
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
-      // Stop the temporary stream immediately — we just needed the permission
       stream.getTracks().forEach((t) => t.stop())
       audioPermission.value = 'granted'
       await enumerateAudioDevices()
@@ -72,36 +118,6 @@ export function GoLive() {
       audioPermission.value = 'denied'
     }
   }
-
-  useEffect(() => {
-    selectedMount.value = getMounts()[0] || '/live'
-
-    // Check if permission is already granted (e.g. from a previous visit)
-    if (navigator.permissions) {
-      navigator.permissions.query({ name: 'microphone' as PermissionName }).then((result) => {
-        if (result.state === 'granted') {
-          audioPermission.value = 'granted'
-          enumerateAudioDevices()
-        } else {
-          audioPermission.value = result.state === 'denied' ? 'denied' : 'prompt'
-        }
-      }).catch(() => {
-        // permissions.query not supported for microphone in some browsers — try enumerate
-        enumerateAudioDevices().then(() => {
-          // If we got labels, permission was already granted
-          if (audioDevices.value.some((d) => d.label)) {
-            audioPermission.value = 'granted'
-          }
-        })
-      })
-    } else {
-      enumerateAudioDevices()
-    }
-
-    return () => {
-      stopBroadcast()
-    }
-  }, [])
 
   const stopBroadcast = useCallback(() => {
     if (pcRef.current) {
@@ -140,11 +156,37 @@ export function GoLive() {
     peakR.value = 0
   }, [])
 
+  useEffect(() => {
+    selectedMount.value = getMounts()[0] || '/live'
+
+    if (navigator.permissions) {
+      navigator.permissions.query({ name: 'microphone' as PermissionName }).then((result) => {
+        if (result.state === 'granted') {
+          audioPermission.value = 'granted'
+          void enumerateAudioDevices()
+        } else {
+          audioPermission.value = result.state === 'denied' ? 'denied' : 'prompt'
+        }
+      }).catch(() => {
+        void enumerateAudioDevices().then(() => {
+          if (audioDevices.value.some((d) => d.label)) {
+            audioPermission.value = 'granted'
+          }
+        })
+      })
+    } else {
+      void enumerateAudioDevices()
+    }
+
+    return () => {
+      stopBroadcast()
+    }
+  }, [stopBroadcast])
+
   const startBroadcast = useCallback(async () => {
     try {
       status.value = 'connecting'
 
-      // Capture mic
       const constraints: MediaStreamConstraints = {
         audio: selectedDeviceId.value
           ? { deviceId: { exact: selectedDeviceId.value } }
@@ -153,19 +195,16 @@ export function GoLive() {
       const stream = await navigator.mediaDevices.getUserMedia(constraints)
       streamRef.current = stream
 
-      // Set up Web Audio for analysis
       const audioCtx = new AudioContext()
       audioCtxRef.current = audioCtx
       const source = audioCtx.createMediaStreamSource(stream)
 
-      // Main analyser for spectrum
       const analyser = audioCtx.createAnalyser()
       analyser.fftSize = 64
       analyser.smoothingTimeConstant = 0.8
       source.connect(analyser)
       analyserRef.current = analyser
 
-      // Channel splitter for L/R levels
       const splitter = audioCtx.createChannelSplitter(2)
       source.connect(splitter)
       splitterRef.current = splitter
@@ -179,7 +218,6 @@ export function GoLive() {
       const analyserR = audioCtx.createAnalyser()
       analyserR.fftSize = 256
       analyserR.smoothingTimeConstant = 0.8
-      // If mono, channel 1 may not exist; connect channel 0 as fallback
       try {
         splitter.connect(analyserR, 1)
       } catch {
@@ -187,7 +225,6 @@ export function GoLive() {
       }
       analyserRRef.current = analyserR
 
-      // WebRTC peer connection
       const pc = new RTCPeerConnection({
         iceServers: [{ urls: 'stun:stun.l.google.com:19302' }],
       })
@@ -232,13 +269,11 @@ export function GoLive() {
       const answer = await res.json()
       await pc.setRemoteDescription(answer)
 
-      // Start visualization loop
       const freqData = new Uint8Array(analyser.frequencyBinCount)
       const timeLData = new Uint8Array(analyserL.fftSize)
       const timeRData = new Uint8Array(analyserR.fftSize)
 
       const tick = () => {
-        // Spectrum bars
         analyser.getByteFrequencyData(freqData)
         if (barsRef.current) {
           const bars = barsRef.current.children
@@ -248,7 +283,6 @@ export function GoLive() {
           }
         }
 
-        // Level meters
         analyserL.getByteTimeDomainData(timeLData)
         analyserR.getByteTimeDomainData(timeRData)
 
@@ -265,11 +299,9 @@ export function GoLive() {
         levelL.value = Math.min(1, rmsL * 3)
         levelR.value = Math.min(1, rmsR * 3)
 
-        // Headroom (dB before clipping)
         headroomL.value = rmsL > 0 ? 20 * Math.log10(1 / rmsL) : -Infinity
         headroomR.value = rmsR > 0 ? 20 * Math.log10(1 / rmsR) : -Infinity
 
-        // Peak hold with slow decay
         if (levelL.value >= peakLVal.current) {
           peakLVal.current = levelL.value
           peakLDecay.current = 0
@@ -300,13 +332,11 @@ export function GoLive() {
       }
       rafRef.current = requestAnimationFrame(tick)
 
-      // Duration timer
       durationSec.value = 0
       timerRef.current = setInterval(() => {
         durationSec.value++
-        // Rough latency from stats
         if (pcRef.current) {
-          pcRef.current.getStats().then((stats) => {
+          void pcRef.current.getStats().then((stats) => {
             stats.forEach((report) => {
               if (report.type === 'candidate-pair' && report.currentRoundTripTime) {
                 latency.value = Math.round(report.currentRoundTripTime * 1000)
@@ -325,9 +355,9 @@ export function GoLive() {
     if (broadcasting.value || status.value === 'connecting') {
       stopBroadcast()
     } else {
-      startBroadcast()
+      void startBroadcast()
     }
-  }, [startBroadcast, stopBroadcast])
+  }, [broadcasting.value, startBroadcast, status.value, stopBroadcast])
 
   const mounts = getMounts()
   const isLive = status.value === 'live'
@@ -336,13 +366,11 @@ export function GoLive() {
 
   return (
     <div class="p-7 max-w-2xl mx-auto">
-      {/* Header */}
       <div class="mb-6">
         <div class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1">GO LIVE</div>
         <h1 class="text-xl font-heading font-bold text-text-primary">Browser Broadcast</h1>
       </div>
 
-      {/* Status badge */}
       <div class="flex items-center gap-3 mb-6">
         <span
           class={`inline-flex items-center gap-2 px-4 py-2 rounded-full font-mono text-sm font-bold tracking-wider uppercase ${
@@ -363,7 +391,6 @@ export function GoLive() {
         </span>
       </div>
 
-      {/* Mount selector */}
       <div class="space-y-4 mb-6">
         <div>
           <label class="block font-mono text-[9px] tracking-widest text-text-tertiary uppercase mb-2">
@@ -381,7 +408,6 @@ export function GoLive() {
           </select>
         </div>
 
-        {/* Input device selector */}
         <div>
           <label class="block font-mono text-[9px] tracking-widest text-text-tertiary uppercase mb-2">
             INPUT DEVICE
@@ -411,7 +437,7 @@ export function GoLive() {
             </div>
           ) : (
             <button
-              onClick={requestAudioPermission}
+              onClick={() => { void requestAudioPermission() }}
               class="w-full h-10 px-3 rounded-lg bg-accent/10 border border-accent/30 text-sm text-accent font-mono tracking-wider hover:bg-accent/20 transition-colors flex items-center justify-center gap-2"
             >
               <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -425,7 +451,6 @@ export function GoLive() {
         </div>
       </div>
 
-      {/* Spectrum analyzer */}
       <div class="mb-6">
         <label class="block font-mono text-[9px] tracking-widest text-text-tertiary uppercase mb-2">
           SPECTRUM
@@ -447,7 +472,6 @@ export function GoLive() {
         </div>
       </div>
 
-      {/* Level meters */}
       <div class="mb-6">
         <label class="block font-mono text-[9px] tracking-widest text-text-tertiary uppercase mb-2">
           LEVELS
@@ -456,16 +480,8 @@ export function GoLive() {
           <div class="flex items-center gap-3">
             <span class="font-mono text-[10px] text-text-tertiary w-3">L</span>
             <div class="flex-1 h-3 bg-surface-overlay rounded-full overflow-hidden relative">
-              <div
-                ref={levelLRef}
-                class="h-full bg-accent rounded-full transition-[width] duration-75"
-                style={{ width: '0%' }}
-              />
-              <div
-                ref={peakLRef}
-                class="absolute top-0 h-full w-[2px] bg-text-primary"
-                style={{ left: '0%', transition: 'left 0.05s linear' }}
-              />
+              <div ref={levelLRef} class="h-full bg-accent rounded-full transition-[width] duration-75" style={{ width: '0%' }} />
+              <div ref={peakLRef} class="absolute top-0 h-full w-[2px] bg-text-primary" style={{ left: '0%', transition: 'left 0.05s linear' }} />
             </div>
             <span
               class="font-mono text-[10px] w-20 text-right"
@@ -478,24 +494,14 @@ export function GoLive() {
                   : 'var(--color-text-tertiary)',
               }}
             >
-              {isLive && headroomL.value !== -Infinity
-                ? `${headroomL.value.toFixed(1)} dB`
-                : '-- dB'}
+              {isLive && headroomL.value !== -Infinity ? `${headroomL.value.toFixed(1)} dB` : '-- dB'}
             </span>
           </div>
           <div class="flex items-center gap-3">
             <span class="font-mono text-[10px] text-text-tertiary w-3">R</span>
             <div class="flex-1 h-3 bg-surface-overlay rounded-full overflow-hidden relative">
-              <div
-                ref={levelRRef}
-                class="h-full bg-accent rounded-full transition-[width] duration-75"
-                style={{ width: '0%' }}
-              />
-              <div
-                ref={peakRRef}
-                class="absolute top-0 h-full w-[2px] bg-text-primary"
-                style={{ left: '0%', transition: 'left 0.05s linear' }}
-              />
+              <div ref={levelRRef} class="h-full bg-accent rounded-full transition-[width] duration-75" style={{ width: '0%' }} />
+              <div ref={peakRRef} class="absolute top-0 h-full w-[2px] bg-text-primary" style={{ left: '0%', transition: 'left 0.05s linear' }} />
             </div>
             <span
               class="font-mono text-[10px] w-20 text-right"
@@ -508,29 +514,23 @@ export function GoLive() {
                   : 'var(--color-text-tertiary)',
               }}
             >
-              {isLive && headroomR.value !== -Infinity
-                ? `${headroomR.value.toFixed(1)} dB`
-                : '-- dB'}
+              {isLive && headroomR.value !== -Infinity ? `${headroomR.value.toFixed(1)} dB` : '-- dB'}
             </span>
           </div>
         </div>
       </div>
 
-      {/* GO LIVE button */}
       <button
         onClick={handleToggle}
         disabled={isConnecting}
         class={`w-full h-14 rounded-xl font-heading font-bold text-lg tracking-wider uppercase transition-all duration-300 disabled:opacity-50 ${
-          isLive
-            ? 'bg-danger text-white hover:bg-danger/90'
-            : 'bg-accent text-white hover:bg-accent/90'
+          isLive ? 'bg-danger text-white hover:bg-danger/90' : 'bg-accent text-white hover:bg-accent/90'
         }`}
         style={isLive ? { animation: 'pulse-glow 2s ease-in-out infinite', '--color-live': 'var(--color-danger)' } : undefined}
       >
         {isLive ? 'STOP BROADCAST' : isConnecting ? 'CONNECTING...' : 'GO LIVE'}
       </button>
 
-      {/* Connection info */}
       {isLive && (
         <div class="mt-6 p-4 rounded-lg bg-surface-raised border border-border">
           <label class="block font-mono text-[9px] tracking-widest text-text-tertiary uppercase mb-3">

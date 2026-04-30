@@ -1,16 +1,6 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useEffect, useRef } from 'preact/hooks'
 import { api } from '../../lib/api'
-
-// --- Bans & Whitelist state ---
-const bans = signal<string[]>([])
-const whitelist = signal<string[]>([])
-const loading = signal(true)
-const banInput = signal('')
-const whitelistInput = signal('')
-
-// --- Tabs & Audit state ---
-const securityTab = signal<'rules' | 'audit'>('rules')
 
 interface AuditEntry {
   id: number
@@ -23,13 +13,43 @@ interface AuditEntry {
   ip: string
 }
 
-const auditEntries = signal<AuditEntry[]>([])
-const auditTotal = signal(0)
-const auditPage = signal(1)
-const auditCategory = signal('')
-const auditLoading = signal(false)
+type SecurityStore = ReturnType<typeof createSecurityStore>
 
-// --- Helpers ---
+function createSecurityStore() {
+  const bans = signal<string[]>([])
+  const whitelist = signal<string[]>([])
+  const loading = signal(true)
+  const banInput = signal('')
+  const whitelistInput = signal('')
+  const securityTab = signal<'rules' | 'audit'>('rules')
+  const auditEntries = signal<AuditEntry[]>([])
+  const auditTotal = signal(0)
+  const auditPage = signal(1)
+  const auditCategory = signal('')
+  const auditLoading = signal(false)
+
+  return {
+    bans,
+    whitelist,
+    loading,
+    banInput,
+    whitelistInput,
+    securityTab,
+    auditEntries,
+    auditTotal,
+    auditPage,
+    auditCategory,
+    auditLoading,
+  }
+}
+
+function useSecurityStore() {
+  const storeRef = useRef<SecurityStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createSecurityStore()
+  }
+  return storeRef.current
+}
 
 function timeAgo(dateStr: string): string {
   const now = Date.now()
@@ -70,63 +90,59 @@ const CATEGORY_LABELS: Record<string, string> = {
   settings: 'Settings',
 }
 
-// --- Data loading ---
-
-async function load() {
-  loading.value = true
+async function load(store: SecurityStore) {
+  store.loading.value = true
   try {
     const [b, w] = await Promise.all([
       api.get<string[]>('/api/security/bans'),
       api.get<string[]>('/api/security/whitelist'),
     ])
-    bans.value = b
-    whitelist.value = w
+    store.bans.value = b
+    store.whitelist.value = w
   } catch { /* empty */ }
-  loading.value = false
+  store.loading.value = false
 }
 
-async function loadAudit() {
-  auditLoading.value = true
+async function loadAudit(store: SecurityStore) {
+  store.auditLoading.value = true
   try {
     const params = new URLSearchParams({
-      page: String(auditPage.value),
+      page: String(store.auditPage.value),
       limit: String(AUDIT_LIMIT),
     })
-    if (auditCategory.value) params.set('category', auditCategory.value)
+    if (store.auditCategory.value) params.set('category', store.auditCategory.value)
     const res = await api.get<{ entries: AuditEntry[]; total: number; page: number; limit: number }>(
       `/api/security/audit?${params.toString()}`,
     )
-    auditEntries.value = res.entries || []
-    auditTotal.value = res.total
+    store.auditEntries.value = res.entries || []
+    store.auditTotal.value = res.total
   } catch { /* empty */ }
-  auditLoading.value = false
+  store.auditLoading.value = false
 }
 
-async function addBan() {
-  if (!banInput.value.trim()) return
-  await api.post('/api/security/bans', { ip: banInput.value.trim() })
-  banInput.value = ''
-  load()
+async function addBan(store: SecurityStore) {
+  if (!store.banInput.value.trim()) return
+  await api.post('/api/security/bans', { ip: store.banInput.value.trim() })
+  store.banInput.value = ''
+  await load(store)
 }
 
-async function removeBan(ip: string) {
+async function removeBan(store: SecurityStore, ip: string) {
   await api.del(`/api/security/bans?ip=${encodeURIComponent(ip)}`)
-  load()
+  await load(store)
 }
 
-async function addWhitelist() {
-  if (!whitelistInput.value.trim()) return
-  await api.post('/api/security/whitelist', { ip: whitelistInput.value.trim() })
-  whitelistInput.value = ''
-  load()
+async function addWhitelist(store: SecurityStore) {
+  if (!store.whitelistInput.value.trim()) return
+  await api.post('/api/security/whitelist', { ip: store.whitelistInput.value.trim() })
+  store.whitelistInput.value = ''
+  await load(store)
 }
 
-async function removeWhitelist(ip: string) {
+async function removeWhitelist(store: SecurityStore, ip: string) {
   await api.del(`/api/security/whitelist?ip=${encodeURIComponent(ip)}`)
-  load()
+  await load(store)
 }
-
-// --- Components ---
 
 function IpSection({
   title,
@@ -151,8 +167,6 @@ function IpSection({
     <div class="mb-8">
       <h2 class="text-base font-bold text-text-primary mb-1">{title}</h2>
       <p class="text-sm text-text-tertiary mb-4">{description}</p>
-
-      {/* Add input */}
       <div class="flex gap-2 mb-4">
         <input
           type="text"
@@ -169,58 +183,59 @@ function IpSection({
           ADD IP
         </button>
       </div>
-
-      {/* Table */}
-      <div class="border border-border rounded-xl overflow-hidden">
-        <table class="w-full">
-          <thead>
-            <tr class="border-b border-border">
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP / CIDR</th>
-              <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
-            </tr>
-          </thead>
-          <tbody>
-            {items.length === 0 ? (
-              <tr><td colSpan={2} class="px-4 py-6 text-center text-text-tertiary text-sm">None configured</td></tr>
-            ) : (
-              items.map((ip) => (
-                <tr key={ip} class="border-b border-[rgba(255,255,255,0.03)]">
-                  <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{ip}</td>
-                  <td class="px-4 py-3.5 text-right">
-                    <button
-                      onClick={() => onRemove(ip)}
-                      class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
-                    >
-                      REMOVE
-                    </button>
-                  </td>
-                </tr>
-              ))
-            )}
-          </tbody>
-        </table>
+      <div class="admin-table-shell">
+        <div class="admin-table-scroll">
+          <table class="w-full min-w-[640px]">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP / CIDR</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {items.length === 0 ? (
+                <tr><td colSpan={2} class="px-4 py-6 text-center text-text-tertiary text-sm">None configured</td></tr>
+              ) : (
+                items.map((ip) => (
+                  <tr key={ip} class="border-b border-[rgba(255,255,255,0.03)]">
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{ip}</td>
+                    <td class="px-4 py-3.5 text-right">
+                      <button
+                        onClick={() => onRemove(ip)}
+                        class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
+                      >
+                        REMOVE
+                      </button>
+                    </td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+        </div>
       </div>
     </div>
   )
 }
 
-function AuditLog() {
-  useEffect(() => { loadAudit() }, [])
+function AuditLog({ store }: { store: SecurityStore }) {
+  useEffect(() => {
+    void loadAudit(store)
+  }, [])
 
-  const totalPages = Math.max(1, Math.ceil(auditTotal.value / AUDIT_LIMIT))
-  const start = (auditPage.value - 1) * AUDIT_LIMIT + 1
-  const end = Math.min(auditPage.value * AUDIT_LIMIT, auditTotal.value)
+  const totalPages = Math.max(1, Math.ceil(store.auditTotal.value / AUDIT_LIMIT))
+  const start = (store.auditPage.value - 1) * AUDIT_LIMIT + 1
+  const end = Math.min(store.auditPage.value * AUDIT_LIMIT, store.auditTotal.value)
 
   return (
     <div>
-      {/* Category filter */}
       <div class="mb-4">
         <select
-          value={auditCategory.value}
+          value={store.auditCategory.value}
           onChange={(e) => {
-            auditCategory.value = (e.target as HTMLSelectElement).value
-            auditPage.value = 1
-            loadAudit()
+            store.auditCategory.value = (e.target as HTMLSelectElement).value
+            store.auditPage.value = 1
+            void loadAudit(store)
           }}
           class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
         >
@@ -230,63 +245,63 @@ function AuditLog() {
         </select>
       </div>
 
-      {auditLoading.value ? (
+      {store.auditLoading.value ? (
         <p class="text-text-tertiary text-sm">Loading...</p>
-      ) : auditEntries.value.length === 0 ? (
+      ) : store.auditEntries.value.length === 0 ? (
         <div class="text-center py-12 text-text-tertiary text-sm">No audit log entries</div>
       ) : (
         <>
-          {/* Table */}
-          <div class="border border-border rounded-xl overflow-hidden">
-            <table class="w-full">
-              <thead>
-                <tr class="border-b border-border">
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Time</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">User</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Action</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Resource</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP</th>
-                </tr>
-              </thead>
-              <tbody>
-                {auditEntries.value.map((entry) => (
-                  <tr key={entry.id} class="border-b border-[rgba(255,255,255,0.03)]">
-                    <td class="px-4 py-3.5 text-sm text-text-secondary whitespace-nowrap" title={new Date(entry.timestamp).toLocaleString()}>
-                      {timeAgo(entry.timestamp)}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{entry.username}</td>
-                    <td class="px-4 py-3.5">
-                      <span class={actionBadgeClass(entry.action)}>{entry.action}</span>
-                      {entry.detail && (
-                        <div class="text-[10px] text-text-tertiary mt-1">{entry.detail}</div>
-                      )}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-secondary">
-                      {entry.resource_type}{entry.resource_id ? `: ${entry.resource_id}` : ''}
-                    </td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{entry.ip}</td>
+          <div class="admin-table-shell">
+            <div class="admin-table-scroll">
+              <table class="w-full min-w-[860px]">
+                <thead>
+                  <tr class="border-b border-border">
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Time</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">User</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Action</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Resource</th>
+                    <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">IP</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
+                </thead>
+                <tbody>
+                  {store.auditEntries.value.map((entry) => (
+                    <tr key={entry.id} class="border-b border-[rgba(255,255,255,0.03)]">
+                      <td class="px-4 py-3.5 text-sm text-text-secondary whitespace-nowrap" title={new Date(entry.timestamp).toLocaleString()}>
+                        {timeAgo(entry.timestamp)}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{entry.username}</td>
+                      <td class="px-4 py-3.5">
+                        <span class={actionBadgeClass(entry.action)}>{entry.action}</span>
+                        {entry.detail && (
+                          <div class="text-[10px] text-text-tertiary mt-1">{entry.detail}</div>
+                        )}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-secondary">
+                        {entry.resource_type}{entry.resource_id ? `: ${entry.resource_id}` : ''}
+                      </td>
+                      <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{entry.ip}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
           </div>
 
-          {/* Pagination */}
           <div class="flex items-center justify-between mt-4">
             <span class="text-text-tertiary font-mono text-xs">
-              Showing {start}-{end} of {auditTotal.value}
+              Showing {start}-{end} of {store.auditTotal.value}
             </span>
             <div class="flex gap-2">
               <button
-                onClick={() => { auditPage.value = auditPage.value - 1; loadAudit() }}
-                disabled={auditPage.value <= 1}
+                onClick={() => { store.auditPage.value = store.auditPage.value - 1; void loadAudit(store) }}
+                disabled={store.auditPage.value <= 1}
                 class="border border-border text-text-secondary font-mono text-xs px-3 py-1.5 rounded-lg hover:border-border-hover disabled:opacity-30"
               >
                 PREV
               </button>
               <button
-                onClick={() => { auditPage.value = auditPage.value + 1; loadAudit() }}
-                disabled={auditPage.value >= totalPages}
+                onClick={() => { store.auditPage.value = store.auditPage.value + 1; void loadAudit(store) }}
+                disabled={store.auditPage.value >= totalPages}
                 class="border border-border text-text-secondary font-mono text-xs px-3 py-1.5 rounded-lg hover:border-border-hover disabled:opacity-30"
               >
                 NEXT
@@ -300,14 +315,18 @@ function AuditLog() {
 }
 
 export function Security() {
-  useEffect(() => { load() }, [])
+  const store = useSecurityStore()
+  const { bans, whitelist, loading, banInput, whitelistInput, securityTab } = store
+
+  useEffect(() => {
+    void load(store)
+  }, [])
 
   return (
     <div class="p-7">
       <div class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1">MANAGE</div>
       <h1 class="text-xl font-bold text-text-primary mb-6">Security</h1>
 
-      {/* Tabs */}
       <div class="flex gap-1 mb-6 border-b border-border">
         {([['rules', 'BANS & WHITELIST'], ['audit', 'AUDIT LOG']] as const).map(([key, label]) => (
           <button
@@ -335,8 +354,8 @@ export function Security() {
               items={bans.value}
               inputValue={banInput.value}
               onInput={(v) => { banInput.value = v }}
-              onAdd={addBan}
-              onRemove={removeBan}
+              onAdd={() => { void addBan(store) }}
+              onRemove={(ip) => { void removeBan(store, ip) }}
               placeholder="192.168.1.0/24"
             />
             <IpSection
@@ -345,14 +364,14 @@ export function Security() {
               items={whitelist.value}
               inputValue={whitelistInput.value}
               onInput={(v) => { whitelistInput.value = v }}
-              onAdd={addWhitelist}
-              onRemove={removeWhitelist}
+              onAdd={() => { void addWhitelist(store) }}
+              onRemove={(ip) => { void removeWhitelist(store, ip) }}
               placeholder="10.0.0.0/8"
             />
           </>
         )
       ) : (
-        <AuditLog />
+        <AuditLog store={store} />
       )}
     </div>
   )

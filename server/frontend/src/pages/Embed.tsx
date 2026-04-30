@@ -5,12 +5,29 @@ import { createSSE } from '@/lib/sse'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
-const title = signal(data.title || '')
-const artist = signal(data.artist || '')
-const playing = signal(false)
+
+type EmbedStore = ReturnType<typeof createEmbedStore>
+
+function createEmbedStore(initialData: Partial<PlayerData>) {
+  const title = signal(initialData.title || '')
+  const artist = signal(initialData.artist || '')
+  const playing = signal(false)
+
+  return { title, artist, playing }
+}
+
+function useEmbedStore(initialData: Partial<PlayerData>) {
+  const storeRef = useRef<EmbedStore | null>(null)
+  if (storeRef.current == null) {
+    storeRef.current = createEmbedStore(initialData)
+  }
+  return storeRef.current
+}
 
 export function Embed() {
+  const { title, artist, playing } = useEmbedStore(data)
   const audioRef = useRef<HTMLAudioElement>(null)
+  const mountPath = data.mount ? (data.mount.startsWith('/') ? data.mount : `/${data.mount}`) : null
 
   useEffect(() => {
     const sse = createSSE('/events')
@@ -40,7 +57,8 @@ export function Embed() {
       audio.src = ''
       playing.value = false
     } else {
-      audio.src = data.mount.startsWith('/') ? data.mount : `/${data.mount}`
+      if (!mountPath) return
+      audio.src = mountPath
       audio.play()
       playing.value = true
     }
