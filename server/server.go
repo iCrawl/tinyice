@@ -734,8 +734,8 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.RelayM.StopAll()
 	s.TranscoderM.StopAll()
 
-	for _, st := range s.StreamerM.GetStreamers() {
-		s.StreamerM.StopStreamer(st.OutputMount)
+	if s.StreamerM != nil {
+		s.StreamerM.Shutdown()
 	}
 
 	// Run RTMP and SRT Stop in parallel. Either can hang briefly while

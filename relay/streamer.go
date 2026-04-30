@@ -177,6 +177,13 @@ func (sm *StreamerManager) clearDeadRecovery(mount string) {
 	delete(sm.deadRecovery, mount)
 }
 
+func (sm *StreamerManager) cancelDeadRecoveryLocked(mount string) {
+	if cancel, ok := sm.deadRecovery[mount]; ok {
+		cancel()
+		delete(sm.deadRecovery, mount)
+	}
+}
+
 func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *Streamer) {
 	defer sm.clearDeadRecovery(s.OutputMount)
 
@@ -409,6 +416,32 @@ func (s *Streamer) Stop() {
 		s.cancel()
 	}
 	s.signalStateChange()
+}
+
+func (s *Streamer) Shutdown() {
+	s.mu.Lock()
+	s.manualStop = true
+	s.State = StateStopped
+	cancel := s.cancel
+	fileCancel := s.fileCancel
+	outputSession := s.outputSession
+	s.outputSession = nil
+	s.fileCancel = nil
+	s.mu.Unlock()
+
+	if fileCancel != nil {
+		fileCancel()
+	}
+	if cancel != nil {
+		cancel()
+	}
+	s.signalStateChange()
+	if outputSession != nil {
+		outputSession.Stop()
+	}
+	if s.MPDServer != nil {
+		s.MPDServer.Stop()
+	}
 }
 
 func (s *Streamer) Restart() {
@@ -1014,6 +1047,7 @@ func (sm *StreamerManager) StopStreamer(mount string) {
 	defer sm.mu.Unlock()
 
 	if s, ok := sm.instances[mount]; ok {
+		sm.cancelDeadRecoveryLocked(mount)
 		if s.MPDServer != nil {
 			logger.L.Debugf("AutoDJ %s: Stopping MPD server", s.Name)
 			s.MPDServer.Stop()
@@ -1032,12 +1066,30 @@ func (sm *StreamerManager) DeleteStreamer(mount string) {
 	defer sm.mu.Unlock()
 
 	if s, ok := sm.instances[mount]; ok {
+		sm.cancelDeadRecoveryLocked(mount)
 		if s.MPDServer != nil {
 			logger.L.Debugf("AutoDJ %s: Stopping MPD server", s.Name)
 			s.MPDServer.Stop()
 		}
 		s.Stop()
 		delete(sm.instances, mount)
+	}
+}
+
+func (sm *StreamerManager) Shutdown() {
+	sm.mu.Lock()
+	streamers := make([]*Streamer, 0, len(sm.instances))
+	for mount, cancel := range sm.deadRecovery {
+		cancel()
+		delete(sm.deadRecovery, mount)
+	}
+	for _, s := range sm.instances {
+		streamers = append(streamers, s)
+	}
+	sm.mu.Unlock()
+
+	for _, s := range streamers {
+		s.Shutdown()
 	}
 }
 
