@@ -157,7 +157,8 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Mount already has an active source", http.StatusForbidden)
 		return
 	}
-	defer stream.ReleaseSource()
+	sourceToken := stream.BeginSource(r.RemoteAddr)
+	defer stream.ReleaseSourceIfCurrent(sourceToken)
 
 	hj, ok := w.(http.Hijacker)
 	if !ok {
@@ -207,7 +208,6 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		rt := s.RuntimeRegistry.GetOrCreate(mount)
 		rt.Stream = stream
 		s.RuntimeRegistry.AttachSource(mount, relay.SourceIcecast, tenantID)
-		defer s.RuntimeRegistry.Remove(mount)
 	}
 	s.updateSourceMetadata(stream, mount, r)
 
@@ -248,19 +248,26 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	logger.L.Infow("Source disconnected", "mount", mount)
-	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
-		Mount:     mount,
-		Status:    relay.DiagnosticStatusStopped,
-		Class:     relay.DiagnosticClassSourceDisconnect,
-		Reason:    "source disconnected",
-		Actor:     relay.DiagnosticActorIcecastSource,
-		Timestamp: time.Now(),
-	})
-	s.dispatchWebhook("source_disconnect", map[string]interface{}{
-		"mount": mount,
-	})
-	s.Relay.RemoveStream(mount)
+	if stream.IsCurrentSource(sourceToken) {
+		logger.L.Infow("Source disconnected", "mount", mount)
+		s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+			Mount:     mount,
+			Status:    relay.DiagnosticStatusStopped,
+			Class:     relay.DiagnosticClassSourceDisconnect,
+			Reason:    "source disconnected",
+			Actor:     relay.DiagnosticActorIcecastSource,
+			Timestamp: time.Now(),
+		})
+		s.dispatchWebhook("source_disconnect", map[string]interface{}{
+			"mount": mount,
+		})
+		if s.RuntimeRegistry != nil {
+			s.RuntimeRegistry.Remove(mount)
+		}
+		s.Relay.RemoveStream(mount)
+	} else {
+		logger.L.Infow("Stale source disconnected; keeping successor stream", "mount", mount)
+	}
 }
 
 // looksLikeUnknownMount reports whether a 404 for this path should count

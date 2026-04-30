@@ -179,8 +179,8 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	mount := info.mount
 
 	stream := ss.relay.GetOrCreateStream(mount)
+	sourceToken := stream.BeginSource(remoteAddr.String())
 	stream.mu.Lock()
-	stream.SourceIP = remoteAddr.String()
 	stream.ContentType = "audio/mpeg" // default for MPEG-TS with MP3
 	stream.mu.Unlock()
 	if ss.runtimeRegistry != nil {
@@ -195,6 +195,7 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	// SRT sources don't pollute the stream list.
 	videoMount := mount + "/video"
 	var videoStream *Stream
+	var videoSourceToken int64
 
 	logger.L.Infow("SRT: Publishing started",
 		"mount", mount,
@@ -212,8 +213,8 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	demuxer.OnVideo(func(data []byte, pts int64, isKeyframe bool) {
 		if videoStream == nil {
 			videoStream = ss.relay.GetOrCreateStreamSized(videoMount, 8*1024*1024)
+			videoSourceToken = videoStream.BeginSource(remoteAddr.String())
 			videoStream.mu.Lock()
-			videoStream.SourceIP = remoteAddr.String()
 			videoStream.ContentType = "video/h264"
 			videoStream.mu.Unlock()
 		}
@@ -258,14 +259,14 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	// Only tear down the streams that this handler actually owns, matching
 	// the RTMP path — prevents a delayed OnClose from killing a successor
 	// publisher's mount.
-	if st, ok := ss.relay.GetStream(mount); ok && st == stream {
+	if st, ok := ss.relay.GetStream(mount); ok && st == stream && st.IsCurrentSource(sourceToken) {
 		ss.relay.RemoveStream(mount)
-	}
-	if ss.runtimeRegistry != nil {
-		ss.runtimeRegistry.Remove(mount)
+		if ss.runtimeRegistry != nil {
+			ss.runtimeRegistry.Remove(mount)
+		}
 	}
 	if videoStream != nil {
-		if st, ok := ss.relay.GetStream(videoMount); ok && st == videoStream {
+		if st, ok := ss.relay.GetStream(videoMount); ok && st == videoStream && st.IsCurrentSource(videoSourceToken) {
 			ss.relay.RemoveStream(videoMount)
 		}
 	}

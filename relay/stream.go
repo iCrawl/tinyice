@@ -51,6 +51,7 @@ type Stream struct {
 	Started          time.Time // When the stream was created
 	SourceIP         string    // IP address of the source client
 	LastDataReceived time.Time // Last time data was received from source
+	sourceGeneration int64     // Monotonic token for replacing same-mount sources
 
 	// Stream state and visibility
 	Enabled      bool // Whether the stream is accepting connections
@@ -198,12 +199,40 @@ func (s *Stream) ReleaseSource() {
 	s.SourceIP = ""
 }
 
+// ReleaseSourceIfCurrent clears the source claim only if token still owns
+// this stream's source slot. It protects replacement sources from stale
+// disconnect cleanup in another handler goroutine.
+func (s *Stream) ReleaseSourceIfCurrent(token int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if token != 0 && s.sourceGeneration == token {
+		s.SourceIP = ""
+	}
+}
+
 // GetSourceIP returns the current source's address under the stream
 // mutex, mirroring SetSourceIP. Empty string means no live source.
 func (s *Stream) GetSourceIP() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SourceIP
+}
+
+// BeginSource marks a new source owner for this stream and returns a token
+// that later disconnect cleanup can use to avoid removing a successor source.
+func (s *Stream) BeginSource(ip string) int64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.sourceGeneration++
+	s.SourceIP = ip
+	return s.sourceGeneration
+}
+
+// IsCurrentSource reports whether token still owns this stream's source slot.
+func (s *Stream) IsCurrentSource(token int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return token != 0 && s.sourceGeneration == token
 }
 
 // StoreVideoHeaders records the Annex-B SPS and PPS bytes for an H.264

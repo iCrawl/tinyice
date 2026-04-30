@@ -180,14 +180,16 @@ type rtmpHandler struct {
 	app             string // RTMP application name from the connect command
 	mount           string
 	stream          *Stream
+	sourceToken     int64
 	started         time.Time
 
 	// Video support
-	videoStream *Stream // separate video stream
-	videoMount  string  // e.g., "/live/video"
-	sps         []byte  // cached SPS NALU
-	pps         []byte  // cached PPS NALU
-	naluLenSize int     // AVCC NALU length size (usually 4)
+	videoStream      *Stream // separate video stream
+	videoSourceToken int64
+	videoMount       string // e.g., "/live/video"
+	sps              []byte // cached SPS NALU
+	pps              []byte // cached PPS NALU
+	naluLenSize      int    // AVCC NALU length size (usually 4)
 
 	// AAC state parsed from the AudioSpecificConfig (first AAC
 	// SequenceHeader received). Used to wrap raw AAC frames in ADTS
@@ -244,8 +246,8 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 
 	h.mount = mount
 	h.stream = h.relay.GetOrCreateStream(mount)
+	h.sourceToken = h.stream.BeginSource(h.conn.RemoteAddr().String())
 	h.stream.mu.Lock()
-	h.stream.SourceIP = h.conn.RemoteAddr().String()
 	h.stream.ContentType = "audio/mpeg" // default, may be updated on first audio data
 	h.stream.mu.Unlock()
 	h.started = time.Now()
@@ -261,8 +263,8 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 	// untouched.
 	h.videoMount = mount + "/video"
 	h.videoStream = h.relay.GetOrCreateStreamSized(h.videoMount, 8*1024*1024)
+	h.videoSourceToken = h.videoStream.BeginSource(h.conn.RemoteAddr().String())
 	h.videoStream.mu.Lock()
-	h.videoStream.SourceIP = h.conn.RemoteAddr().String()
 	h.videoStream.ContentType = "video/h264"
 	h.videoStream.mu.Unlock()
 
@@ -621,15 +623,15 @@ func (h *rtmpHandler) OnClose() {
 			"remote", h.conn.RemoteAddr(),
 			"duration", time.Since(h.started),
 		)
-		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream {
+		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream && st.IsCurrentSource(h.sourceToken) {
 			h.relay.RemoveStream(h.mount)
-		}
-		if h.runtimeRegistry != nil {
-			h.runtimeRegistry.Remove(h.mount)
+			if h.runtimeRegistry != nil {
+				h.runtimeRegistry.Remove(h.mount)
+			}
 		}
 	}
 	if h.videoMount != "" {
-		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream {
+		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream && st.IsCurrentSource(h.videoSourceToken) {
 			h.relay.RemoveStream(h.videoMount)
 		}
 	}

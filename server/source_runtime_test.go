@@ -100,6 +100,65 @@ func TestHandleSourceRegistersAndRemovesIcecastRuntime(t *testing.T) {
 	}
 }
 
+func TestHandleSourceRejectsConcurrentSourceAndKeepsCurrentStream(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	pass, err := config.HashPassword("sourcepass")
+	if err != nil {
+		t.Fatalf("hash source password: %v", err)
+	}
+	s.Config.DefaultSourcePassword = pass
+	s.Config.Mounts["/live"] = pass
+	s.Config.Users["admin"].Mounts["/live"] = pass
+
+	req1 := httptest.NewRequest(http.MethodPut, "/live", nil)
+	req1.RemoteAddr = "127.0.0.1:9101"
+	req1.SetBasicAuth("source", "sourcepass")
+	rec1 := newSourceHijackRecorder(t)
+	done1 := make(chan struct{})
+	go func() {
+		defer close(done1)
+		s.handleSource(rec1, req1)
+	}()
+
+	assertEventually(t, func() bool {
+		st, ok := s.Relay.GetStream("/live")
+		return ok && st.Snapshot().SourceIP == "127.0.0.1:9101"
+	})
+
+	req2 := httptest.NewRequest(http.MethodPut, "/live", nil)
+	req2.RemoteAddr = "127.0.0.1:9102"
+	req2.SetBasicAuth("source", "sourcepass")
+	rec2 := httptest.NewRecorder()
+	s.handleSource(rec2, req2)
+
+	if rec2.Code != http.StatusForbidden {
+		t.Fatalf("expected duplicate source to be rejected, got HTTP %d", rec2.Code)
+	}
+
+	st, ok := s.Relay.GetStream("/live")
+	if !ok {
+		t.Fatal("expected current stream to remain after duplicate source rejection")
+	}
+	if got := st.Snapshot().SourceIP; got != "127.0.0.1:9101" {
+		t.Fatalf("expected original source to remain current, got %q", got)
+	}
+	if _, ok := s.RuntimeRegistry.Get("/live"); !ok {
+		t.Fatal("expected runtime to remain while original source is connected")
+	}
+
+	if err := rec1.CloseClient(); err != nil {
+		t.Fatalf("close source client: %v", err)
+	}
+	select {
+	case <-done1:
+	case <-time.After(time.Second):
+		t.Fatal("source handler did not exit after client close")
+	}
+	if _, ok := s.Relay.GetStream("/live"); ok {
+		t.Fatal("expected stream to be removed when original source disconnects")
+	}
+}
+
 func TestHandleSourceAttachesRuntimeToResolvedTenant(t *testing.T) {
 	s := newListenerAPITestServer(t)
 	pass, err := config.HashPassword("sourcepass")
