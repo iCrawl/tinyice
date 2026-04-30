@@ -217,6 +217,15 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 		inst.mu.Lock()
 		inst.LastError = fmt.Sprintf("connection failed: %v", err)
 		inst.mu.Unlock()
+		rm.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     inst.Mount,
+			Status:    DiagnosticStatusError,
+			Class:     DiagnosticClassSourceDisconnect,
+			Reason:    "relay pull connection failed",
+			Error:     err.Error(),
+			Actor:     DiagnosticActorRelay,
+			Timestamp: time.Now(),
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -227,6 +236,14 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 	}
 
 	logger.L.Infow("Relay stream connected and pulling", "mount", inst.Mount)
+	rm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     inst.Mount,
+		Status:    DiagnosticStatusRunning,
+		Class:     DiagnosticClassRecoverySucceeded,
+		Reason:    "relay source connected",
+		Actor:     DiagnosticActorRelay,
+		Timestamp: time.Now(),
+	})
 
 	inst.mu.Lock()
 	inst.State = RelayConnected
