@@ -44,10 +44,11 @@ func (p *SimplePacer) Pace(duration time.Duration) {
 }
 
 type WebRTCManager struct {
-	api     *webrtc.API
-	relay   *Relay
-	mu      sync.RWMutex
-	sources map[string]*webrtc.PeerConnection
+	api             *webrtc.API
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	mu              sync.RWMutex
+	sources         map[string]*webrtc.PeerConnection
 }
 
 func NewWebRTCManager(r *Relay) *WebRTCManager {
@@ -61,6 +62,12 @@ func NewWebRTCManager(r *Relay) *WebRTCManager {
 		relay:   r,
 		sources: make(map[string]*webrtc.PeerConnection),
 	}
+}
+
+func (wm *WebRTCManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wm.runtimeRegistry = rr
 }
 
 func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
@@ -149,11 +156,7 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	peerConnection.OnConnectionStateChange(func(state webrtc.PeerConnectionState) {
 		logger.L.Infow("WebRTC Source: Connection state changed", "mount", mount, "state", state.String())
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
-			wm.mu.Lock()
-			if wm.sources[mount] == peerConnection {
-				delete(wm.sources, mount)
-			}
-			wm.mu.Unlock()
+			wm.cleanupSource(mount, peerConnection)
 		}
 	})
 
@@ -161,6 +164,11 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 		logger.L.Infow("WebRTC Source: Received track", "track", track.ID(), "mount", mount)
 
 		stream := wm.relay.GetOrCreateStream(mount)
+		if wm.runtimeRegistry != nil {
+			rt := wm.runtimeRegistry.GetOrCreate(mount)
+			rt.Stream = stream
+			wm.runtimeRegistry.AttachSource(mount, SourceWebRTC, "default")
+		}
 		headOffset := stream.Buffer.HeadOffset()
 		stream.mu.Lock()
 		stream.ContentType = "audio/ogg"
@@ -222,6 +230,25 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	<-gatherComplete
 
 	return peerConnection.LocalDescription(), nil
+}
+
+func (wm *WebRTCManager) cleanupSource(mount string, pc *webrtc.PeerConnection) {
+	wm.mu.Lock()
+	if pc == nil || wm.sources[mount] == pc {
+		delete(wm.sources, mount)
+	}
+	wm.mu.Unlock()
+	if wm.runtimeRegistry != nil {
+		wm.runtimeRegistry.Remove(mount)
+	}
+	wm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     mount,
+		Status:    DiagnosticStatusStopped,
+		Class:     DiagnosticClassSourceDisconnect,
+		Reason:    "webrtc source disconnected",
+		Actor:     DiagnosticActorWebRTC,
+		Timestamp: time.Now(),
+	})
 }
 
 func (wm *WebRTCManager) streamToTrack(pc *webrtc.PeerConnection, track *webrtc.TrackLocalStaticSample, stream *Stream) {

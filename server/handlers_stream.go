@@ -157,6 +157,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 	bufrw.Flush()
 
 	logger.L.Infow("Source connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusRunning,
+		Class:     relay.DiagnosticClassRecoverySucceeded,
+		Reason:    "source connected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_connect", map[string]interface{}{
 		"mount": mount,
 		"ip":    r.RemoteAddr,
@@ -164,7 +172,17 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		"name":  r.Header.Get("Ice-Name"),
 	})
 
+	tenantID := "default"
+	if tenant := TenantFromContext(r.Context()); tenant != nil {
+		tenantID = tenant.ID
+	}
 	stream := s.Relay.GetOrCreateStream(mount)
+	if s.RuntimeRegistry != nil {
+		rt := s.RuntimeRegistry.GetOrCreate(mount)
+		rt.Stream = stream
+		s.RuntimeRegistry.AttachSource(mount, relay.SourceIcecast, tenantID)
+		defer s.RuntimeRegistry.Remove(mount)
+	}
 	stream.SetSourceIP(r.RemoteAddr)
 
 	s.updateSourceMetadata(stream, mount, r)
@@ -206,6 +224,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logger.L.Infow("Source disconnected", "mount", mount)
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusStopped,
+		Class:     relay.DiagnosticClassSourceDisconnect,
+		Reason:    "source disconnected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_disconnect", map[string]interface{}{
 		"mount": mount,
 	})
@@ -323,8 +349,25 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 	id := r.RemoteAddr + "-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	listener := &relay.Listener{
+		ID:             id,
+		Protocol:       relay.ListenerProtocolHTTP,
+		RequestedMount: originalMount,
+		CurrentMount:   mount,
+		RemoteAddr:     r.RemoteAddr,
+		UserAgent:      r.Header.Get("User-Agent"),
+		Connected:      time.Now(),
+		DisconnectCh:   make(chan struct{}),
+		MoveCh:         make(chan relay.ListenerCommand, 1),
+	}
+	registered := false
 	logger.L.Infow("Listener connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
-	defer logger.L.Infow("Listener disconnected", "mount", mount, "ip", r.RemoteAddr)
+	defer func() {
+		if registered {
+			s.Relay.Listeners.Unregister(listener.ID)
+		}
+		logger.L.Infow("Listener disconnected", "mount", mount, "ip", r.RemoteAddr)
+	}()
 
 	recoveryTicker := time.NewTicker(10 * time.Second)
 	defer recoveryTicker.Stop()
@@ -390,9 +433,15 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("icy-name", s.Config.PageTitle)
 		}
 
-		if s.Config.MaxListeners > 0 && stream.ListenersCount() >= s.Config.MaxListeners {
+		listenerLimit := s.effectiveMountListenerLimit(mount)
+		if !registered && listenerLimit > 0 && s.Relay.Listeners.CountForMount(mount) >= listenerLimit {
 			http.Error(w, "Server Full", http.StatusServiceUnavailable)
 			return
+		}
+		if !registered {
+			listener.CurrentMount = mount
+			s.Relay.Listeners.Register(listener)
+			registered = true
 		}
 
 		w.Header().Set("Content-Type", stream.ContentType)
@@ -405,14 +454,40 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 
-		if !s.serveStreamData(w, r, stream, id, originalMount, mount, recoveryTicker, metaint) {
+		result := s.serveStreamData(w, r, stream, id, originalMount, mount, recoveryTicker, metaint)
+		if !result.KeepGoing {
 			return
+		}
+		if result.NextMount != "" {
+			mount = result.NextMount
+			originalMount = result.RequestedMount
+			if registered {
+				_ = s.Relay.Listeners.Move(listener.ID, mount, time.Now())
+			}
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
 }
 
-func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int) bool {
+func (s *Server) effectiveMountListenerLimit(mount string) int {
+	if s.Config == nil {
+		return 0
+	}
+	if s.Config.AdvancedMounts != nil {
+		if ms := s.Config.AdvancedMounts[mount]; ms != nil && ms.MaxListeners > 0 {
+			return ms.MaxListeners
+		}
+	}
+	return s.Config.MaxListeners
+}
+
+type listenerLoopResult struct {
+	NextMount      string
+	RequestedMount string
+	KeepGoing      bool
+}
+
+func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int) listenerLoopResult {
 	// Burst size defaults to 512 KiB but can be overridden per mount via
 	// AdvancedMounts.BurstSize (the "Advanced Mount Settings" UI field).
 	// At typical listener bitrates (128–320 kbps) this puts 10–30 seconds
@@ -424,6 +499,12 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 	}
 	offset, signal := stream.Subscribe(id, burst)
 	defer stream.Unsubscribe(id)
+	var disconnectCh <-chan struct{}
+	var moveCh <-chan relay.ListenerCommand
+	if listener, ok := s.Relay.Listeners.Listener(id); ok {
+		disconnectCh = listener.DisconnectCh
+		moveCh = listener.MoveCh
+	}
 
 	// For Ogg streams (Opus / Vorbis / FLAC-in-Ogg) route all output through
 	// a per-listener Ogg page rewriter. It regenerates the bitstream serial,
@@ -441,7 +522,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 
 	if stream.OggHead != nil {
 		if _, err := out.Write(stream.OggHead); err != nil {
-			return false
+			return listenerLoopResult{}
 		}
 		logger.L.Debugf("Ogg Listener %s: Sending stored headers (%d bytes), then starting burst at %d", id, len(stream.OggHead), offset)
 	}
@@ -468,7 +549,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 		}
 		if len(videoHeaders) > 0 {
 			if _, err := out.Write(videoHeaders); err != nil {
-				return false
+				return listenerLoopResult{}
 			}
 			logger.L.Debugf("H264 Listener %s: Sent SPS/PPS (%d bytes), starting at keyframe %d", id, len(videoHeaders), offset)
 		}
@@ -490,18 +571,41 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 	for {
 		select {
 		case <-s.done:
-			return false
+			return listenerLoopResult{}
 		case <-r.Context().Done():
-			return false
+			return listenerLoopResult{}
+		case <-disconnectCh:
+			return listenerLoopResult{}
+		case cmd := <-moveCh:
+			target := cmd.TargetMount
+			if target == "" || target == currentMount {
+				continue
+			}
+			if listener, ok := s.Relay.Listeners.Listener(id); ok {
+				listener.SetRequestedMount(target)
+			}
+			return listenerLoopResult{
+				NextMount:      target,
+				RequestedMount: target,
+				KeepGoing:      true,
+			}
 		case <-recoveryTicker.C:
 			if currentMount != originalMount {
 				if _, ok := s.Relay.GetStream(originalMount); ok {
-					return true
+					return listenerLoopResult{
+						NextMount:      originalMount,
+						RequestedMount: originalMount,
+						KeepGoing:      true,
+					}
 				}
 			}
 		case _, ok := <-signal:
 			if !ok {
-				return true
+				return listenerLoopResult{
+					NextMount:      currentMount,
+					RequestedMount: originalMount,
+					KeepGoing:      true,
+				}
 			}
 			for {
 				readLimit := len(buf)
@@ -520,7 +624,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 							"id", id, "mount", currentMount,
 							"consecutive_skips", consecutiveSkips,
 						)
-						return false
+						return listenerLoopResult{}
 					}
 					offset = stream.Buffer.FindNextPageBoundaryLocked(next)
 					continue
@@ -536,7 +640,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 							"id", id, "mount", currentMount,
 							"consecutive_skips", consecutiveSkips,
 						)
-						return false
+						return listenerLoopResult{}
 					}
 				} else {
 					consecutiveSkips = 0
@@ -544,7 +648,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 				offset = next
 
 				if _, err := out.Write(buf[:n]); err != nil {
-					return false
+					return listenerLoopResult{}
 				}
 
 				if metaint > 0 {
@@ -563,7 +667,7 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 						copy(res[1:], meta)
 
 						if _, err := w.Write(res); err != nil {
-							return false
+							return listenerLoopResult{}
 						}
 						bytesSentSinceMeta = 0
 					}

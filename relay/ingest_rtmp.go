@@ -17,11 +17,12 @@ import (
 
 // RTMPServer accepts RTMP publish connections and feeds audio data into TinyIce streams.
 type RTMPServer struct {
-	relay    *Relay
-	config   *config.Config
-	listener net.Listener
-	server   *rtmp.Server
-	mu       sync.Mutex
+	relay           *Relay
+	config          *config.Config
+	runtimeRegistry *RuntimeRegistry
+	listener        net.Listener
+	server          *rtmp.Server
+	mu              sync.Mutex
 
 	// Active connections tracked so Stop can close them all — closing
 	// only the listener leaves existing handler goroutines blocked in
@@ -38,6 +39,12 @@ func NewRTMPServer(r *Relay, cfg *config.Config) *RTMPServer {
 		config: cfg,
 		conns:  make(map[net.Conn]struct{}),
 	}
+}
+
+func (rs *RTMPServer) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.runtimeRegistry = rr
 }
 
 // trackConn registers a connection so Stop can close it. Returns a
@@ -91,10 +98,11 @@ func (rs *RTMPServer) Start() error {
 			// the untrack func to remove itself on clean close.
 			untrack := rs.trackConn(conn)
 			h := &rtmpHandler{
-				relay:   rs.relay,
-				config:  rs.config,
-				conn:    conn,
-				untrack: untrack,
+				relay:           rs.relay,
+				config:          rs.config,
+				runtimeRegistry: rs.runtimeRegistry,
+				conn:            conn,
+				untrack:         untrack,
 			}
 			return conn, &rtmp.ConnConfig{
 				Handler: h,
@@ -156,14 +164,15 @@ func (rs *RTMPServer) Stop() {
 // rtmpHandler handles a single RTMP connection.
 type rtmpHandler struct {
 	rtmp.DefaultHandler
-	relay   *Relay
-	config  *config.Config
-	conn    net.Conn
-	untrack func() // removes this conn from RTMPServer.conns
-	app     string // RTMP application name from the connect command
-	mount   string
-	stream  *Stream
-	started time.Time
+	relay           *Relay
+	config          *config.Config
+	runtimeRegistry *RuntimeRegistry
+	conn            net.Conn
+	untrack         func() // removes this conn from RTMPServer.conns
+	app             string // RTMP application name from the connect command
+	mount           string
+	stream          *Stream
+	started         time.Time
 
 	// Video support
 	videoStream *Stream // separate video stream
@@ -232,6 +241,11 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 	h.stream.ContentType = "audio/mpeg" // default, may be updated on first audio data
 	h.stream.mu.Unlock()
 	h.started = time.Now()
+	if h.runtimeRegistry != nil {
+		rt := h.runtimeRegistry.GetOrCreate(mount)
+		rt.Stream = h.stream
+		h.runtimeRegistry.AttachSource(mount, SourceRTMP, "default")
+	}
 
 	// Create a separate video stream with an 8 MB buffer up front, so we
 	// never have to swap the Buffer pointer under listeners that are
@@ -562,6 +576,9 @@ func (h *rtmpHandler) OnClose() {
 		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream {
 			h.relay.RemoveStream(h.mount)
 		}
+		if h.runtimeRegistry != nil {
+			h.runtimeRegistry.Remove(h.mount)
+		}
 	}
 	if h.videoMount != "" {
 		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream {
@@ -574,14 +591,14 @@ func (h *rtmpHandler) OnClose() {
 // `publishName` (from the publish command) into a tinyice mount path and
 // source password. Two layouts are supported:
 //
-//   1. OBS default — Server "rtmp://host/mount", Stream Key "password".
-//      The RTMP app is the mount; the stream key is the password. This is
-//      how encoders treat Twitch/YouTube/nginx-rtmp-style URLs, so OBS
-//      users can just fill in the two fields the way OBS shows them.
+//  1. OBS default — Server "rtmp://host/mount", Stream Key "password".
+//     The RTMP app is the mount; the stream key is the password. This is
+//     how encoders treat Twitch/YouTube/nginx-rtmp-style URLs, so OBS
+//     users can just fill in the two fields the way OBS shows them.
 //
-//   2. Classic tinyice — Server "rtmp://host/", Stream Key
-//      "mount?key=password". Kept for backward compatibility and CLIs
-//      that only take a single URL.
+//  2. Classic tinyice — Server "rtmp://host/", Stream Key
+//     "mount?key=password". Kept for backward compatibility and CLIs
+//     that only take a single URL.
 //
 // A publishing name that contains "?" always uses layout 2, so legacy
 // ?key= parameters keep working regardless of what's in the app slot.

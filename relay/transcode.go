@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -59,6 +60,7 @@ func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	}
 	tm.instances[cfg.OutputMount] = inst
 
+	go tm.runMetadataMirror(ctx, inst)
 	go tm.runTranscoder(ctx, inst)
 }
 
@@ -98,20 +100,40 @@ func (tm *TranscoderManager) runTranscoder(ctx context.Context, inst *Transcoder
 		"bitrate", inst.Config.Bitrate,
 	)
 
+	backoff := 5 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+			start := time.Now()
 			tm.safePerformTranscode(ctx, inst)
-			// Wait before retry if input stream wasn't found
+			if time.Since(start) > 30*time.Second {
+				backoff = 5 * time.Second
+			}
+			retryAfter := nextTranscoderRetryBackoff(&backoff)
+			logger.L.Infow("Transcoder: retrying", "name", inst.Config.Name, "backoff", retryAfter)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(retryAfter):
 			}
 		}
 	}
+}
+
+func nextTranscoderRetryBackoff(current *time.Duration) time.Duration {
+	const maxBackoff = 5 * time.Minute
+
+	if *current <= 0 {
+		*current = 5 * time.Second
+	}
+	delay := *current
+	*current *= 2
+	if *current > maxBackoff {
+		*current = maxBackoff
+	}
+	return delay
 }
 
 // safePerformTranscode wraps performTranscode with a panic recovery. Some
@@ -121,11 +143,12 @@ func (tm *TranscoderManager) runTranscoder(ctx context.Context, inst *Transcoder
 func (tm *TranscoderManager) safePerformTranscode(ctx context.Context, inst *TranscoderInstance) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.L.Errorw("Transcoder: recovered from panic",
+			logger.L.Errorw("Transcoder: recovered from panic, will retry",
 				"name", inst.Config.Name,
 				"input", inst.Config.InputMount,
 				"output", inst.Config.OutputMount,
 				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
 			)
 		}
 	}()
@@ -292,6 +315,7 @@ func resolveOpusApplication(s string) int {
 // as [bitrate_index][mpegVersion], with:
 //   - mpegVersion 0 = MPEG-2.5, 1 = reserved, 2 = MPEG-II, 3 = MPEG-I
 //   - bitrate_index 0..14 correspond to kbps values (15 is "invalid").
+//
 // -1 entries are unsupported bitrate/version combinations.
 var shineBitRates = [16][4]int64{
 	{-1, -1, -1, -1}, {8, -1, 8, 32}, {16, -1, 16, 40}, {24, -1, 24, 48},
@@ -343,6 +367,32 @@ func resolveOpusFrameSizeMS(ms int) int {
 		return ms
 	default:
 		return 20
+	}
+}
+
+func (tm *TranscoderManager) runMetadataMirror(ctx context.Context, inst *TranscoderInstance) {
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+
+	lastMirrored := ""
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			input, ok := tm.relay.GetStream(inst.Config.InputMount)
+			if !ok {
+				continue
+			}
+			currentSong := input.GetCurrentSong()
+			if currentSong == "" || currentSong == lastMirrored {
+				continue
+			}
+
+			output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+			output.SetCurrentSong(currentSong, tm.relay)
+			lastMirrored = currentSong
+		}
 	}
 }
 

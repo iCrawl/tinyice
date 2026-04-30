@@ -11,7 +11,7 @@ import (
 type HealthStatus int
 
 const (
-	StatusHealthy  HealthStatus = iota
+	StatusHealthy HealthStatus = iota
 	StatusDegraded
 	StatusDead
 )
@@ -76,6 +76,12 @@ func (hm *HealthMonitor) WithAutoRemove(timeout time.Duration) *HealthMonitor {
 	return hm
 }
 
+func (hm *HealthMonitor) AutoRemoveDeadEnabled() bool {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	return hm.autoRemoveDead
+}
+
 func (hm *HealthMonitor) OnEvent(fn func(StreamHealthEvent)) {
 	hm.onEvent = fn
 }
@@ -126,6 +132,36 @@ func (hm *HealthMonitor) check() {
 
 		if newStatus != oldStatus {
 			hm.lastStatus[ss.MountName] = newStatus
+			reason := "no data for " + time.Since(checkTime).Round(time.Second).String()
+			switch newStatus {
+			case StatusHealthy:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusRunning,
+					Class:     DiagnosticClassHealthRecovered,
+					Reason:    "stream healthy again",
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			case StatusDegraded:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDegraded,
+					Class:     DiagnosticClassHealthDegraded,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			case StatusDead:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDead,
+					Class:     DiagnosticClassHealthDead,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			}
 			logger.L.Infow("Stream health changed",
 				"mount", ss.MountName,
 				"from", oldStatus.String(),

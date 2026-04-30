@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/DatanoiseTV/tinyice/logger"
@@ -34,6 +35,19 @@ type ListenerHistory struct {
 	Timestamp time.Time `gorm:"index"`
 }
 
+// DiagnosticEvent records lifecycle/status transitions for a mount.
+type DiagnosticEvent struct {
+	ID        uint   `gorm:"primaryKey"`
+	Mount     string `gorm:"index"`
+	Status    string `gorm:"index"`
+	Class     string `gorm:"index"`
+	Reason    string
+	Error     string
+	Actor     string `gorm:"index"`
+	Details   string
+	Timestamp time.Time `gorm:"index"`
+}
+
 // AuditEntry records a single admin action for the audit log.
 type AuditEntry struct {
 	ID           uint      `gorm:"primaryKey" json:"id"`
@@ -62,7 +76,7 @@ func NewHistoryManager(path string) (*HistoryManager, error) {
 	}
 
 	// Perform auto-migration to ensure schema is up-to-date
-	err = db.AutoMigrate(&HistoryItem{}, &UserAgent{}, &ListenerHistory{}, &AuditEntry{})
+	err = db.AutoMigrate(&HistoryItem{}, &UserAgent{}, &ListenerHistory{}, &AuditEntry{}, &DiagnosticEvent{})
 	if err != nil {
 		return nil, err
 	}
@@ -112,6 +126,42 @@ func (hm *HistoryManager) RecordStats(mount string, listeners int, bi, bo int64)
 	}
 	if err := hm.db.Create(&item).Error; err != nil {
 		logger.L.Errorf("Failed to record historical stats: %v", err)
+	}
+}
+
+func (hm *HistoryManager) RecordDiagnostic(update DiagnosticUpdate) {
+	if hm == nil || update.Mount == "" {
+		return
+	}
+	ts := update.Timestamp
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	detailsJSON := ""
+	if len(update.Details) > 0 {
+		if data, err := json.Marshal(update.Details); err == nil {
+			detailsJSON = string(data)
+		}
+	}
+
+	item := DiagnosticEvent{
+		Mount:     update.Mount,
+		Status:    string(update.Status),
+		Class:     string(update.Class),
+		Reason:    update.Reason,
+		Error:     update.Error,
+		Actor:     string(update.Actor),
+		Details:   detailsJSON,
+		Timestamp: ts,
+	}
+	if err := hm.db.Create(&item).Error; err != nil {
+		logger.L.Errorf("Failed to record diagnostic event: %v", err)
+		return
+	}
+
+	cutoff := time.Now().Add(-90 * 24 * time.Hour)
+	if err := hm.db.Where("timestamp < ?", cutoff).Delete(&DiagnosticEvent{}).Error; err != nil {
+		logger.L.Errorf("Failed to prune diagnostic events: %v", err)
 	}
 }
 
@@ -177,6 +227,46 @@ func (hm *HistoryManager) GetAllHistoricalStats(duration time.Duration) map[stri
 		stats[r.Mount] = append(stats[r.Mount], r.HistoricalStat)
 	}
 	return stats
+}
+
+func (hm *HistoryManager) GetDiagnostics(mount string, limit int) []DiagnosticEntry {
+	if hm == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+
+	var events []DiagnosticEvent
+	err := hm.db.Where("mount = ?", mount).
+		Order("id DESC").
+		Limit(limit).
+		Find(&events).Error
+	if err != nil {
+		logger.L.Warnf("Failed to get diagnostics: %v", err)
+		return nil
+	}
+
+	out := make([]DiagnosticEntry, 0, len(events))
+	for _, event := range events {
+		entry := DiagnosticEntry{
+			Timestamp: event.Timestamp,
+			Status:    DiagnosticStatus(event.Status),
+			Class:     DiagnosticClass(event.Class),
+			Reason:    event.Reason,
+			Error:     event.Error,
+			Actor:     DiagnosticActor(event.Actor),
+		}
+		if event.Details != "" {
+			var details map[string]string
+			if err := json.Unmarshal([]byte(event.Details), &details); err == nil {
+				entry.Details = details
+			}
+		}
+		out = append(out, entry)
+	}
+
+	return out
 }
 
 // Add records a new song entry in the history, avoiding duplicates and pruning old entries.

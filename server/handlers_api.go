@@ -17,9 +17,9 @@ import (
 )
 
 type streamEventInfo struct {
-	Mount        string  `json:"mount"`
-	Name         string  `json:"name"`
-	Listeners    int     `json:"listeners"`
+	Mount     string `json:"mount"`
+	Name      string `json:"name"`
+	Listeners int    `json:"listeners"`
 	// Viewers counts HLS / WHEP browser playback sessions over the
 	// last 30 s — those clients fetch segments / hold a peer
 	// connection rather than holding the long-lived listener
@@ -39,11 +39,11 @@ type streamEventInfo struct {
 
 	// Video-only metrics. Zero on audio mounts; the frontend hides
 	// the video-stats strip when Width == 0.
-	VideoWidth    int     `json:"video_width,omitempty"`
-	VideoHeight   int     `json:"video_height,omitempty"`
-	VideoFPS      float64 `json:"video_fps,omitempty"`
-	VideoGOP      float64 `json:"video_gop,omitempty"`
-	VideoKbps     int     `json:"video_kbps,omitempty"`
+	VideoWidth  int     `json:"video_width,omitempty"`
+	VideoHeight int     `json:"video_height,omitempty"`
+	VideoFPS    float64 `json:"video_fps,omitempty"`
+	VideoGOP    float64 `json:"video_gop,omitempty"`
+	VideoKbps   int     `json:"video_kbps,omitempty"`
 }
 
 type relayEventInfo struct {
@@ -322,6 +322,9 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
 	type PublicStreamInfo struct {
 		Mount       string  `json:"mount"`
 		Name        string  `json:"name"`
@@ -416,8 +419,29 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return nil
 	}
+	sendMetadata := func(mc relay.MetadataChange) error {
+		if !s.Relay.GetStreamVisibility(mc.Mount) {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]string{
+			"mount":      mc.Mount,
+			"title":      mc.Title,
+			"artist":     mc.Artist,
+			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
 	if err := send(); err != nil {
 		return
+	}
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
 	}
 	for {
 		select {
@@ -425,8 +449,59 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
+				return
+			}
 		case <-ticker.C:
 			if err := send(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher, _ := w.(http.Flusher)
+
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
+	sendMetadata := func(mc relay.MetadataChange) error {
+		if !s.Relay.GetStreamVisibility(mc.Mount) {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]string{
+			"mount":      mc.Mount,
+			"title":      mc.Title,
+			"artist":     mc.Artist,
+			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-r.Context().Done():
+			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
 				return
 			}
 		}
@@ -520,9 +595,28 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := s.Relay.History.GetAllHistoricalStats(24 * time.Hour)
+	duration, err := parseInsightsDuration(r.URL.Query().Get("range"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stats := s.Relay.History.GetAllHistoricalStats(duration)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func parseInsightsDuration(raw string) (time.Duration, error) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "", "24H":
+		return 24 * time.Hour, nil
+	case "1H":
+		return time.Hour, nil
+	case "7D":
+		return 7 * 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("invalid insights range %q", raw)
+	}
 }
 
 func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {

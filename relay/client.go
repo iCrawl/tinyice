@@ -40,7 +40,7 @@ func (b *backoff) reset() {
 type RelayState int
 
 const (
-	RelayConnecting   RelayState = iota
+	RelayConnecting RelayState = iota
 	RelayConnected
 	RelayReconnecting
 	RelayFailed
@@ -62,10 +62,11 @@ type RelayInstance struct {
 }
 
 type RelayManager struct {
-	instances map[string]*RelayInstance
-	mu        sync.RWMutex
-	relay     *Relay
-	client    *http.Client
+	instances       map[string]*RelayInstance
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	client          *http.Client
 }
 
 func NewRelayManager(r *Relay) *RelayManager {
@@ -85,6 +86,12 @@ func NewRelayManager(r *Relay) *RelayManager {
 			},
 		},
 	}
+}
+
+func (rm *RelayManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.runtimeRegistry = rr
 }
 
 func (rm *RelayManager) StartRelay(url, mount, password string, burstSize int, visible bool) {
@@ -210,6 +217,15 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 		inst.mu.Lock()
 		inst.LastError = fmt.Sprintf("connection failed: %v", err)
 		inst.mu.Unlock()
+		rm.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     inst.Mount,
+			Status:    DiagnosticStatusError,
+			Class:     DiagnosticClassSourceDisconnect,
+			Reason:    "relay pull connection failed",
+			Error:     err.Error(),
+			Actor:     DiagnosticActorRelay,
+			Timestamp: time.Now(),
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -220,6 +236,14 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 	}
 
 	logger.L.Infow("Relay stream connected and pulling", "mount", inst.Mount)
+	rm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     inst.Mount,
+		Status:    DiagnosticStatusRunning,
+		Class:     DiagnosticClassRecoverySucceeded,
+		Reason:    "relay source connected",
+		Actor:     DiagnosticActorRelay,
+		Timestamp: time.Now(),
+	})
 
 	inst.mu.Lock()
 	inst.State = RelayConnected
@@ -229,6 +253,11 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 
 	stream := rm.relay.GetOrCreateStream(inst.Mount)
 	stream.SetSourceIP("relay-pull")
+	if rm.runtimeRegistry != nil {
+		rt := rm.runtimeRegistry.GetOrCreate(inst.Mount)
+		rt.Stream = stream
+		rm.runtimeRegistry.AttachSource(inst.Mount, SourceRelay, "default")
+	}
 
 	// Metadata
 	name := resp.Header.Get("Ice-Name")
