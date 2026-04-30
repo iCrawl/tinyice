@@ -28,6 +28,15 @@ import (
 //	relay := NewRelay(true, historyManager)
 //	stream := relay.GetOrCreateStream("/live")
 //	stats := relay.Snapshot()
+//
+// MetadataChange is emitted when a stream's current song changes.
+type MetadataChange struct {
+	Mount     string    `json:"mount"`
+	Title     string    `json:"title"`
+	Artist    string    `json:"artist"`
+	StartedAt time.Time `json:"started_at"`
+}
+
 type Relay struct {
 	Streams     map[string]*Stream // Active streams by mount point
 	mu          sync.RWMutex       // Mutex protecting the streams map
@@ -37,6 +46,10 @@ type Relay struct {
 	History     *HistoryManager    // Optional history manager for statistics
 	Listeners   *ListenerRegistry  // Operator-facing playback listener registry
 	Diagnostics *DiagnosticsStore  // Mount-scoped status and recent diagnostic history
+
+	metaSubs   []chan MetadataChange
+	lastMeta   map[string]MetadataChange
+	metaSubsMu sync.Mutex
 }
 
 func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
@@ -152,6 +165,56 @@ func (r *Relay) GetStream(mount string) (*Stream, bool) {
 func (r *Relay) UpdateMetadata(mount, song string) {
 	st := r.GetOrCreateStream(mount)
 	st.SetCurrentSong(song, r)
+}
+
+// SubscribeMetadata returns a channel that receives metadata changes.
+func (r *Relay) SubscribeMetadata() chan MetadataChange {
+	ch := make(chan MetadataChange, 16)
+	r.metaSubsMu.Lock()
+	r.metaSubs = append(r.metaSubs, ch)
+	r.metaSubsMu.Unlock()
+	return ch
+}
+
+// UnsubscribeMetadata removes and closes a metadata subscription channel.
+func (r *Relay) UnsubscribeMetadata(ch chan MetadataChange) {
+	r.metaSubsMu.Lock()
+	defer r.metaSubsMu.Unlock()
+	for i, sub := range r.metaSubs {
+		if sub == ch {
+			r.metaSubs = append(r.metaSubs[:i], r.metaSubs[i+1:]...)
+			close(ch)
+			return
+		}
+	}
+}
+
+// NotifyMetadataChange fans out a metadata change and remembers the latest
+// metadata per mount so late SSE subscribers get the current track.
+func (r *Relay) NotifyMetadataChange(mc MetadataChange) {
+	r.metaSubsMu.Lock()
+	defer r.metaSubsMu.Unlock()
+	if r.lastMeta == nil {
+		r.lastMeta = make(map[string]MetadataChange)
+	}
+	r.lastMeta[mc.Mount] = mc
+	for _, ch := range r.metaSubs {
+		select {
+		case ch <- mc:
+		default:
+		}
+	}
+}
+
+// LastMetadata returns the most recent metadata for all mounts.
+func (r *Relay) LastMetadata() []MetadataChange {
+	r.metaSubsMu.Lock()
+	defer r.metaSubsMu.Unlock()
+	out := make([]MetadataChange, 0, len(r.lastMeta))
+	for _, mc := range r.lastMeta {
+		out = append(out, mc)
+	}
+	return out
 }
 
 // DisconnectAllListeners kicks all listeners from all active streams

@@ -52,9 +52,10 @@ type Streamer struct {
 	cancel context.CancelFunc
 	mu     sync.RWMutex
 
-	fileCancel   context.CancelFunc
-	titleCache   map[string]string
-	titleFetchWg sync.WaitGroup
+	fileCancel    context.CancelFunc
+	outputSession *AutoDJOutputSession
+	titleCache    map[string]string
+	titleFetchWg  sync.WaitGroup
 
 	// Stats
 	BytesStreamed       int64
@@ -240,6 +241,32 @@ func (sm *StreamerManager) mountHasFreshData(mount string) bool {
 }
 
 func (sm *StreamerManager) activateRecoveredSongCommandPath(ctx context.Context, s *Streamer, path string) error {
+	s.mu.RLock()
+	restartStopped := s.State == StateStopped && !s.manualStop
+	s.mu.RUnlock()
+	if restartStopped {
+		s.Play()
+	}
+
+	if err := validateAudioFile(path); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	if s.outputSession == nil {
+		outputSession, err := NewAutoDJOutputSession(s)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.outputSession = outputSession
+	}
+	outputSession := s.outputSession
+	s.mu.Unlock()
+
+	if err := outputSession.Start(ctx); err != nil {
+		return err
+	}
 	return sm.streamFile(ctx, s, path, -1, -1)
 }
 
@@ -928,6 +955,16 @@ func (s *Streamer) MovePlaylistItem(from, to int) {
 
 func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 	logger.L.Infof("Streamer %s starting for mount %s", s.Name, s.OutputMount)
+	defer func() {
+		s.mu.Lock()
+		outputSession := s.outputSession
+		s.outputSession = nil
+		s.fileCancel = nil
+		s.mu.Unlock()
+		if outputSession != nil {
+			outputSession.Stop()
+		}
+	}()
 
 	for {
 		select {
@@ -935,12 +972,40 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			return
 		default:
 			if s.State != StatePlaying {
+				s.mu.Lock()
+				outputSession := s.outputSession
+				s.outputSession = nil
+				s.fileCancel = nil
+				s.mu.Unlock()
+				if outputSession != nil {
+					outputSession.Stop()
+				}
 				select {
 				case <-ctx.Done():
 					return
 				case <-s.stateCh:
 					continue
 				}
+			}
+
+			s.mu.Lock()
+			if s.outputSession == nil {
+				outputSession, err := NewAutoDJOutputSession(s)
+				if err != nil {
+					s.mu.Unlock()
+					logger.L.Errorf("Streamer %s: failed to create output session: %v", s.Name, err)
+					time.Sleep(1 * time.Second)
+					continue
+				}
+				s.outputSession = outputSession
+			}
+			outputSession := s.outputSession
+			s.mu.Unlock()
+
+			if err := outputSession.Start(ctx); err != nil {
+				logger.L.Errorf("Streamer %s: failed to start output session: %v", s.Name, err)
+				time.Sleep(1 * time.Second)
+				continue
 			}
 
 			s.mu.Lock()
@@ -1012,12 +1077,14 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			s.mu.Unlock()
 
 			if filePath == "" {
+				outputSession.SetSource(silencePCMSource{})
 				time.Sleep(1 * time.Second)
 				continue
 			}
 
 			if err := validateAudioFile(filePath); err != nil {
 				logger.L.Warnf("Streamer %s: Skipping invalid file %s: %v", s.Name, filePath, err)
+				outputSession.SetSource(silencePCMSource{})
 				continue
 			}
 
@@ -1142,11 +1209,8 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		s.runtimeRegistry.AttachSource(s.OutputMount, SourceAutoDJ, "default")
 	}
 	output.mu.Lock()
-	if s.InjectMetadata {
-		output.CurrentSong = s.CurrentFile
-		output.Name = s.Name
-		output.Visible = true
-	}
+	output.Name = s.Name
+	output.Visible = s.Visible
 	output.Bitrate = fmt.Sprintf("%d", s.Bitrate)
 	if s.Format == "opus" {
 		output.ContentType = "audio/ogg"
@@ -1154,9 +1218,6 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		output.ContentType = "audio/mpeg"
 	}
 	output.mu.Unlock()
-	if s.InjectMetadata {
-		sm.relay.UpdateMetadata(s.OutputMount, s.CurrentFile)
-	}
 
 	// Apply the streamer's volume setting (0..1) to the PCM stream before
 	// it reaches the encoder. When Volume is 1.0 the wrapper is a no-op.
@@ -1171,12 +1232,63 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		if decoder.SampleRate() != 48000 {
 			pcm = NewLinearResampler(pcm, decoder.SampleRate(), 48000)
 		}
-		EncodeOpus(ctx, sm.relay, output, pcm, s.Bitrate, &s.BytesStreamed, true)
 	} else {
-		EncodeMP3(ctx, sm.relay, output, pcm, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate())
+		// MP3 output session is fixed at 44.1 kHz, so normalize other
+		// decoder rates before handing frames to the persistent encoder.
+		if decoder.SampleRate() != 44100 {
+			pcm = NewLinearResampler(pcm, decoder.SampleRate(), 44100)
+		}
 	}
 
-	return nil
+	s.mu.RLock()
+	outputSession := s.outputSession
+	metadataSong := s.CurrentFile
+	metadataMount := s.OutputMount
+	injectMetadata := s.InjectMetadata
+	s.mu.RUnlock()
+	createdSession := false
+	if outputSession == nil {
+		s.mu.Lock()
+		if s.outputSession == nil {
+			created, err := NewAutoDJOutputSession(s)
+			if err != nil {
+				s.mu.Unlock()
+				return err
+			}
+			s.outputSession = created
+			createdSession = true
+		}
+		outputSession = s.outputSession
+		s.mu.Unlock()
+		if err := outputSession.Start(ctx); err != nil {
+			return err
+		}
+	}
+	if createdSession {
+		defer func() {
+			outputSession.Stop()
+			s.mu.Lock()
+			if s.outputSession == outputSession {
+				s.outputSession = nil
+			}
+			s.mu.Unlock()
+		}()
+	}
+
+	source := newReaderPCMFrameSource(pcm)
+	outputSession.SetSourceWithActivation(source, func() {
+		if injectMetadata && sm.relay != nil {
+			sm.relay.UpdateMetadata(metadataMount, metadataSong)
+		}
+	})
+
+	select {
+	case <-ctx.Done():
+		outputSession.SetSource(silencePCMSource{})
+		return ctx.Err()
+	case <-source.Done():
+		return nil
+	}
 }
 
 // gainReader multiplies every S16LE stereo sample it passes through by a

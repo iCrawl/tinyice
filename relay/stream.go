@@ -70,8 +70,8 @@ type Stream struct {
 
 	// Ogg/Opus specific state for proper synchronization
 	// These fields enable new listeners to start at proper page boundaries
-	OggHead         []byte  // Store Ogg headers for Opus/Ogg streams
-	OggHeaderOffset int64   // Absolute buffer offset where headers end
+	OggHead         []byte // Store Ogg headers for Opus/Ogg streams
+	OggHeaderOffset int64  // Absolute buffer offset where headers end
 	// VideoHeaders is the Annex-B SPS + PPS bytes for an H.264 video
 	// stream. Listeners that tune in mid-GOP need these injected before
 	// the first IDR — otherwise they get "non-existing PPS referenced"
@@ -93,15 +93,15 @@ type Stream struct {
 	// only crash on them. Subscribe() bumps a new listener's start
 	// offset up to this value.
 	MinListenerOffset int64
-	LastPageOffset  int64   // Absolute offset of the last valid Ogg page start
-	PageOffsets     []int64 // Circular list of last ~100 page starts
-	PageIndex       int     // Index for managing PageOffsets circular list
+	LastPageOffset    int64   // Absolute offset of the last valid Ogg page start
+	PageOffsets       []int64 // Circular list of last ~100 page starts
+	PageIndex         int     // Index for managing PageOffsets circular list
 
 	// Core streaming infrastructure
 	Buffer    *CircularBuffer          // Audio data buffer (typically 2MB)
 	listeners map[string]chan struct{} // Signal channels for connected listeners
-	mu     sync.RWMutex             // Mutex protecting all fields
-	closed int32                    // Atomic flag: 1 = stream closed
+	mu        sync.RWMutex             // Mutex protecting all fields
+	closed    int32                    // Atomic flag: 1 = stream closed
 
 	// Video metrics sliding window, protected by mu. Refreshed by
 	// RecordVideoSample on every frame and exposed via
@@ -656,12 +656,24 @@ func (s *Stream) UpdateMetadata(name, desc, genre, url, bitrate, contentType str
 // SetCurrentSong updates the current song info thread-safely
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.CurrentSong != song {
+	changed := s.CurrentSong != song
+	mount := s.MountName
+	artist := s.Name
+	if changed {
 		s.CurrentSong = song
+	}
+	s.mu.Unlock()
+
+	if changed && relay != nil {
 		if relay.History != nil {
-			relay.History.Add(s.MountName, song)
+			relay.History.Add(mount, song)
 		}
+		relay.NotifyMetadataChange(MetadataChange{
+			Mount:     mount,
+			Title:     song,
+			Artist:    artist,
+			StartedAt: time.Now(),
+		})
 	}
 }
 
@@ -670,6 +682,17 @@ func (s *Stream) GetCurrentSong() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.CurrentSong
+}
+
+func (s *Stream) ConfigureAutoDJOutput(name, bitrate, contentType string, visible bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Name = name
+	s.Bitrate = bitrate
+	s.ContentType = contentType
+	s.Visible = visible
+	s.IsOggStream = strings.Contains(strings.ToLower(contentType), "ogg") ||
+		strings.Contains(strings.ToLower(contentType), "opus")
 }
 
 // SetVisible updates the visibility of the stream thread-safely

@@ -361,6 +361,7 @@ func (s *Server) setupRoutes() *http.ServeMux {
 		s.handleRoot(w, r)
 	})
 	mux.HandleFunc("/events", s.handlePublicEvents)
+	mux.HandleFunc("/events/metadata", s.handleMetadataEvents)
 	mux.HandleFunc("/status-json.xsl", s.handleLegacyStats)
 	mux.HandleFunc("/metrics", s.handleMetrics)
 	// Serve frontend assets (Vite build output) at /assets/ — takes priority
