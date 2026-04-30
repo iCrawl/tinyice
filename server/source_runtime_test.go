@@ -2,6 +2,7 @@ package server
 
 import (
 	"bufio"
+	"context"
 	"io"
 	"net"
 	"net/http"
@@ -96,5 +97,48 @@ func TestHandleSourceRegistersAndRemovesIcecastRuntime(t *testing.T) {
 
 	if _, ok := s.RuntimeRegistry.Get("/live"); ok {
 		t.Fatal("expected runtime to be removed when source disconnects")
+	}
+}
+
+func TestHandleSourceAttachesRuntimeToResolvedTenant(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	pass, err := config.HashPassword("sourcepass")
+	if err != nil {
+		t.Fatalf("hash source password: %v", err)
+	}
+	tenant := s.TenantM.CreateTenant("tenant-a", "Tenant A", "free")
+	s.Config.DefaultSourcePassword = pass
+	s.Config.Mounts["/live"] = pass
+	s.Config.Users["admin"].Mounts["/live"] = pass
+
+	req := httptest.NewRequest(http.MethodPut, "/live", nil)
+	req = req.WithContext(context.WithValue(req.Context(), tenantContextKey, tenant))
+	req.RemoteAddr = "127.0.0.1:9003"
+	req.SetBasicAuth("source", "sourcepass")
+
+	rec := newSourceHijackRecorder(t)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		s.handleSource(rec, req)
+	}()
+
+	assertEventually(t, func() bool {
+		rt, ok := s.RuntimeRegistry.Get("/live")
+		return ok && rt.Source == relay.SourceIcecast && rt.TenantID == "tenant-a" && tenant.StreamCount() == 1
+	})
+
+	if err := rec.CloseClient(); err != nil {
+		t.Fatalf("close source client: %v", err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("source handler did not exit after client close")
+	}
+
+	if got := tenant.StreamCount(); got != 0 {
+		t.Fatalf("expected tenant stream count to detach after source disconnect, got %d", got)
 	}
 }

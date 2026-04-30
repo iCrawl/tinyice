@@ -173,6 +173,9 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 	})
 
 	tenantID := "default"
+	if tenant := TenantFromContext(r.Context()); tenant != nil {
+		tenantID = tenant.ID
+	}
 	stream := s.Relay.GetOrCreateStream(mount)
 	if s.RuntimeRegistry != nil {
 		rt := s.RuntimeRegistry.GetOrCreate(mount)
