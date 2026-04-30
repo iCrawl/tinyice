@@ -595,9 +595,28 @@ func (s *Server) handleInsights(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	stats := s.Relay.History.GetAllHistoricalStats(24 * time.Hour)
+	duration, err := parseInsightsDuration(r.URL.Query().Get("range"))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	stats := s.Relay.History.GetAllHistoricalStats(duration)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(stats)
+}
+
+func parseInsightsDuration(raw string) (time.Duration, error) {
+	switch strings.ToUpper(strings.TrimSpace(raw)) {
+	case "", "24H":
+		return 24 * time.Hour, nil
+	case "1H":
+		return time.Hour, nil
+	case "7D":
+		return 7 * 24 * time.Hour, nil
+	default:
+		return 0, fmt.Errorf("invalid insights range %q", raw)
+	}
 }
 
 func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
