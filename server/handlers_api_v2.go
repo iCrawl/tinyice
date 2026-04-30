@@ -91,6 +91,26 @@ func (s *Server) apiGetAuditLog(w http.ResponseWriter, r *http.Request) {
 // Streams
 // ---------------------------------------------------------------------------
 
+func mountBurstSize(cfg *config.Config, mount string) int {
+	if cfg == nil || cfg.AdvancedMounts == nil {
+		return 0
+	}
+	if ms := cfg.AdvancedMounts[mount]; ms != nil {
+		return ms.BurstSize
+	}
+	return 0
+}
+
+func mountMaxListeners(cfg *config.Config, mount string) int {
+	if cfg == nil || cfg.AdvancedMounts == nil {
+		return 0
+	}
+	if ms := cfg.AdvancedMounts[mount]; ms != nil {
+		return ms.MaxListeners
+	}
+	return 0
+}
+
 func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	if !ok {
@@ -110,23 +130,77 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type streamInfo struct {
-		Mount       string  `json:"mount"`
-		ContentType string  `json:"content_type"`
-		Bitrate     string  `json:"bitrate"`
-		Listeners   int     `json:"listeners"`
-		SourceIP    string  `json:"source_ip"`
-		Visible     bool    `json:"visible"`
-		Enabled     bool    `json:"enabled"`
-		Health      float64 `json:"health"`
-		Uptime      string  `json:"uptime"`
-		CurrentSong string  `json:"current_song"`
-		Name        string  `json:"name"`
-		HasVideo    bool    `json:"has_video"`
-		VideoWidth  int     `json:"video_width,omitempty"`
-		VideoHeight int     `json:"video_height,omitempty"`
-		VideoFPS    float64 `json:"video_fps,omitempty"`
-		VideoGOP    float64 `json:"video_gop,omitempty"`
-		VideoKbps   int     `json:"video_kbps,omitempty"`
+		Mount           string                  `json:"mount"`
+		ContentType     string                  `json:"content_type"`
+		Bitrate         string                  `json:"bitrate"`
+		BurstSize       int                     `json:"burst_size"`
+		Listeners       int                     `json:"listeners"`
+		MaxListeners    int                     `json:"max_listeners"`
+		SourceIP        string                  `json:"source_ip"`
+		SourceKind      string                  `json:"source_kind,omitempty"`
+		SourceLabel     string                  `json:"source_label,omitempty"`
+		Visible         bool                    `json:"visible"`
+		Enabled         bool                    `json:"enabled"`
+		Health          float64                 `json:"health"`
+		Uptime          string                  `json:"uptime"`
+		CurrentSong     string                  `json:"current_song"`
+		Name            string                  `json:"name"`
+		Status          string                  `json:"status,omitempty"`
+		StatusClass     string                  `json:"status_class,omitempty"`
+		StatusReason    string                  `json:"status_reason,omitempty"`
+		LastError       string                  `json:"last_error,omitempty"`
+		StatusUpdatedAt int64                   `json:"status_updated_at,omitempty"`
+		History         []relay.DiagnosticEntry `json:"history,omitempty"`
+		HasVideo        bool                    `json:"has_video"`
+		VideoWidth      int                     `json:"video_width,omitempty"`
+		VideoHeight     int                     `json:"video_height,omitempty"`
+		VideoFPS        float64                 `json:"video_fps,omitempty"`
+		VideoGOP        float64                 `json:"video_gop,omitempty"`
+		VideoKbps       int                     `json:"video_kbps,omitempty"`
+	}
+	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
+		diag, ok := r.Diagnostics.Current(mount)
+		if !ok {
+			return
+		}
+		info.Status = string(diag.Status)
+		info.StatusClass = string(diag.Class)
+		info.StatusReason = diag.Reason
+		info.LastError = diag.Error
+		info.StatusUpdatedAt = diag.UpdatedAt.Unix()
+		info.History = diag.History
+	}
+	applyStreamSource := func(info *streamInfo, mount string) {
+		sourceKind := ""
+		sourceLabel := ""
+		if s.RuntimeRegistry != nil {
+			if rt, ok := s.RuntimeRegistry.Get(mount); ok {
+				sourceKind = string(rt.Source)
+				switch rt.Source {
+				case relay.SourceAutoDJ:
+					sourceLabel = "AutoDJ"
+				case relay.SourceRelay:
+					sourceLabel = "Relay"
+				case relay.SourceWebRTC:
+					sourceLabel = "WebRTC"
+				case relay.SourceRTMP:
+					sourceLabel = "RTMP"
+				case relay.SourceSRT:
+					sourceLabel = "SRT"
+				case relay.SourceIcecast:
+					sourceLabel = "Icecast"
+				default:
+					sourceKind = ""
+				}
+			}
+		}
+		info.SourceKind = sourceKind
+		info.SourceLabel = sourceLabel
+		if info.Status == "" && sourceKind != "" && sourceKind != string(relay.SourceUnknown) {
+			info.Status = string(relay.DiagnosticStatusRunning)
+			info.StatusClass = string(relay.DiagnosticClassPlaybackStarted)
+			info.StatusReason = "stream is running"
+		}
 	}
 
 	var result []streamInfo
@@ -140,19 +214,23 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
 			info := streamInfo{
-				Mount:       st.MountName,
-				ContentType: st.ContentType,
-				Bitrate:     st.Bitrate,
-				Listeners:   st.ListenersCount,
-				SourceIP:    st.SourceIP,
-				Visible:     st.Visible,
-				Enabled:     st.Enabled,
-				Health:      st.Health,
-				Uptime:      st.Uptime,
-				CurrentSong: st.CurrentSong,
-				Name:        st.Name,
-				HasVideo:    videoMounts[st.MountName],
+				Mount:        st.MountName,
+				ContentType:  st.ContentType,
+				Bitrate:      st.Bitrate,
+				BurstSize:    mountBurstSize(s.Config, st.MountName),
+				Listeners:    st.ListenersCount,
+				MaxListeners: mountMaxListeners(s.Config, st.MountName),
+				SourceIP:     st.SourceIP,
+				Visible:      st.Visible,
+				Enabled:      st.Enabled,
+				Health:       st.Health,
+				Uptime:       st.Uptime,
+				CurrentSong:  st.CurrentSong,
+				Name:         st.Name,
+				HasVideo:     videoMounts[st.MountName],
 			}
+			applyStreamDiagnostic(&info, s.Relay, st.MountName)
+			applyStreamSource(&info, st.MountName)
 			// Pull video metrics from the /video sibling (that's where
 			// ingest records them) so the parent row in the UI carries
 			// the numbers the operator expects to see alongside its
@@ -180,10 +258,14 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
 			result = append(result, streamInfo{
-				Mount:   mount,
-				Visible: visible,
-				Enabled: !disabled,
+				Mount:        mount,
+				BurstSize:    mountBurstSize(s.Config, mount),
+				MaxListeners: mountMaxListeners(s.Config, mount),
+				Visible:      visible,
+				Enabled:      !disabled,
 			})
+			applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+			applyStreamSource(&result[len(result)-1], mount)
 		}
 	}
 	for _, u := range s.Config.Users {
@@ -193,10 +275,14 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
 				result = append(result, streamInfo{
-					Mount:   mount,
-					Visible: visible,
-					Enabled: !disabled,
+					Mount:        mount,
+					BurstSize:    mountBurstSize(s.Config, mount),
+					MaxListeners: mountMaxListeners(s.Config, mount),
+					Visible:      visible,
+					Enabled:      !disabled,
 				})
+				applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+				applyStreamSource(&result[len(result)-1], mount)
 			}
 		}
 	}
@@ -448,28 +534,28 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type autoDJInfo struct {
-		Name           string               `json:"name"`
-		Mount          string               `json:"mount"`
-		State          int                  `json:"state"`
-		CurrentSong    string               `json:"current_song"`
-		StartTime      int64                `json:"start_time"`
-		Duration       float64              `json:"duration"`
-		PlaylistPos    int                  `json:"playlist_pos"`
-		PlaylistLen    int                  `json:"playlist_len"`
-		Shuffle        bool                 `json:"shuffle"`
-		Loop           bool                 `json:"loop"`
-		InjectMetadata bool                 `json:"inject_metadata"`
-		Visible        bool                 `json:"visible"`
-		MusicDir       string               `json:"music_dir"`
-		Format         string               `json:"format"`
-		Bitrate        int                  `json:"bitrate"`
-		Enabled        bool                 `json:"enabled"`
-		MPDEnabled     bool                 `json:"mpd_enabled"`
-		MPDPort        string               `json:"mpd_port"`
+		Name               string               `json:"name"`
+		Mount              string               `json:"mount"`
+		State              int                  `json:"state"`
+		CurrentSong        string               `json:"current_song"`
+		StartTime          int64                `json:"start_time"`
+		Duration           float64              `json:"duration"`
+		PlaylistPos        int                  `json:"playlist_pos"`
+		PlaylistLen        int                  `json:"playlist_len"`
+		Shuffle            bool                 `json:"shuffle"`
+		Loop               bool                 `json:"loop"`
+		InjectMetadata     bool                 `json:"inject_metadata"`
+		Visible            bool                 `json:"visible"`
+		MusicDir           string               `json:"music_dir"`
+		Format             string               `json:"format"`
+		Bitrate            int                  `json:"bitrate"`
+		Enabled            bool                 `json:"enabled"`
+		MPDEnabled         bool                 `json:"mpd_enabled"`
+		MPDPort            string               `json:"mpd_port"`
 		LastPlaylist       string               `json:"last_playlist"`
 		SongCommand        string               `json:"song_command"`
-		SongCommandTimeout int                   `json:"song_command_timeout"`
-		Queue              []relay.PlaylistItem  `json:"queue"`
+		SongCommandTimeout int                  `json:"song_command_timeout"`
+		Queue              []relay.PlaylistItem `json:"queue"`
 	}
 
 	var result []autoDJInfo
@@ -486,14 +572,14 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		info := autoDJInfo{
-			Name:           adj.Name,
-			Mount:          adj.Mount,
-			Format:         adj.Format,
-			Bitrate:        adj.Bitrate,
-			Enabled:        adj.Enabled,
-			MusicDir:       adj.MusicDir,
-			MPDEnabled:     adj.MPDEnabled,
-			MPDPort:        adj.MPDPort,
+			Name:               adj.Name,
+			Mount:              adj.Mount,
+			Format:             adj.Format,
+			Bitrate:            adj.Bitrate,
+			Enabled:            adj.Enabled,
+			MusicDir:           adj.MusicDir,
+			MPDEnabled:         adj.MPDEnabled,
+			MPDPort:            adj.MPDPort,
 			LastPlaylist:       adj.LastPlaylist,
 			SongCommand:        adj.SongCommand,
 			SongCommandTimeout: adj.SongCommandTimeout,
@@ -537,16 +623,16 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name           string `json:"name"`
-		Mount          string `json:"mount"`
-		MusicDir       string `json:"music_dir"`
-		Format         string `json:"format"`
-		Bitrate        int    `json:"bitrate"`
-		Loop           bool   `json:"loop"`
-		InjectMetadata bool   `json:"inject_metadata"`
-		MPDEnabled     bool   `json:"mpd_enabled"`
-		MPDPort        string `json:"mpd_port"`
-		MPDPassword    string `json:"mpd_password"`
+		Name               string `json:"name"`
+		Mount              string `json:"mount"`
+		MusicDir           string `json:"music_dir"`
+		Format             string `json:"format"`
+		Bitrate            int    `json:"bitrate"`
+		Loop               bool   `json:"loop"`
+		InjectMetadata     bool   `json:"inject_metadata"`
+		MPDEnabled         bool   `json:"mpd_enabled"`
+		MPDPort            string `json:"mpd_port"`
+		MPDPassword        string `json:"mpd_password"`
 		Visible            bool   `json:"visible"`
 		SongCommand        string `json:"song_command"`
 		SongCommandTimeout int    `json:"song_command_timeout"`
@@ -579,16 +665,16 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	adj := &config.AutoDJConfig{
-		Name:           body.Name,
-		Mount:          body.Mount,
-		MusicDir:       absMusicDir,
-		Format:         body.Format,
-		Bitrate:        body.Bitrate,
-		Enabled:        true,
-		Loop:           body.Loop,
-		InjectMetadata: body.InjectMetadata,
-		MPDEnabled:     body.MPDEnabled,
-		MPDPort:        body.MPDPort,
+		Name:               body.Name,
+		Mount:              body.Mount,
+		MusicDir:           absMusicDir,
+		Format:             body.Format,
+		Bitrate:            body.Bitrate,
+		Enabled:            true,
+		Loop:               body.Loop,
+		InjectMetadata:     body.InjectMetadata,
+		MPDEnabled:         body.MPDEnabled,
+		MPDPort:            body.MPDPort,
 		MPDPassword:        body.MPDPassword,
 		Visible:            body.Visible,
 		SongCommand:        body.SongCommand,

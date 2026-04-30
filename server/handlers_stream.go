@@ -157,6 +157,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 	bufrw.Flush()
 
 	logger.L.Infow("Source connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusRunning,
+		Class:     relay.DiagnosticClassRecoverySucceeded,
+		Reason:    "source connected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_connect", map[string]interface{}{
 		"mount": mount,
 		"ip":    r.RemoteAddr,
@@ -164,7 +172,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		"name":  r.Header.Get("Ice-Name"),
 	})
 
+	tenantID := "default"
 	stream := s.Relay.GetOrCreateStream(mount)
+	if s.RuntimeRegistry != nil {
+		rt := s.RuntimeRegistry.GetOrCreate(mount)
+		rt.Stream = stream
+		s.RuntimeRegistry.AttachSource(mount, relay.SourceIcecast, tenantID)
+		defer s.RuntimeRegistry.Remove(mount)
+	}
 	stream.SetSourceIP(r.RemoteAddr)
 
 	s.updateSourceMetadata(stream, mount, r)
@@ -206,6 +221,14 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	logger.L.Infow("Source disconnected", "mount", mount)
+	s.Relay.Diagnostics.Record(relay.DiagnosticUpdate{
+		Mount:     mount,
+		Status:    relay.DiagnosticStatusStopped,
+		Class:     relay.DiagnosticClassSourceDisconnect,
+		Reason:    "source disconnected",
+		Actor:     relay.DiagnosticActorIcecastSource,
+		Timestamp: time.Now(),
+	})
 	s.dispatchWebhook("source_disconnect", map[string]interface{}{
 		"mount": mount,
 	})
@@ -323,8 +346,25 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 
 	flusher, _ := w.(http.Flusher)
 	id := r.RemoteAddr + "-" + fmt.Sprintf("%d", time.Now().UnixNano())
+	listener := &relay.Listener{
+		ID:             id,
+		Protocol:       relay.ListenerProtocolHTTP,
+		RequestedMount: originalMount,
+		CurrentMount:   mount,
+		RemoteAddr:     r.RemoteAddr,
+		UserAgent:      r.Header.Get("User-Agent"),
+		Connected:      time.Now(),
+		DisconnectCh:   make(chan struct{}),
+		MoveCh:         make(chan relay.ListenerCommand, 1),
+	}
+	registered := false
 	logger.L.Infow("Listener connected", "mount", mount, "ip", r.RemoteAddr, "ua", r.Header.Get("User-Agent"))
-	defer logger.L.Infow("Listener disconnected", "mount", mount, "ip", r.RemoteAddr)
+	defer func() {
+		if registered {
+			s.Relay.Listeners.Unregister(listener.ID)
+		}
+		logger.L.Infow("Listener disconnected", "mount", mount, "ip", r.RemoteAddr)
+	}()
 
 	recoveryTicker := time.NewTicker(10 * time.Second)
 	defer recoveryTicker.Stop()
@@ -390,9 +430,15 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("icy-name", s.Config.PageTitle)
 		}
 
-		if s.Config.MaxListeners > 0 && stream.ListenersCount() >= s.Config.MaxListeners {
+		listenerLimit := s.effectiveMountListenerLimit(mount)
+		if !registered && listenerLimit > 0 && s.Relay.Listeners.CountForMount(mount) >= listenerLimit {
 			http.Error(w, "Server Full", http.StatusServiceUnavailable)
 			return
+		}
+		if !registered {
+			listener.CurrentMount = mount
+			s.Relay.Listeners.Register(listener)
+			registered = true
 		}
 
 		w.Header().Set("Content-Type", stream.ContentType)
@@ -412,6 +458,18 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) effectiveMountListenerLimit(mount string) int {
+	if s.Config == nil {
+		return 0
+	}
+	if s.Config.AdvancedMounts != nil {
+		if ms := s.Config.AdvancedMounts[mount]; ms != nil && ms.MaxListeners > 0 {
+			return ms.MaxListeners
+		}
+	}
+	return s.Config.MaxListeners
+}
+
 func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int) bool {
 	// Burst size defaults to 512 KiB but can be overridden per mount via
 	// AdvancedMounts.BurstSize (the "Advanced Mount Settings" UI field).
@@ -424,6 +482,10 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 	}
 	offset, signal := stream.Subscribe(id, burst)
 	defer stream.Unsubscribe(id)
+	var disconnectCh <-chan struct{}
+	if listener, ok := s.Relay.Listeners.Listener(id); ok {
+		disconnectCh = listener.DisconnectCh
+	}
 
 	// For Ogg streams (Opus / Vorbis / FLAC-in-Ogg) route all output through
 	// a per-listener Ogg page rewriter. It regenerates the bitstream serial,
@@ -492,6 +554,8 @@ func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream 
 		case <-s.done:
 			return false
 		case <-r.Context().Done():
+			return false
+		case <-disconnectCh:
 			return false
 		case <-recoveryTicker.C:
 			if currentMount != originalMount {

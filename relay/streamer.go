@@ -28,24 +28,25 @@ const (
 )
 
 type Streamer struct {
-	Name           string
-	OutputMount    string
-	MusicDir       string
-	Format         string
-	Bitrate        int
-	Playlist       []PlaylistSong
-	Queue          []string
-	CurrentPos     int
-	State          StreamerState
-	Loop           bool
-	Shuffle        bool
-	InjectMetadata bool
-	Visible        bool
-	MPDPassword    string
-	LastPlaylist        string
-	SongCommand         string
-	SongCommandTimeout  int
-	Volume              float64 // 0..1 playback gain applied before encode
+	Name               string
+	OutputMount        string
+	MusicDir           string
+	Format             string
+	Bitrate            int
+	Playlist           []PlaylistSong
+	Queue              []string
+	CurrentPos         int
+	State              StreamerState
+	Loop               bool
+	Shuffle            bool
+	InjectMetadata     bool
+	Visible            bool
+	MPDPassword        string
+	LastPlaylist       string
+	SongCommand        string
+	SongCommandTimeout int
+	Volume             float64 // 0..1 playback gain applied before encode
+	manualStop         bool
 
 	relay  *Relay
 	cancel context.CancelFunc
@@ -71,28 +72,181 @@ type Streamer struct {
 	MPDServer           *MPDServer
 	NextID              int
 	PlaylistVersion     uint32
+	runtimeRegistry     *RuntimeRegistry
 	idleCh              chan string
 	stateCh             chan struct{}
 }
 
 type StreamerManager struct {
-	instances map[string]*Streamer // key is OutputMount
-	mu        sync.RWMutex
-	relay     *Relay
-	config    *config.Config
+	instances       map[string]*Streamer // key is OutputMount
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
+
+	deadRecovery map[string]context.CancelFunc
+
+	recoveryExecSongCommand func(*Streamer) (string, error)
+	recoveryAfter           func(time.Duration) <-chan time.Time
+	recoveryActivatePath    func(context.Context, *StreamerManager, *Streamer, string) error
 }
 
 func NewStreamerManager(r *Relay, cfg *config.Config) *StreamerManager {
-	return &StreamerManager{
-		instances: make(map[string]*Streamer),
-		relay:     r,
-		config:    cfg,
+	sm := &StreamerManager{
+		instances:    make(map[string]*Streamer),
+		relay:        r,
+		config:       cfg,
+		deadRecovery: make(map[string]context.CancelFunc),
 	}
+	sm.recoveryExecSongCommand = func(s *Streamer) (string, error) { return s.execSongCommand() }
+	sm.recoveryAfter = time.After
+	sm.recoveryActivatePath = func(ctx context.Context, sm *StreamerManager, s *Streamer, path string) error {
+		return sm.activateRecoveredSongCommandPath(ctx, s, path)
+	}
+	return sm
+}
+
+func (sm *StreamerManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.runtimeRegistry = rr
+	for _, inst := range sm.instances {
+		inst.runtimeRegistry = rr
+	}
+}
+
+func (sm *StreamerManager) DeadRecoveryActive(mount string) bool {
+	sm.mu.RLock()
+	defer sm.mu.RUnlock()
+	_, ok := sm.deadRecovery[mount]
+	return ok
+}
+
+func (sm *StreamerManager) RecoverDeadSongCommandMount(mount string) {
+	sm.mu.Lock()
+	streamer, ok := sm.instances[mount]
+	if !ok || streamer.SongCommand == "" {
+		sm.mu.Unlock()
+		return
+	}
+	if _, running := sm.deadRecovery[mount]; running {
+		sm.mu.Unlock()
+		return
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	sm.deadRecovery[mount] = cancel
+	sm.mu.Unlock()
+
+	go sm.runDeadSongCommandRecovery(ctx, streamer)
+}
+
+func (sm *StreamerManager) clearDeadRecovery(mount string) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	delete(sm.deadRecovery, mount)
+}
+
+func (sm *StreamerManager) runDeadSongCommandRecovery(ctx context.Context, s *Streamer) {
+	defer sm.clearDeadRecovery(s.OutputMount)
+
+	if sm.recoveryExecSongCommand == nil {
+		return
+	}
+
+	if s.relay != nil && s.OutputMount != "" {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     s.OutputMount,
+			Status:    DiagnosticStatusRecovering,
+			Class:     DiagnosticClassRecoveryStarted,
+			Reason:    "retrying song_command after dead health event",
+			Actor:     DiagnosticActorAutoDJ,
+			Timestamp: time.Now(),
+		})
+	}
+
+	bo := &backoff{base: time.Second, max: time.Minute}
+	for {
+		if !sm.streamerEligibleForDeadRecovery(s) {
+			return
+		}
+		if sm.mountHasFreshData(s.OutputMount) {
+			return
+		}
+		path, err := sm.recoveryExecSongCommand(s)
+		if err == nil && sm.recoveryActivatePath != nil {
+			err = sm.recoveryActivatePath(ctx, sm, s, path)
+		}
+		if err == nil && sm.mountHasFreshData(s.OutputMount) {
+			if s.relay != nil && s.OutputMount != "" {
+				now := time.Now()
+				s.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:              s.OutputMount,
+					Status:             DiagnosticStatusRunning,
+					Class:              DiagnosticClassRecoverySucceeded,
+					Reason:             "dead mount recovered and resumed playback",
+					Actor:              DiagnosticActorAutoDJ,
+					Timestamp:          now,
+					LastRecoveryAt:     now,
+					LastRecoveryResult: "success",
+				})
+			}
+			return
+		}
+		if err != nil && s.relay != nil && s.OutputMount != "" {
+			now := time.Now()
+			s.relay.Diagnostics.Record(DiagnosticUpdate{
+				Mount:              s.OutputMount,
+				Status:             DiagnosticStatusError,
+				Class:              DiagnosticClassRecoveryFailed,
+				Reason:             "dead mount recovery attempt failed",
+				Error:              err.Error(),
+				Actor:              DiagnosticActorAutoDJ,
+				Timestamp:          now,
+				LastRecoveryAt:     now,
+				LastRecoveryResult: "failed",
+			})
+		}
+		delay := bo.next()
+		select {
+		case <-ctx.Done():
+			return
+		case <-sm.recoveryAfter(delay):
+		}
+	}
+}
+
+func (sm *StreamerManager) streamerEligibleForDeadRecovery(s *Streamer) bool {
+	if s == nil || s.SongCommand == "" {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.manualStop {
+		return false
+	}
+	return s.State == StatePlaying || s.State == StateStopped
+}
+
+func (sm *StreamerManager) mountHasFreshData(mount string) bool {
+	stream, ok := sm.relay.GetStream(mount)
+	if !ok {
+		return false
+	}
+	stream.mu.RLock()
+	last := stream.LastDataReceived
+	stream.mu.RUnlock()
+	return !last.IsZero() && time.Since(last) <= 5*time.Second
+}
+
+func (sm *StreamerManager) activateRecoveredSongCommandPath(ctx context.Context, s *Streamer, path string) error {
+	return sm.streamFile(ctx, s, path, -1, -1)
 }
 
 func (s *Streamer) Play() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.manualStop = false
 	s.State = StatePlaying
 	s.signalStateChange()
 }
@@ -186,6 +340,7 @@ func (s *Streamer) ClearQueue() {
 func (s *Streamer) Stop() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.manualStop = true
 	s.State = StateStopped
 	if s.fileCancel != nil {
 		s.fileCancel()
@@ -647,29 +802,30 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 	}
 
 	s := &Streamer{
-		Name:              name,
-		OutputMount:       mount,
-		MusicDir:          absMusicDir,
-		Format:            format,
-		Bitrate:           bitrate,
-		Playlist:          initialPlaylist,
-		State:             StateStopped,
-		Loop:              loop,
-		InjectMetadata:    injectMetadata,
-		Visible:           visible,
-		MPDPassword:       mpdPassword,
+		Name:               name,
+		OutputMount:        mount,
+		MusicDir:           absMusicDir,
+		Format:             format,
+		Bitrate:            bitrate,
+		Playlist:           initialPlaylist,
+		State:              StateStopped,
+		Loop:               loop,
+		InjectMetadata:     injectMetadata,
+		Visible:            visible,
+		MPDPassword:        mpdPassword,
 		LastPlaylist:       lastPlaylist,
 		SongCommand:        songCommand,
 		SongCommandTimeout: songCommandTimeout,
 		relay:              sm.relay,
-		cancel:            cancel,
-		titleCache:        make(map[string]string),
-		NextID:            nextID, // Start NextID after initial playlist
-		CurrentPlayingPos: -1,
-		CurrentPlayingID:  -1,
-		PlaylistVersion:   1,
-		idleCh:            make(chan string, 10),
-		stateCh:           make(chan struct{}, 1),
+		runtimeRegistry:    sm.runtimeRegistry,
+		cancel:             cancel,
+		titleCache:         make(map[string]string),
+		NextID:             nextID, // Start NextID after initial playlist
+		CurrentPlayingPos:  -1,
+		CurrentPlayingID:   -1,
+		PlaylistVersion:    1,
+		idleCh:             make(chan string, 10),
+		stateCh:            make(chan struct{}, 1),
 	}
 
 	if mpdEnabled && mpdPort != "" {
@@ -980,6 +1136,11 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	// Update stream metadata under the output stream's mutex so concurrent
 	// Snapshot / listener reads see a coherent set of fields.
 	output := sm.relay.GetOrCreateStream(s.OutputMount)
+	if s.runtimeRegistry != nil {
+		rt := s.runtimeRegistry.GetOrCreate(s.OutputMount)
+		rt.Stream = output
+		s.runtimeRegistry.AttachSource(s.OutputMount, SourceAutoDJ, "default")
+	}
 	output.mu.Lock()
 	if s.InjectMetadata {
 		output.CurrentSong = s.CurrentFile

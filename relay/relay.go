@@ -29,19 +29,23 @@ import (
 //	stream := relay.GetOrCreateStream("/live")
 //	stats := relay.Snapshot()
 type Relay struct {
-	Streams    map[string]*Stream // Active streams by mount point
-	mu         sync.RWMutex       // Mutex protecting the streams map
-	LowLatency bool               // Whether to optimize for low latency
-	BytesIn    int64              // Global bytes received counter
-	BytesOut   int64              // Global bytes sent counter
-	History    *HistoryManager    // Optional history manager for statistics
+	Streams     map[string]*Stream // Active streams by mount point
+	mu          sync.RWMutex       // Mutex protecting the streams map
+	LowLatency  bool               // Whether to optimize for low latency
+	BytesIn     int64              // Global bytes received counter
+	BytesOut    int64              // Global bytes sent counter
+	History     *HistoryManager    // Optional history manager for statistics
+	Listeners   *ListenerRegistry  // Operator-facing playback listener registry
+	Diagnostics *DiagnosticsStore  // Mount-scoped status and recent diagnostic history
 }
 
 func NewRelay(lowLatency bool, history *HistoryManager) *Relay {
 	return &Relay{
-		Streams:    make(map[string]*Stream),
-		LowLatency: lowLatency,
-		History:    history,
+		Streams:     make(map[string]*Stream),
+		LowLatency:  lowLatency,
+		History:     history,
+		Listeners:   NewListenerRegistry(),
+		Diagnostics: NewDiagnosticsStore(10),
 	}
 }
 

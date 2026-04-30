@@ -54,24 +54,25 @@ var assetFS embed.FS
 // multiple goroutines concurrently, so all handler methods must be safe
 // for concurrent access.
 type Server struct {
-	Config      *config.Config           // Application configuration
-	Relay       *relay.Relay             // Core relay/streaming engine
-	RelayM      *relay.RelayManager      // Relay stream management
-	TranscoderM *relay.TranscoderManager // Transcoding management
-	HealthM     *relay.HealthMonitor      // Stream health monitoring
-	WebRTCM     *relay.WebRTCManager     // WebRTC connection management
-	StreamerM   *relay.StreamerManager   // AutoDJ/streamer management
-	RTMP        *relay.RTMPServer         // RTMP ingest server (optional)
-	SRT         *relay.SRTServer          // SRT ingest server (optional)
-	TenantM     *relay.TenantManager      // Multi-tenant management
-	mpdServer   *relay.MPDServer         // MPD protocol server (optional)
-	tmpl        *template.Template       // HTML template for web interface (legacy)
-	shell       *ShellRenderer           // New Preact frontend renderer
-	Version     string                   // TinyIce version
-	Commit      string                   // Git commit hash
-	httpServers []*http.Server           // Active HTTP servers
-	startTime   time.Time                // Server start time
-	AuthLog     *zap.SugaredLogger
+	Config          *config.Config           // Application configuration
+	Relay           *relay.Relay             // Core relay/streaming engine
+	RuntimeRegistry *relay.RuntimeRegistry   // Audio-first mount lifecycle registry
+	RelayM          *relay.RelayManager      // Relay stream management
+	TranscoderM     *relay.TranscoderManager // Transcoding management
+	HealthM         *relay.HealthMonitor     // Stream health monitoring
+	WebRTCM         *relay.WebRTCManager     // WebRTC connection management
+	StreamerM       *relay.StreamerManager   // AutoDJ/streamer management
+	RTMP            *relay.RTMPServer        // RTMP ingest server (optional)
+	SRT             *relay.SRTServer         // SRT ingest server (optional)
+	TenantM         *relay.TenantManager     // Multi-tenant management
+	mpdServer       *relay.MPDServer         // MPD protocol server (optional)
+	tmpl            *template.Template       // HTML template for web interface (legacy)
+	shell           *ShellRenderer           // New Preact frontend renderer
+	Version         string                   // TinyIce version
+	Commit          string                   // Git commit hash
+	httpServers     []*http.Server           // Active HTTP servers
+	startTime       time.Time                // Server start time
+	AuthLog         *zap.SugaredLogger
 
 	sessions   map[string]*session
 	sessionsMu sync.RWMutex
@@ -106,6 +107,8 @@ type Server struct {
 
 	tokenSaveTimer *time.Timer
 	tokenSaveMu    sync.Mutex
+
+	deadStreamRecovery func(string)
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
@@ -150,38 +153,31 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		AttestationPreference: protocol.PreferNoAttestation,
 	})
 
-	// Default the health monitor to auto-remove streams that have been
-	// silent for 2 minutes — without this the feature exists but is
-	// dormant and dead sources linger forever in the admin UI / status.
-	healthM := relay.NewHealthMonitor(r).WithAutoRemove(2 * time.Minute)
-	healthM.OnEvent(func(e relay.StreamHealthEvent) {
-		logger.L.Infow("Stream health event",
-			"mount", e.Mount,
-			"old_status", e.OldStatus.String(),
-			"new_status", e.NewStatus.String(),
-		)
-	})
+	// Keep dead streams visible by default so operators can inspect
+	// diagnostics and decide whether removal should be manual.
+	healthM := relay.NewHealthMonitor(r)
 	hlsCtx, hlsCancel := context.WithCancel(context.Background())
 	srv := &Server{
-		Config:       cfg,
-		Relay:        r,
-		HealthM:      healthM,
-		RelayM:       relay.NewRelayManager(r),
-		TranscoderM:  relay.NewTranscoderManager(r),
-		WebRTCM:      relay.NewWebRTCManager(r),
-		StreamerM:    relay.NewStreamerManager(r, cfg),
-		RTMP:         relay.NewRTMPServer(r, cfg),
-		SRT:          relay.NewSRTServer(r, cfg),
-		TenantM:      relay.NewTenantManager(),
-		tmpl:         tmpl,
-		shell:        NewShellRenderer(),
-		Version:      version,
-		Commit:       commit,
-		startTime:    time.Now(),
-		AuthLog:      authLog,
-		sessions:     make(map[string]*session),
-		authAttempts: make(map[string]*authAttempt),
-		scanAttempts: make(map[string]*scanAttempt),
+		Config:           cfg,
+		Relay:            r,
+		RuntimeRegistry:  relay.NewRuntimeRegistry(r),
+		HealthM:          healthM,
+		RelayM:           relay.NewRelayManager(r),
+		TranscoderM:      relay.NewTranscoderManager(r),
+		WebRTCM:          relay.NewWebRTCManager(r),
+		StreamerM:        relay.NewStreamerManager(r, cfg),
+		RTMP:             relay.NewRTMPServer(r, cfg),
+		SRT:              relay.NewSRTServer(r, cfg),
+		TenantM:          relay.NewTenantManager(),
+		tmpl:             tmpl,
+		shell:            NewShellRenderer(),
+		Version:          version,
+		Commit:           commit,
+		startTime:        time.Now(),
+		AuthLog:          authLog,
+		sessions:         make(map[string]*session),
+		authAttempts:     make(map[string]*authAttempt),
+		scanAttempts:     make(map[string]*scanAttempt),
 		hlsOutputs:       make(map[string]*relay.HLSOutput),
 		hlsCtx:           hlsCtx,
 		hlsCancel:        hlsCancel,
@@ -194,8 +190,26 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 
 	// Ensure default tenant exists for backward compatibility
 	srv.TenantM.GetOrCreateDefaultTenant()
+	srv.StreamerM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.RelayM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.WebRTCM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.RTMP.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.SRT.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.deadStreamRecovery = srv.StreamerM.RecoverDeadSongCommandMount
+	healthM.OnEvent(srv.handleStreamHealthEvent)
 
 	return srv
+}
+
+func (s *Server) handleStreamHealthEvent(e relay.StreamHealthEvent) {
+	logger.L.Infow("Stream health event",
+		"mount", e.Mount,
+		"old_status", e.OldStatus.String(),
+		"new_status", e.NewStatus.String(),
+	)
+	if e.NewStatus == relay.StatusDead && s.deadStreamRecovery != nil {
+		s.deadStreamRecovery(e.Mount)
+	}
 }
 
 func (s *Server) setupRoutes() *http.ServeMux {
@@ -372,6 +386,9 @@ func (s *Server) setupRoutes() *http.ServeMux {
 		}
 	})
 	mux.HandleFunc("/api/streams/kick", s.apiKickStream)
+	mux.HandleFunc("/api/listeners", s.apiGetListeners)
+	mux.HandleFunc("/api/listeners/disconnect", s.apiDisconnectListener)
+	mux.HandleFunc("/api/listeners/move", s.apiMoveListener)
 
 	mux.HandleFunc("/api/autodj", func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {

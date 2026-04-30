@@ -86,8 +86,9 @@ type RelayConfig struct {
 }
 
 type MountSettings struct {
-	Password  string `json:"password"` // Hashed
-	BurstSize int    `json:"burst_size"`
+	Password     string `json:"password"` // Hashed
+	BurstSize    int    `json:"burst_size"`
+	MaxListeners int    `json:"max_listeners"`
 }
 
 type TranscoderConfig struct {
@@ -115,19 +116,19 @@ type WebhookConfig struct {
 }
 
 type AutoDJConfig struct {
-	Name           string   `json:"name"`
-	Mount          string   `json:"mount"`
-	MusicDir       string   `json:"music_dir"`
-	Format         string   `json:"format"` // "mp3" or "opus"
-	Bitrate        int      `json:"bitrate"`
-	Enabled        bool     `json:"enabled"`
-	Loop           bool     `json:"loop"`
-	InjectMetadata bool     `json:"inject_metadata"`
-	Playlist       []string `json:"playlist"`
-	LastPlaylist   string   `json:"last_playlist"`
-	MPDEnabled     bool     `json:"mpd_enabled"`
-	MPDPort        string   `json:"mpd_port"`
-	MPDPassword    string   `json:"mpd_password"`
+	Name               string   `json:"name"`
+	Mount              string   `json:"mount"`
+	MusicDir           string   `json:"music_dir"`
+	Format             string   `json:"format"` // "mp3" or "opus"
+	Bitrate            int      `json:"bitrate"`
+	Enabled            bool     `json:"enabled"`
+	Loop               bool     `json:"loop"`
+	InjectMetadata     bool     `json:"inject_metadata"`
+	Playlist           []string `json:"playlist"`
+	LastPlaylist       string   `json:"last_playlist"`
+	MPDEnabled         bool     `json:"mpd_enabled"`
+	MPDPort            string   `json:"mpd_port"`
+	MPDPassword        string   `json:"mpd_password"`
 	Visible            bool     `json:"visible"`
 	SongCommand        string   `json:"song_command"`
 	SongCommandTimeout int      `json:"song_command_timeout"`

@@ -40,7 +40,7 @@ func (b *backoff) reset() {
 type RelayState int
 
 const (
-	RelayConnecting   RelayState = iota
+	RelayConnecting RelayState = iota
 	RelayConnected
 	RelayReconnecting
 	RelayFailed
@@ -62,10 +62,11 @@ type RelayInstance struct {
 }
 
 type RelayManager struct {
-	instances map[string]*RelayInstance
-	mu        sync.RWMutex
-	relay     *Relay
-	client    *http.Client
+	instances       map[string]*RelayInstance
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	client          *http.Client
 }
 
 func NewRelayManager(r *Relay) *RelayManager {
@@ -85,6 +86,12 @@ func NewRelayManager(r *Relay) *RelayManager {
 			},
 		},
 	}
+}
+
+func (rm *RelayManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.runtimeRegistry = rr
 }
 
 func (rm *RelayManager) StartRelay(url, mount, password string, burstSize int, visible bool) {
@@ -229,6 +236,11 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 
 	stream := rm.relay.GetOrCreateStream(inst.Mount)
 	stream.SetSourceIP("relay-pull")
+	if rm.runtimeRegistry != nil {
+		rt := rm.runtimeRegistry.GetOrCreate(inst.Mount)
+		rt.Stream = stream
+		rm.runtimeRegistry.AttachSource(inst.Mount, SourceRelay, "default")
+	}
 
 	// Metadata
 	name := resp.Header.Get("Ice-Name")
