@@ -227,10 +227,46 @@ func TestAPIGetStreamsIncludesConfiguredMountLimits(t *testing.T) {
 		if stream["burst_size"] != float64(262144) {
 			t.Fatalf("expected burst size, got %#v", stream["burst_size"])
 		}
+		if stream["effective_burst_size"] != float64(262144) {
+			t.Fatalf("expected effective burst size, got %#v", stream["effective_burst_size"])
+		}
 		if stream["max_listeners"] != float64(12) {
 			t.Fatalf("expected max listeners, got %#v", stream["max_listeners"])
 		}
 		return
 	}
 	t.Fatalf("expected /limited stream entry, got %#v", payload)
+}
+
+func TestAPIGetStreamsReportsDefaultEffectiveBurstSize(t *testing.T) {
+	s := newListenerAPITestServer(t)
+	s.Config.Mounts["/default-burst"] = "hashed"
+	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"]}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/streams", nil)
+	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})
+	rr := httptest.NewRecorder()
+
+	s.apiGetStreams(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	}
+	var payload []map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &payload); err != nil {
+		t.Fatalf("decode payload: %v", err)
+	}
+	for _, stream := range payload {
+		if stream["mount"] != "/default-burst" {
+			continue
+		}
+		if stream["burst_size"] != float64(0) {
+			t.Fatalf("expected configured burst size to remain unset, got %#v", stream["burst_size"])
+		}
+		if stream["effective_burst_size"] != float64(defaultMountBurstSize) {
+			t.Fatalf("expected default effective burst size, got %#v", stream["effective_burst_size"])
+		}
+		return
+	}
+	t.Fatalf("expected /default-burst stream entry, got %#v", payload)
 }

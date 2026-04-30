@@ -1592,6 +1592,12 @@ components:
         bitrate:
           type: string
           description: Bitrate string (e.g. "128")
+        burst_size:
+          type: integer
+          description: Configured listener burst override in bytes (0 = use default)
+        effective_burst_size:
+          type: integer
+          description: Effective listener burst size in bytes after applying defaults
         listeners:
           type: integer
         source_ip:

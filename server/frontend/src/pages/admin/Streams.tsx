@@ -11,6 +11,7 @@ interface Stream {
   content_type: string
   listeners: number
   burst_size: number
+  effective_burst_size: number
   max_listeners: number
   enabled: boolean
   visible: boolean
@@ -178,6 +179,13 @@ function latestHistoryEntry(stream: Stream) {
   return stream.history?.[0] ?? null
 }
 
+function burstSizeDisplay(stream: Stream) {
+  if (stream.burst_size > 0) {
+    return `${stream.burst_size}`
+  }
+  return `${stream.effective_burst_size} default`
+}
+
 function formatHistoryTimestamp(timestamp: string | number) {
   const value = typeof timestamp === 'number' ? timestamp * 1000 : timestamp
   const date = new Date(value)
@@ -274,7 +282,7 @@ export function Streams() {
                     <td class="px-4 py-3.5 text-sm text-text-secondary">{sourceDisplay(s)}</td>
                     <td class="px-4 py-3.5 text-sm text-text-secondary">{s.content_type || '—'}</td>
                     <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.listeners}</td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.burst_size}</td>
+                    <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{burstSizeDisplay(s)}</td>
                     <td class="px-4 py-3.5 font-mono text-sm text-text-primary">{s.max_listeners}</td>
                     <td class="px-4 py-3.5 text-right">
                       <div class="flex items-center justify-end gap-1">

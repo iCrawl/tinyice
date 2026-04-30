@@ -38,6 +38,7 @@ export interface StreamInfo {
   bitrate: number
   listeners: number
   burst_size: number
+  effective_burst_size: number
   max_listeners: number
   live: boolean
   status: string

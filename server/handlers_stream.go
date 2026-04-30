@@ -557,6 +557,17 @@ func (s *Server) effectiveMountListenerLimit(mount string) int {
 	return s.Config.MaxListeners
 }
 
+const defaultMountBurstSize = 128 * 1024
+
+func effectiveMountBurstSize(cfg *config.Config, mount string) int {
+	if cfg != nil && cfg.AdvancedMounts != nil {
+		if adv := cfg.AdvancedMounts[mount]; adv != nil && adv.BurstSize > 0 {
+			return adv.BurstSize
+		}
+	}
+	return defaultMountBurstSize
+}
+
 type listenerLoopResult struct {
 	NextMount      string
 	RequestedMount string
@@ -564,16 +575,10 @@ type listenerLoopResult struct {
 }
 
 func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int) listenerLoopResult {
-	// Burst size defaults to 512 KiB but can be overridden per mount via
-	// AdvancedMounts.BurstSize (the "Advanced Mount Settings" UI field).
-	// At typical listener bitrates (128–320 kbps) this puts 10–30 seconds
-	// of audio into the client's cache on connect, so a ~5 s network stall
-	// no longer drains the player's buffer and forces a reconnect.
-	burst := 512 * 1024
-	if adv, ok := s.Config.AdvancedMounts[currentMount]; ok && adv != nil && adv.BurstSize > 0 {
-		burst = adv.BurstSize
-	}
-	offset, signal := stream.Subscribe(id, burst)
+	// A zero configured burst means "use the default", not "disable burst".
+	// Keep the default modest so server-side metadata changes are not hidden
+	// behind a long listener backfill on AutoDJ/transcoded mounts.
+	offset, signal := stream.Subscribe(id, effectiveMountBurstSize(s.Config, currentMount))
 	defer stream.Unsubscribe(id)
 	var disconnectCh <-chan struct{}
 	var moveCh <-chan relay.ListenerCommand

@@ -134,6 +134,7 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		ContentType     string                  `json:"content_type"`
 		Bitrate         string                  `json:"bitrate"`
 		BurstSize       int                     `json:"burst_size"`
+		EffectiveBurst  int                     `json:"effective_burst_size"`
 		Listeners       int                     `json:"listeners"`
 		MaxListeners    int                     `json:"max_listeners"`
 		SourceIP        string                  `json:"source_ip"`
@@ -226,20 +227,21 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
 			info := streamInfo{
-				Mount:        st.MountName,
-				ContentType:  st.ContentType,
-				Bitrate:      st.Bitrate,
-				BurstSize:    mountBurstSize(s.Config, st.MountName),
-				Listeners:    st.ListenersCount,
-				MaxListeners: mountMaxListeners(s.Config, st.MountName),
-				SourceIP:     st.SourceIP,
-				Visible:      st.Visible,
-				Enabled:      st.Enabled,
-				Health:       st.Health,
-				Uptime:       st.Uptime,
-				CurrentSong:  st.CurrentSong,
-				Name:         st.Name,
-				HasVideo:     videoMounts[st.MountName],
+				Mount:          st.MountName,
+				ContentType:    st.ContentType,
+				Bitrate:        st.Bitrate,
+				BurstSize:      mountBurstSize(s.Config, st.MountName),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, st.MountName),
+				Listeners:      st.ListenersCount,
+				MaxListeners:   mountMaxListeners(s.Config, st.MountName),
+				SourceIP:       st.SourceIP,
+				Visible:        st.Visible,
+				Enabled:        st.Enabled,
+				Health:         st.Health,
+				Uptime:         st.Uptime,
+				CurrentSong:    st.CurrentSong,
+				Name:           st.Name,
+				HasVideo:       videoMounts[st.MountName],
 			}
 			applyStreamDiagnostic(&info, s.Relay, st.MountName)
 			applyStreamSource(&info, st.MountName)
@@ -270,11 +272,12 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
 			result = append(result, streamInfo{
-				Mount:        mount,
-				BurstSize:    mountBurstSize(s.Config, mount),
-				MaxListeners: mountMaxListeners(s.Config, mount),
-				Visible:      visible,
-				Enabled:      !disabled,
+				Mount:          mount,
+				BurstSize:      mountBurstSize(s.Config, mount),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, mount),
+				MaxListeners:   mountMaxListeners(s.Config, mount),
+				Visible:        visible,
+				Enabled:        !disabled,
 			})
 			applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
 			applyStreamSource(&result[len(result)-1], mount)
@@ -287,11 +290,12 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
 				result = append(result, streamInfo{
-					Mount:        mount,
-					BurstSize:    mountBurstSize(s.Config, mount),
-					MaxListeners: mountMaxListeners(s.Config, mount),
-					Visible:      visible,
-					Enabled:      !disabled,
+					Mount:          mount,
+					BurstSize:      mountBurstSize(s.Config, mount),
+					EffectiveBurst: effectiveMountBurstSize(s.Config, mount),
+					MaxListeners:   mountMaxListeners(s.Config, mount),
+					Visible:        visible,
+					Enabled:        !disabled,
 				})
 				applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
 				applyStreamSource(&result[len(result)-1], mount)
