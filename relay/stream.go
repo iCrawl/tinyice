@@ -71,8 +71,8 @@ type Stream struct {
 
 	// Ogg/Opus specific state for proper synchronization
 	// These fields enable new listeners to start at proper page boundaries
-	OggHead         []byte  // Store Ogg headers for Opus/Ogg streams
-	OggHeaderOffset int64   // Absolute buffer offset where headers end
+	OggHead         []byte // Store Ogg headers for Opus/Ogg streams
+	OggHeaderOffset int64  // Absolute buffer offset where headers end
 	// VideoHeaders is the Annex-B SPS + PPS bytes for an H.264 video
 	// stream. Listeners that tune in mid-GOP need these injected before
 	// the first IDR — otherwise they get "non-existing PPS referenced"
@@ -94,9 +94,9 @@ type Stream struct {
 	// only crash on them. Subscribe() bumps a new listener's start
 	// offset up to this value.
 	MinListenerOffset int64
-	LastPageOffset  int64   // Absolute offset of the last valid Ogg page start
-	PageOffsets     []int64 // Circular list of last ~100 page starts
-	PageIndex       int     // Index for managing PageOffsets circular list
+	LastPageOffset    int64   // Absolute offset of the last valid Ogg page start
+	PageOffsets       []int64 // Circular list of last ~100 page starts
+	PageIndex         int     // Index for managing PageOffsets circular list
 
 	// FlushGen is incremented every time something invalidates the
 	// in-buffer audio for currently-subscribed listeners (e.g. a
@@ -107,11 +107,11 @@ type Stream struct {
 	flushGen atomic.Uint64
 
 	// Core streaming infrastructure
-	Buffer    *CircularBuffer          // Audio data buffer (typically 2MB)
+	Buffer            *CircularBuffer          // Audio data buffer (typically 2MB)
 	listeners         map[string]chan struct{} // Signal channels for connected listeners
 	internalListeners map[string]struct{}      // subset of listener ids that should NOT count toward ListenersCount (e.g. transcoders subscribing to their input)
-	mu     sync.RWMutex             // Mutex protecting all fields
-	closed int32                    // Atomic flag: 1 = stream closed
+	mu                sync.RWMutex             // Mutex protecting all fields
+	closed            int32                    // Atomic flag: 1 = stream closed
 
 	// Video metrics sliding window, protected by mu. Refreshed by
 	// RecordVideoSample on every frame and exposed via
@@ -726,6 +726,7 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 //
 //	offset, signal := stream.Subscribe("listener-123", 32*1024)
 //	reader := NewStreamReader(stream.Buffer, offset, signal, ctx, "listener-123")
+//
 // SubscribeInternal is like Subscribe but flags the listener as internal
 // (e.g. a transcoder reading the input mount). Internal listeners are
 // excluded from ListenersCount and from the listener-count history
@@ -733,7 +734,9 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 func (s *Stream) SubscribeInternal(id string, burstSize int) (int64, chan struct{}) {
 	offset, sig := s.Subscribe(id, burstSize)
 	s.mu.Lock()
-	if s.internalListeners == nil { s.internalListeners = make(map[string]struct{}) }
+	if s.internalListeners == nil {
+		s.internalListeners = make(map[string]struct{})
+	}
 	s.internalListeners[id] = struct{}{}
 	s.mu.Unlock()
 	return offset, sig
@@ -918,14 +921,23 @@ func (s *Stream) UpdateMetadata(name, desc, genre, url, bitrate, contentType str
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
 	changed := s.CurrentSong != song
+	mount := s.MountName
+	artist := s.Name
 	if changed {
 		s.CurrentSong = song
 	}
-	mount := s.MountName
 	s.mu.Unlock()
 
-	if changed && relay != nil && relay.History != nil {
-		relay.History.Add(mount, song)
+	if changed && relay != nil {
+		if relay.History != nil {
+			relay.History.Add(mount, song)
+		}
+		relay.NotifyMetadataChange(MetadataChange{
+			Mount:     mount,
+			Title:     song,
+			Artist:    artist,
+			StartedAt: time.Now(),
+		})
 	}
 }
 
@@ -934,6 +946,17 @@ func (s *Stream) GetCurrentSong() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.CurrentSong
+}
+
+func (s *Stream) ConfigureAutoDJOutput(name, bitrate, contentType string, visible bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Name = name
+	s.Bitrate = bitrate
+	s.ContentType = contentType
+	s.Visible = visible
+	s.IsOggStream = strings.Contains(strings.ToLower(contentType), "ogg") ||
+		strings.Contains(strings.ToLower(contentType), "opus")
 }
 
 // SetVisible updates the visibility of the stream thread-safely

@@ -44,10 +44,11 @@ func (p *SimplePacer) Pace(duration time.Duration) {
 }
 
 type WebRTCManager struct {
-	api     *webrtc.API
-	relay   *Relay
-	mu      sync.RWMutex
-	sources map[string]*webrtc.PeerConnection
+	api             *webrtc.API
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	mu              sync.RWMutex
+	sources         map[string]*webrtc.PeerConnection
 	// sourceDone[mount] is closed by the OnTrack pump goroutine when
 	// it exits. Lets a successor HandleSourceOffer wait for the
 	// previous pump to drain before starting its own, preventing the
@@ -68,6 +69,12 @@ func NewWebRTCManager(r *Relay) *WebRTCManager {
 		sources:    make(map[string]*webrtc.PeerConnection),
 		sourceDone: make(map[string]chan struct{}),
 	}
+}
+
+func (wm *WebRTCManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	wm.mu.Lock()
+	defer wm.mu.Unlock()
+	wm.runtimeRegistry = rr
 }
 
 func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
@@ -206,6 +213,17 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 				delete(wm.sourceDone, mount)
 			}
 			wm.mu.Unlock()
+			if wm.runtimeRegistry != nil {
+				wm.runtimeRegistry.Remove(mount)
+			}
+			wm.relay.Diagnostics.Record(DiagnosticUpdate{
+				Mount:     mount,
+				Status:    DiagnosticStatusStopped,
+				Class:     DiagnosticClassSourceDisconnect,
+				Reason:    "webrtc source disconnected",
+				Actor:     DiagnosticActorWebRTC,
+				Timestamp: time.Now(),
+			})
 			// Release UDP sockets / DTLS state on terminal states.
 			// pion's PC keeps internal goroutines alive until Close;
 			// without this the FD count creeps up across reconnects.
@@ -220,6 +238,11 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 		defer close(doneCh)
 
 		stream := wm.relay.GetOrCreateStream(mount)
+		if wm.runtimeRegistry != nil {
+			rt := wm.runtimeRegistry.GetOrCreate(mount)
+			rt.Stream = stream
+			wm.runtimeRegistry.AttachSource(mount, SourceWebRTC, "default")
+		}
 		stream.mu.Lock()
 		stream.ContentType = "audio/ogg"
 		stream.IsOggStream = true

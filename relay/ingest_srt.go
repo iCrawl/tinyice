@@ -15,12 +15,13 @@ import (
 // SRTServer accepts SRT connections and feeds audio data into TinyIce streams.
 // It uses the pure-Go gosrt library (no CGO required).
 type SRTServer struct {
-	relay    *Relay
-	config   *config.Config
-	server   *srt.Server
-	mountMap sync.Map // socket ID -> srtConnInfo
-	mu       sync.Mutex
-	running  bool
+	relay           *Relay
+	config          *config.Config
+	runtimeRegistry *RuntimeRegistry
+	server          *srt.Server
+	mountMap        sync.Map // socket ID -> srtConnInfo
+	mu              sync.Mutex
+	running         bool
 }
 
 // srtConnInfo holds connection metadata established during HandleConnect.
@@ -36,6 +37,12 @@ func NewSRTServer(r *Relay, cfg *config.Config) *SRTServer {
 		relay:  r,
 		config: cfg,
 	}
+}
+
+func (ss *SRTServer) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	ss.mu.Lock()
+	defer ss.mu.Unlock()
+	ss.runtimeRegistry = rr
 }
 
 // Start begins listening for SRT connections on the configured port.
@@ -176,6 +183,11 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	stream.SourceIP = remoteAddr.String()
 	stream.ContentType = "audio/mpeg" // default for MPEG-TS with MP3
 	stream.mu.Unlock()
+	if ss.runtimeRegistry != nil {
+		rt := ss.runtimeRegistry.GetOrCreate(mount)
+		rt.Stream = stream
+		ss.runtimeRegistry.AttachSource(mount, SourceSRT, "default")
+	}
 
 	// Mirror the RTMP ingest: spin up a dedicated /video sub-mount with
 	// an 8 MB buffer so demuxed H.264 bytes have somewhere to go. The
@@ -248,6 +260,9 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	// publisher's mount.
 	if st, ok := ss.relay.GetStream(mount); ok && st == stream {
 		ss.relay.RemoveStream(mount)
+	}
+	if ss.runtimeRegistry != nil {
+		ss.runtimeRegistry.Remove(mount)
 	}
 	if videoStream != nil {
 		if st, ok := ss.relay.GetStream(videoMount); ok && st == videoStream {
