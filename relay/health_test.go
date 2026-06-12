@@ -77,3 +77,34 @@ func TestHealthMonitorRecordsDiagnosticsOnStateChange(t *testing.T) {
 		t.Fatal("expected diagnostic reason")
 	}
 }
+
+func TestHealthMonitorClearsStaleHealthDiagnosticWhenStreamIsFresh(t *testing.T) {
+	r := NewRelay(false, nil)
+	s := r.GetOrCreateStream("/fresh-again")
+	s.LastDataReceived = time.Now()
+
+	r.Diagnostics.Record(DiagnosticUpdate{
+		Mount:  "/fresh-again",
+		Status: DiagnosticStatusDegraded,
+		Class:  DiagnosticClassHealthDegraded,
+		Reason: "no data for 10s",
+		Actor:  DiagnosticActorHealthMonitor,
+	})
+
+	hm := NewHealthMonitor(r)
+	hm.check()
+
+	diag, ok := r.Diagnostics.Current("/fresh-again")
+	if !ok {
+		t.Fatal("expected health diagnostic")
+	}
+	if diag.Status != DiagnosticStatusRunning {
+		t.Fatalf("expected running diagnostic, got %q", diag.Status)
+	}
+	if diag.Class != DiagnosticClassHealthRecovered {
+		t.Fatalf("expected health_recovered class, got %q", diag.Class)
+	}
+	if diag.Reason != "stream healthy again" {
+		t.Fatalf("expected stream healthy again reason, got %q", diag.Reason)
+	}
+}

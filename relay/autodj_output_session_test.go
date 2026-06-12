@@ -250,3 +250,83 @@ func TestAutoDJPublishesMetadataAfterTrackFrameIsWritten(t *testing.T) {
 		t.Fatal("expected metadata after first track frame write completed")
 	}
 }
+
+func TestAutoDJPlaybackClearsStaleSongCommandDiagnostic(t *testing.T) {
+	r := NewRelay(false, nil)
+	streamer := &Streamer{
+		Name:           "Gap Filler",
+		OutputMount:    "/gap",
+		Format:         "mp3",
+		Bitrate:        64,
+		InjectMetadata: true,
+		relay:          r,
+	}
+
+	r.Diagnostics.Record(DiagnosticUpdate{
+		Mount:  "/gap",
+		Status: DiagnosticStatusError,
+		Class:  DiagnosticClassSongCommandInvalid,
+		Reason: "song_command returned invalid file",
+		Error:  "bad file",
+		Actor:  DiagnosticActorAutoDJ,
+	})
+
+	writer := &blockingFrameWriter{
+		attemptCh: make(chan struct{}, 1),
+		releaseCh: make(chan struct{}),
+	}
+	streamer.outputSession = &AutoDJOutputSession{
+		streamer:    streamer,
+		stream:      r.GetOrCreateStream("/gap"),
+		frameWriter: writer,
+		frameSize:   1152,
+		channels:    2,
+		sampleRate:  44100,
+		source:      &sourceBinding{source: silencePCMSource{}},
+	}
+
+	sm := &StreamerManager{relay: r}
+	runCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := streamer.outputSession.Start(runCtx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	path := writeTestMP3File(t)
+	done := make(chan error, 1)
+	go func() {
+		done <- sm.streamFile(runCtx, streamer, path, 0, 1)
+	}()
+
+	select {
+	case <-writer.attemptCh:
+	case <-time.After(time.Second):
+		t.Fatal("timed out waiting for first track frame write")
+	}
+
+	close(writer.releaseCh)
+
+	deadline := time.After(time.Second)
+	for {
+		current, ok := r.Diagnostics.Current("/gap")
+		if ok && current.Status == DiagnosticStatusRunning {
+			if current.Class != DiagnosticClassPlaybackStarted {
+				t.Fatalf("expected playback_started class, got %q", current.Class)
+			}
+			if current.Error != "" {
+				t.Fatalf("expected stale error to be cleared, got %q", current.Error)
+			}
+			return
+		}
+
+		select {
+		case err := <-done:
+			t.Fatalf("streamFile returned before clearing stale diagnostic: %v", err)
+		case <-deadline:
+			current, _ := r.Diagnostics.Current("/gap")
+			t.Fatalf("expected playback to clear stale diagnostic, got %#v", current)
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}

@@ -1502,6 +1502,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 
 	source := newReaderPCMFrameSource(ctx, pcm, f)
 	outputSession.SetSourceWithActivation(source, func() {
+		sm.recordAutoDJPlaybackStarted(metadataMount)
 		if injectMetadata && sm.relay != nil {
 			sm.relay.UpdateMetadata(metadataMount, metadataSong)
 		}
@@ -1514,6 +1515,23 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	case <-source.Done():
 		return nil
 	}
+}
+
+func (sm *StreamerManager) recordAutoDJPlaybackStarted(mount string) {
+	if sm == nil || sm.relay == nil || sm.relay.Diagnostics == nil || mount == "" {
+		return
+	}
+	if current, ok := sm.relay.Diagnostics.Current(mount); ok && current.Status == DiagnosticStatusRunning {
+		return
+	}
+	sm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     mount,
+		Status:    DiagnosticStatusRunning,
+		Class:     DiagnosticClassPlaybackStarted,
+		Reason:    "AutoDJ playback started",
+		Actor:     DiagnosticActorAutoDJ,
+		Timestamp: time.Now(),
+	})
 }
 
 func classifySongCommandError(err error) DiagnosticClass {

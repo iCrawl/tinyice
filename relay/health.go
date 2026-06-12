@@ -130,7 +130,22 @@ func (hm *HealthMonitor) check() {
 			oldStatus = StatusHealthy
 		}
 
-		if newStatus != oldStatus {
+		recordTransition := newStatus != oldStatus
+		eventOldStatus := oldStatus
+		if !recordTransition && newStatus == StatusHealthy {
+			if current, ok := hm.relay.Diagnostics.Current(ss.MountName); ok && current.Actor == DiagnosticActorHealthMonitor {
+				switch current.Class {
+				case DiagnosticClassHealthDegraded:
+					recordTransition = true
+					eventOldStatus = StatusDegraded
+				case DiagnosticClassHealthDead:
+					recordTransition = true
+					eventOldStatus = StatusDead
+				}
+			}
+		}
+
+		if recordTransition {
 			hm.lastStatus[ss.MountName] = newStatus
 			reason := "no data for " + time.Since(checkTime).Round(time.Second).String()
 			switch newStatus {
@@ -164,13 +179,13 @@ func (hm *HealthMonitor) check() {
 			}
 			logger.L.Infow("Stream health changed",
 				"mount", ss.MountName,
-				"from", oldStatus.String(),
+				"from", eventOldStatus.String(),
 				"to", newStatus.String(),
 			)
 			if hm.onEvent != nil {
 				hm.onEvent(StreamHealthEvent{
 					Mount:     ss.MountName,
-					OldStatus: oldStatus,
+					OldStatus: eventOldStatus,
 					NewStatus: newStatus,
 					Timestamp: time.Now(),
 				})
