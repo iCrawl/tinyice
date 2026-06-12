@@ -257,6 +257,10 @@ func (g *GeoLookup) downloadTo(url, dest string) error {
 		return fmt.Errorf("gunzip: %w", err)
 	}
 	defer gz.Close()
+
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		return fmt.Errorf("prepare geoip dir: %w", err)
+	}
 	tmp := dest + ".tmp"
 	f, err := os.Create(tmp)
 	if err != nil {
