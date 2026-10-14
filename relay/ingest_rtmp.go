@@ -17,11 +17,12 @@ import (
 
 // RTMPServer accepts RTMP publish connections and feeds audio data into TinyIce streams.
 type RTMPServer struct {
-	relay    *Relay
-	config   *config.Config
-	listener net.Listener
-	server   *rtmp.Server
-	mu       sync.Mutex
+	relay           *Relay
+	config          *config.Config
+	runtimeRegistry *RuntimeRegistry
+	listener        net.Listener
+	server          *rtmp.Server
+	mu              sync.Mutex
 
 	// Active connections tracked so Stop can close them all — closing
 	// only the listener leaves existing handler goroutines blocked in
@@ -38,6 +39,12 @@ func NewRTMPServer(r *Relay, cfg *config.Config) *RTMPServer {
 		config: cfg,
 		conns:  make(map[net.Conn]struct{}),
 	}
+}
+
+func (rs *RTMPServer) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rs.mu.Lock()
+	defer rs.mu.Unlock()
+	rs.runtimeRegistry = rr
 }
 
 // trackConn registers a connection so Stop can close it. Returns a
@@ -99,10 +106,11 @@ func (rs *RTMPServer) Start() error {
 			// At scale that's a goroutine drip per misbehaving peer.
 			wrapped := newRTMPIdleConn(conn, 60*time.Second)
 			h := &rtmpHandler{
-				relay:   rs.relay,
-				config:  rs.config,
-				conn:    conn,
-				untrack: untrack,
+				relay:           rs.relay,
+				config:          rs.config,
+				runtimeRegistry: rs.runtimeRegistry,
+				conn:            conn,
+				untrack:         untrack,
 			}
 			return wrapped, &rtmp.ConnConfig{
 				Handler: h,
@@ -164,21 +172,24 @@ func (rs *RTMPServer) Stop() {
 // rtmpHandler handles a single RTMP connection.
 type rtmpHandler struct {
 	rtmp.DefaultHandler
-	relay   *Relay
-	config  *config.Config
-	conn    net.Conn
-	untrack func() // removes this conn from RTMPServer.conns
-	app     string // RTMP application name from the connect command
-	mount   string
-	stream  *Stream
-	started time.Time
+	relay           *Relay
+	config          *config.Config
+	runtimeRegistry *RuntimeRegistry
+	conn            net.Conn
+	untrack         func() // removes this conn from RTMPServer.conns
+	app             string // RTMP application name from the connect command
+	mount           string
+	stream          *Stream
+	sourceToken     int64
+	started         time.Time
 
 	// Video support
-	videoStream *Stream // separate video stream
-	videoMount  string  // e.g., "/live/video"
-	sps         []byte  // cached SPS NALU
-	pps         []byte  // cached PPS NALU
-	naluLenSize int     // AVCC NALU length size (usually 4)
+	videoStream      *Stream // separate video stream
+	videoSourceToken int64
+	videoMount       string // e.g., "/live/video"
+	sps              []byte // cached SPS NALU
+	pps              []byte // cached PPS NALU
+	naluLenSize      int    // AVCC NALU length size (usually 4)
 
 	// AAC state parsed from the AudioSpecificConfig (first AAC
 	// SequenceHeader received). Used to wrap raw AAC frames in ADTS
@@ -235,11 +246,19 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 
 	h.mount = mount
 	h.stream = h.relay.GetOrCreateStream(mount)
+	var claimed bool
+	h.sourceToken, claimed = h.stream.ClaimSource(h.conn.RemoteAddr().String())
+	if !claimed {
+		return fmt.Errorf("mount %s already has a live source", mount)
+	}
+	h.stream.SetSourceCloserIfCurrent(h.sourceToken, func() { _ = h.conn.Close() })
 	h.stream.mu.Lock()
-	h.stream.SourceIP = h.conn.RemoteAddr().String()
 	h.stream.ContentType = "audio/mpeg" // default, may be updated on first audio data
 	h.stream.mu.Unlock()
 	h.started = time.Now()
+	if h.runtimeRegistry != nil {
+		h.runtimeRegistry.AttachClaim(h.stream, h.sourceToken, SourceRTMP, "default")
+	}
 
 	// Create a separate video stream with an 8 MB buffer up front, so we
 	// never have to swap the Buffer pointer under listeners that are
@@ -247,8 +266,19 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 	// untouched.
 	h.videoMount = mount + "/video"
 	h.videoStream = h.relay.GetOrCreateStreamSized(h.videoMount, 8*1024*1024)
+	h.videoSourceToken, claimed = h.videoStream.ClaimSource(h.conn.RemoteAddr().String())
+	if !claimed {
+		h.stream.ReleaseSourceIfCurrent(h.sourceToken)
+		if h.runtimeRegistry != nil {
+			h.runtimeRegistry.DetachClaim(h.stream, h.sourceToken)
+		}
+		return fmt.Errorf("video mount already has a live source")
+	}
+	h.videoStream.SetSourceCloserIfCurrent(h.videoSourceToken, func() { _ = h.conn.Close() })
+	if h.runtimeRegistry != nil {
+		h.runtimeRegistry.AttachClaim(h.videoStream, h.videoSourceToken, SourceRTMP, "default")
+	}
 	h.videoStream.mu.Lock()
-	h.videoStream.SourceIP = h.conn.RemoteAddr().String()
 	h.videoStream.ContentType = "video/h264"
 	h.videoStream.mu.Unlock()
 
@@ -609,13 +639,19 @@ func (h *rtmpHandler) OnClose() {
 			"remote", h.conn.RemoteAddr(),
 			"duration", time.Since(h.started),
 		)
-		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream {
-			h.relay.RemoveStream(h.mount)
+		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream && st.IsCurrentSource(h.sourceToken) {
+			h.relay.RemoveStreamIfCurrent(h.stream, h.sourceToken)
+			if h.runtimeRegistry != nil {
+				h.runtimeRegistry.DetachClaim(h.stream, h.sourceToken)
+			}
 		}
 	}
 	if h.videoMount != "" {
-		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream {
-			h.relay.RemoveStream(h.videoMount)
+		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream && st.IsCurrentSource(h.videoSourceToken) {
+			h.relay.RemoveStreamIfCurrent(h.videoStream, h.videoSourceToken)
+			if h.runtimeRegistry != nil {
+				h.runtimeRegistry.DetachClaim(h.videoStream, h.videoSourceToken)
+			}
 		}
 	}
 }

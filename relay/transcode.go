@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -18,6 +19,9 @@ import (
 )
 
 type TranscoderInstance struct {
+	output *Stream
+	token  int64
+	done   chan struct{}
 	Config *config.TranscoderConfig
 	cancel context.CancelFunc
 	active bool
@@ -30,9 +34,10 @@ type TranscoderInstance struct {
 }
 
 type TranscoderManager struct {
-	instances map[string]*TranscoderInstance // key is OutputMount
-	mu        sync.RWMutex
-	relay     *Relay
+	runtimeRegistry *RuntimeRegistry
+	instances       map[string]*TranscoderInstance // key is OutputMount
+	mu              sync.RWMutex
+	relay           *Relay
 
 	// hub holds shared decoders keyed by input mount. The first
 	// transcoder for an input opens the decoder; subsequent ones
@@ -48,6 +53,8 @@ func NewTranscoderManager(r *Relay) *TranscoderManager {
 		hub:       NewDecoderHub(r),
 	}
 }
+
+func (tm *TranscoderManager) SetRuntimeRegistry(rr *RuntimeRegistry) { tm.runtimeRegistry = rr }
 
 func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	tm.mu.Lock()
@@ -66,7 +73,34 @@ func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	}
 	tm.instances[cfg.OutputMount] = inst
 
-	go tm.runTranscoder(ctx, inst)
+	output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+	token, claimed := output.ClaimSource("transcode-" + inst.Config.Name)
+	if !claimed {
+		cancel()
+		inst.active = false
+		return
+	}
+	output.SetSourceCloserIfCurrent(token, cancel)
+	if tm.runtimeRegistry != nil {
+		tm.runtimeRegistry.AttachClaim(output, token, SourceTranscode, "default")
+	}
+	inst.output = output
+	inst.token = token
+	inst.done = make(chan struct{})
+	go func() {
+		defer close(inst.done)
+		mirrorDone := make(chan struct{})
+		go func() { defer close(mirrorDone); tm.runMetadataMirror(ctx, inst) }()
+		tm.runTranscoder(ctx, inst)
+		cancel()
+		<-mirrorDone
+		output.SetCurrentSong("", tm.relay)
+		if tm.runtimeRegistry != nil {
+			tm.runtimeRegistry.DetachClaim(output, token)
+		}
+		output.SetSourceCloserIfCurrent(token, nil)
+		output.ReleaseSourceIfCurrent(token)
+	}()
 }
 
 func (tm *TranscoderManager) StopTranscoder(outputMount string) {
@@ -89,10 +123,14 @@ func (tm *TranscoderManager) StopAll() {
 
 func (inst *TranscoderInstance) Stop() {
 	inst.mu.Lock()
-	defer inst.mu.Unlock()
-	if inst.cancel != nil {
-		inst.cancel()
-		inst.active = false
+	cancel, done := inst.cancel, inst.done
+	inst.active = false
+	inst.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
 	}
 }
 
@@ -105,20 +143,40 @@ func (tm *TranscoderManager) runTranscoder(ctx context.Context, inst *Transcoder
 		"bitrate", inst.Config.Bitrate,
 	)
 
+	backoff := 5 * time.Second
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		default:
+			start := time.Now()
 			tm.safePerformTranscode(ctx, inst)
-			// Wait before retry if input stream wasn't found
+			if time.Since(start) > 30*time.Second {
+				backoff = 5 * time.Second
+			}
+			retryAfter := nextTranscoderRetryBackoff(&backoff)
+			logger.L.Infow("Transcoder: retrying", "name", inst.Config.Name, "backoff", retryAfter)
 			select {
 			case <-ctx.Done():
 				return
-			case <-time.After(5 * time.Second):
+			case <-time.After(retryAfter):
 			}
 		}
 	}
+}
+
+func nextTranscoderRetryBackoff(current *time.Duration) time.Duration {
+	const maxBackoff = 5 * time.Minute
+
+	if *current <= 0 {
+		*current = 5 * time.Second
+	}
+	delay := *current
+	*current *= 2
+	if *current > maxBackoff {
+		*current = maxBackoff
+	}
+	return delay
 }
 
 // safePerformTranscode wraps performTranscode with a panic recovery. Some
@@ -128,11 +186,12 @@ func (tm *TranscoderManager) runTranscoder(ctx context.Context, inst *Transcoder
 func (tm *TranscoderManager) safePerformTranscode(ctx context.Context, inst *TranscoderInstance) {
 	defer func() {
 		if r := recover(); r != nil {
-			logger.L.Errorw("Transcoder: recovered from panic",
+			logger.L.Errorw("Transcoder: recovered from panic, will retry",
 				"name", inst.Config.Name,
 				"input", inst.Config.InputMount,
 				"output", inst.Config.OutputMount,
 				"panic", fmt.Sprintf("%v", r),
+				"stack", string(debug.Stack()),
 			)
 		}
 	}()
@@ -184,7 +243,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 		input.mu.RUnlock()
 	}
 
-	output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+	output := inst.output
 	// Resolve visibility BEFORE taking output.mu. Holding a stream's
 	// mutex while taking relay.mu is an ABBA setup against
 	// Relay.Snapshot / RemoveStream (which take relay.mu first, then a
@@ -213,10 +272,6 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 	// On the very first iteration the buffer is empty so the byte-
 	// level state is a no-op; the field clears are cheap.
 	output.BeginSession()
-
-	if input != nil {
-		go mirrorTranscodeMetadata(runCtx, input, output)
-	}
 
 	// pcmReader is an io.Reader producing S16LE stereo PCM at
 	// decoderRate. Wrap with a tiny shim so anything downstream that
@@ -348,6 +403,51 @@ func resolveOpusFrameSizeMS(ms int) int {
 		return ms
 	default:
 		return 20
+	}
+}
+
+func (tm *TranscoderManager) runMetadataMirror(ctx context.Context, inst *TranscoderInstance) {
+	events := tm.relay.SubscribeMetadata()
+	defer tm.relay.UnsubscribeMetadata(events)
+	reconcile := func() {
+		input, ok := tm.relay.GetStream(inst.Config.InputMount)
+		if !ok {
+			inst.output.SetCurrentSong("", tm.relay)
+			return
+		}
+		mc := input.PlaybackSnapshot()
+		if mc.Revision == 0 && input.GetCurrentSong() != "" {
+			mc.Title = input.GetCurrentSong()
+		}
+		inst.output.MirrorPlayback(mc, tm.relay)
+		input.mu.RLock()
+		genre, url, desc, pub, vis := input.Genre, input.URL, input.Description, input.Public, input.Visible
+		input.mu.RUnlock()
+		if explicitVis, explicit := inst.Config.ResolveVisibility(); explicit {
+			vis = explicitVis
+		}
+		inst.output.mu.Lock()
+		inst.output.Genre = genre
+		inst.output.URL = url
+		inst.output.Description = desc
+		inst.output.Public = pub
+		inst.output.Visible = vis
+		inst.output.mu.Unlock()
+	}
+	reconcile()
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case mc := <-events:
+			if mc.Mount == inst.Config.InputMount {
+				reconcile()
+			}
+		case <-ticker.C:
+			reconcile()
+		}
 	}
 }
 
@@ -653,50 +753,6 @@ type TranscoderStats struct {
 // listeners on /<mount>-128 never see StreamTitle updates from the
 // upstream encoder, and the public Icecast directory listing shows
 // generic info on the transcoded sibling.
-func mirrorTranscodeMetadata(ctx context.Context, input, output *Stream) {
-	// 5 s cadence is plenty for metadata that changes per-track
-	// (i.e. every few minutes). 2 s was poll-noise — with N
-	// transcoders sharing one input that's N RLock acquisitions per
-	// poll, and the latency benefit of catching a song change two
-	// seconds earlier vs five is invisible to the listener.
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	var lastSong, lastGenre, lastURL, lastDesc string
-	var lastPublic, lastVisible bool
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			input.mu.RLock()
-			song := input.CurrentSong
-			genre := input.Genre
-			url := input.URL
-			desc := input.Description
-			pub := input.Public
-			vis := input.Visible
-			input.mu.RUnlock()
-
-			if song != lastSong {
-				output.mu.Lock()
-				output.CurrentSong = song
-				output.mu.Unlock()
-				lastSong = song
-			}
-			if genre != lastGenre || url != lastURL || desc != lastDesc || pub != lastPublic || vis != lastVisible {
-				output.mu.Lock()
-				output.Genre = genre
-				output.URL = url
-				output.Description = desc
-				output.Public = pub
-				output.Visible = vis
-				output.mu.Unlock()
-				lastGenre, lastURL, lastDesc, lastPublic, lastVisible = genre, url, desc, pub, vis
-			}
-		}
-	}
-}
-
 // EnsureAutoMP3Transcoders is called when a source connects on `inputMount`.
 // For each bitrate in the list it spawns a temporary mp3 transcoder named
 // `<inputMount>-mp3-<bitrate>` if no transcoder for that output is already

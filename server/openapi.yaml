@@ -456,7 +456,7 @@ paths:
                   example: /home/music
                 format:
                   type: string
-                  enum: [mp3, opus, ogg]
+                  enum: [mp3, opus]
                   default: mp3
                 bitrate:
                   type: integer
@@ -1416,7 +1416,7 @@ paths:
       description: |
         Connect as a listener to receive the audio stream via HTTP.
         The server responds with a continuous audio stream in the format
-        configured for that mount (MP3, Opus, OGG).
+        configured for that mount (MP3 or Ogg/Opus).
       parameters:
         - name: mount
           in: path
@@ -1599,6 +1599,12 @@ components:
         bitrate:
           type: string
           description: Bitrate string (e.g. "128")
+        burst_size:
+          type: integer
+          description: Configured listener burst override in bytes (0 = use default)
+        effective_burst_size:
+          type: integer
+          description: Effective listener burst size in bytes after applying defaults
         listeners:
           type: integer
         source_ip:
@@ -1821,9 +1827,6 @@ components:
         directory_listing:
           type: boolean
           description: Register with stream directories
-        auto_update:
-          type: boolean
-          description: Automatically check for updates
 
     Stats:
       type: object

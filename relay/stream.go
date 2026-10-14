@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bytes"
+	"fmt"
 	"strconv"
 	"strings"
 	"sync"
@@ -39,6 +40,10 @@ import (
 //	stream.Broadcast(audioData, relayInstance)
 //	offset, signal := stream.Subscribe("listener-id", 32*1024)
 type Stream struct {
+	producerIntent       string
+	playback             MetadataChange
+	producerLastProgress time.Time
+
 	// Basic stream information
 	MountName   string // Mount point path (e.g., "/stream", "/live")
 	ContentType string // MIME type (e.g., "audio/mpeg", "audio/ogg")
@@ -53,6 +58,7 @@ type Stream struct {
 	SourceIP         string    // IP address of the source client
 	sourceCloser     func()    // terminates the source connection (see KickSource)
 	LastDataReceived time.Time // Last time data was received from source
+	sourceGeneration int64     // Monotonic token for replacing same-mount sources
 
 	// Stream state and visibility
 	Enabled      bool // Whether the stream is accepting connections
@@ -164,37 +170,25 @@ func (s *Stream) IsOgg() bool {
 	return strings.Contains(ct, "ogg") || strings.Contains(ct, "opus")
 }
 
-// SetSourceIP records the source address under the stream mutex so readers
-// (Snapshot, listener handlers, status handlers) see a consistent value.
-// Use TryClaimSource for the Icecast SOURCE / RTMP / SRT paths where two
-// concurrent clients could race for the same mount; SetSourceIP is fine
-// for paths that own their stream by construction (relay pull, WebRTC
-// ingest, web-audio publisher) and just want a label for the dashboard.
-func (s *Stream) SetSourceIP(ip string) {
+func (s *Stream) ClaimSource(label string) (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.SourceIP = ip
+	if s.SourceIP != "" || atomic.LoadInt32(&s.closed) != 0 {
+		return 0, false
+	}
+	s.sourceGeneration++
+	s.producerIntent = ""
+	s.SourceIP = label
+	return s.sourceGeneration, true
 }
 
-// TryClaimSource atomically takes source ownership of this stream if it
-// has none, returning true. If the mount already has an active source
-// (SourceIP non-empty) it returns false WITHOUT changing state — the
-// caller MUST reject the new connection. Pair with ReleaseSource in a
-// defer.
-//
-// Without this, two concurrent SOURCE clients hitting the same mount
-// both pass auth, both call SetSourceIP, and both spawn read loops that
-// interleave bytes into the same ring buffer. Listeners then see two
-// MP3 / Ogg streams shredded together byte-by-byte and every decoder
-// errors out on missing frame headers. Observed in production with
-// robodj retrying a connect 3× within 25 ms on every restart.
-func (s *Stream) TryClaimSource(ip string) bool {
+func (s *Stream) SetSourceCloserIfCurrent(token int64, closer func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SourceIP != "" {
+	if token == 0 || token != s.sourceGeneration || s.SourceIP == "" {
 		return false
 	}
-	s.SourceIP = ip
+	s.sourceCloser = closer
 	return true
 }
 
@@ -223,26 +217,16 @@ func (s *Stream) KickSource() {
 	}
 }
 
-// ClaimSourceIfFree claims the mount for label unless a DIFFERENT source
-// already holds it. Returns false when someone else owns the mount, so an
-// in-process producer (the AutoDJ) can decline to write rather than
-// interleaving its bytes with a live encoder's into the same buffer.
-func (s *Stream) ClaimSourceIfFree(label string) bool {
+// ReleaseSourceIfCurrent clears the source claim only if token still owns
+// this stream's source slot. It protects replacement sources from stale
+// disconnect cleanup in another handler goroutine.
+func (s *Stream) ReleaseSourceIfCurrent(token int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SourceIP != "" && s.SourceIP != label {
-		return false
+	if token != 0 && s.sourceGeneration == token {
+		s.SourceIP = ""
+		s.sourceCloser = nil
 	}
-	s.SourceIP = label
-	return true
-}
-
-// ReleaseSource clears the source claim so the next TryClaimSource on
-// this stream succeeds. Idempotent.
-func (s *Stream) ReleaseSource() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.SourceIP = ""
 }
 
 // GetSourceIP returns the current source's address under the stream
@@ -251,6 +235,13 @@ func (s *Stream) GetSourceIP() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.SourceIP
+}
+
+// IsCurrentSource reports whether token still owns this stream's source slot.
+func (s *Stream) IsCurrentSource(token int64) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return token != 0 && s.sourceGeneration == token && s.SourceIP != ""
 }
 
 // StoreVideoHeaders records the Annex-B SPS and PPS bytes for an H.264
@@ -1016,16 +1007,81 @@ func (s *Stream) SetBitrateIfUnknown(kbps int) bool {
 // lock, release it, then write to history outside.
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
-	changed := s.CurrentSong != song
-	if changed {
-		s.CurrentSong = song
+	if s.CurrentSong == song {
+		s.mu.Unlock()
+		return
 	}
-	mount := s.MountName
+	mc := s.playbackLocked(song, "", time.Now(), relay)
 	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+}
 
-	if changed && relay != nil && relay.History != nil {
-		relay.History.Add(mount, song)
+func (s *Stream) playbackLocked(title, id string, started time.Time, relay *Relay) MetadataChange {
+	revision := s.playback.Revision + 1
+	if relay != nil {
+		revision = relay.metadataRevision.Add(1)
 	}
+	if title != "" && id == "" {
+		id = fmt.Sprintf("%s-%d-%d", s.MountName, time.Now().UnixNano(), revision)
+	}
+	if title == "" {
+		id = ""
+		started = time.Time{}
+	}
+	mc := MetadataChange{owner: s, Visible: s.Visible, Mount: s.MountName, Title: title, Artist: s.Name, StartedAt: started, PlaybackID: id, Revision: revision}
+	s.CurrentSong = title
+	s.playback = mc
+	return mc
+}
+
+func (s *Stream) ActivatePlayback(token int64, title string, relay *Relay) (MetadataChange, bool) {
+	s.mu.Lock()
+	if token == 0 || token != s.sourceGeneration || s.SourceIP == "" {
+		s.mu.Unlock()
+		return MetadataChange{}, false
+	}
+	mc := s.playbackLocked(title, "", time.Now(), relay)
+	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+	return mc, true
+}
+
+func (s *Stream) PlaybackSnapshot() MetadataChange {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.playback
+}
+
+func (s *Stream) MirrorPlayback(input MetadataChange, relay *Relay) {
+	s.mu.Lock()
+	if s.playback.PlaybackID == input.PlaybackID && s.playback.Title == input.Title && s.playback.StartedAt.Equal(input.StartedAt) {
+		s.mu.Unlock()
+		return
+	}
+	mc := s.playbackLocked(input.Title, input.PlaybackID, input.StartedAt, relay)
+	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+}
+
+func (s *Stream) publishPlayback(mc MetadataChange, relay *Relay) {
+	if relay == nil {
+		return
+	}
+	if relay.History != nil && mc.Title != "" {
+		relay.History.Add(mc.Mount, mc.Title)
+	}
+	relay.NotifyMetadataChange(mc)
+}
+
+func (s *Stream) RecordProducerProgress() {
+	s.mu.Lock()
+	s.producerLastProgress = time.Now()
+	s.mu.Unlock()
+}
+func (s *Stream) ProducerLastProgress() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.producerLastProgress
 }
 
 // GetCurrentSong returns the current song info thread-safely
@@ -1033,6 +1089,18 @@ func (s *Stream) GetCurrentSong() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.CurrentSong
+}
+
+func (s *Stream) ConfigureAutoDJOutput(name, bitrate, contentType string, visible bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Name = name
+	s.producerIntent = "playing"
+	s.Bitrate = bitrate
+	s.ContentType = contentType
+	s.Visible = visible
+	s.IsOggStream = strings.Contains(strings.ToLower(contentType), "ogg") ||
+		strings.Contains(strings.ToLower(contentType), "opus")
 }
 
 // SetVisible updates the visibility of the stream thread-safely
@@ -1118,3 +1186,18 @@ func (s *Stream) MarkProducerAlive() {
 	s.LastDataReceived = time.Now()
 	s.mu.Unlock()
 }
+
+func (s *Stream) IsVisible() bool { s.mu.RLock(); defer s.mu.RUnlock(); return s.Visible }
+
+func (s *Stream) LastDataTime() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.LastDataReceived
+}
+
+func (s *Stream) SetProducerIntent(intent string) {
+	s.mu.Lock()
+	s.producerIntent = intent
+	s.mu.Unlock()
+}
+func (s *Stream) ProducerIntent() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.producerIntent }

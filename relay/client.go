@@ -60,10 +60,11 @@ type RelayInstance struct {
 }
 
 type RelayManager struct {
-	instances map[string]*RelayInstance
-	mu        sync.RWMutex
-	relay     *Relay
-	client    *http.Client
+	instances       map[string]*RelayInstance
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	client          *http.Client
 }
 
 func NewRelayManager(r *Relay) *RelayManager {
@@ -77,6 +78,12 @@ func NewRelayManager(r *Relay) *RelayManager {
 		// exfiltration channel for an internal service.
 		client: NewOutboundHTTPClient(0),
 	}
+}
+
+func (rm *RelayManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	rm.mu.Lock()
+	defer rm.mu.Unlock()
+	rm.runtimeRegistry = rr
 }
 
 func (rm *RelayManager) StartRelay(url, mount, password string, burstSize int, visible bool) {
@@ -215,6 +222,15 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 		inst.mu.Lock()
 		inst.LastError = fmt.Sprintf("connection failed: %v", err)
 		inst.mu.Unlock()
+		rm.relay.Diagnostics.Record(DiagnosticUpdate{
+			Mount:     inst.Mount,
+			Status:    DiagnosticStatusError,
+			Class:     DiagnosticClassSourceDisconnect,
+			Reason:    "relay pull connection failed",
+			Error:     err.Error(),
+			Actor:     DiagnosticActorRelay,
+			Timestamp: time.Now(),
+		})
 		return
 	}
 	defer resp.Body.Close()
@@ -225,6 +241,14 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 	}
 
 	logger.L.Infow("Relay stream connected and pulling", "mount", inst.Mount)
+	rm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     inst.Mount,
+		Status:    DiagnosticStatusRunning,
+		Class:     DiagnosticClassRecoverySucceeded,
+		Reason:    "relay source connected",
+		Actor:     DiagnosticActorRelay,
+		Timestamp: time.Now(),
+	})
 
 	inst.mu.Lock()
 	inst.State = RelayConnected
@@ -233,7 +257,17 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 	inst.mu.Unlock()
 
 	stream := rm.relay.GetOrCreateStream(inst.Mount)
-	stream.SetSourceIP("relay-pull")
+	token, claimed := stream.ClaimSource("relay-pull")
+	if !claimed {
+		return
+	}
+	defer stream.ReleaseSourceIfCurrent(token)
+	stream.SetSourceCloserIfCurrent(token, func() { pullCancel(); _ = resp.Body.Close() })
+	defer stream.SetSourceCloserIfCurrent(token, nil)
+	if rm.runtimeRegistry != nil {
+		rm.runtimeRegistry.AttachClaim(stream, token, SourceRelay, "default")
+		defer rm.runtimeRegistry.DetachClaim(stream, token)
+	}
 
 	// Metadata
 	name := resp.Header.Get("Ice-Name")

@@ -90,6 +90,34 @@ func (s *Server) apiGetAuditLog(w http.ResponseWriter, r *http.Request) {
 // Streams
 // ---------------------------------------------------------------------------
 
+func mountBurstSize(cfg *config.Config, mount string) int {
+	if cfg != nil {
+		cfg.RLockMaps()
+		defer cfg.RUnlockMaps()
+	}
+	if cfg == nil || cfg.AdvancedMounts == nil {
+		return 0
+	}
+	if ms := cfg.AdvancedMounts[mount]; ms != nil {
+		return ms.BurstSize
+	}
+	return 0
+}
+
+func mountMaxListeners(cfg *config.Config, mount string) int {
+	if cfg != nil {
+		cfg.RLockMaps()
+		defer cfg.RUnlockMaps()
+	}
+	if cfg == nil || cfg.AdvancedMounts == nil {
+		return 0
+	}
+	if ms := cfg.AdvancedMounts[mount]; ms != nil {
+		return ms.MaxListeners
+	}
+	return 0
+}
+
 func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	user, ok := s.checkAuth(r)
 	if !ok {
@@ -109,23 +137,113 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type streamInfo struct {
-		Mount       string  `json:"mount"`
-		ContentType string  `json:"content_type"`
-		Bitrate     string  `json:"bitrate"`
-		Listeners   int     `json:"listeners"`
-		SourceIP    string  `json:"source_ip"`
-		Visible     bool    `json:"visible"`
-		Enabled     bool    `json:"enabled"`
-		Health      float64 `json:"health"`
-		Uptime      string  `json:"uptime"`
-		CurrentSong string  `json:"current_song"`
-		Name        string  `json:"name"`
-		HasVideo    bool    `json:"has_video"`
-		VideoWidth  int     `json:"video_width,omitempty"`
-		VideoHeight int     `json:"video_height,omitempty"`
-		VideoFPS    float64 `json:"video_fps,omitempty"`
-		VideoGOP    float64 `json:"video_gop,omitempty"`
-		VideoKbps   int     `json:"video_kbps,omitempty"`
+		ProducerState            string                  `json:"producer_state,omitempty"`
+		AvailabilityState        string                  `json:"availability_state"`
+		Recovery                 relay.RecoveryState     `json:"recovery"`
+		ProducerLastProgress     time.Time               `json:"producer_last_progress,omitzero"`
+		AvailabilityLastProgress time.Time               `json:"availability_last_progress,omitzero"`
+		EffectiveMaxListeners    int                     `json:"effective_max_listeners"`
+		Mount                    string                  `json:"mount"`
+		ContentType              string                  `json:"content_type"`
+		Bitrate                  string                  `json:"bitrate"`
+		BurstSize                int                     `json:"burst_size"`
+		EffectiveBurst           int                     `json:"effective_burst_size"`
+		Listeners                int                     `json:"listeners"`
+		MaxListeners             int                     `json:"max_listeners"`
+		SourceIP                 string                  `json:"source_ip"`
+		SourceKind               string                  `json:"source_kind,omitempty"`
+		SourceLabel              string                  `json:"source_label,omitempty"`
+		Visible                  bool                    `json:"visible"`
+		Enabled                  bool                    `json:"enabled"`
+		Health                   float64                 `json:"health"`
+		Uptime                   string                  `json:"uptime"`
+		CurrentSong              string                  `json:"current_song"`
+		Name                     string                  `json:"name"`
+		Status                   string                  `json:"status,omitempty"`
+		StatusClass              string                  `json:"status_class,omitempty"`
+		StatusReason             string                  `json:"status_reason,omitempty"`
+		LastError                string                  `json:"last_error,omitempty"`
+		StatusUpdatedAt          int64                   `json:"status_updated_at,omitempty"`
+		History                  []relay.DiagnosticEntry `json:"history,omitempty"`
+		HasVideo                 bool                    `json:"has_video"`
+		VideoWidth               int                     `json:"video_width,omitempty"`
+		VideoHeight              int                     `json:"video_height,omitempty"`
+		VideoFPS                 float64                 `json:"video_fps,omitempty"`
+		VideoGOP                 float64                 `json:"video_gop,omitempty"`
+		VideoKbps                int                     `json:"video_kbps,omitempty"`
+	}
+	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
+		diag, ok := r.Diagnostics.Current(mount)
+		if !ok {
+			if r.History != nil {
+				history := r.History.GetDiagnostics(mount, 10)
+				if len(history) > 0 {
+					latest := history[0]
+					info.Status = string(latest.Status)
+					info.StatusClass = string(latest.Class)
+					info.StatusReason = latest.Reason
+					info.LastError = latest.Error
+					info.StatusUpdatedAt = latest.Timestamp.Unix()
+					info.History = history
+				}
+			}
+			return
+		}
+		info.Status = string(diag.Status)
+		info.StatusClass = string(diag.Class)
+		info.StatusReason = diag.Reason
+		info.LastError = diag.Error
+		info.StatusUpdatedAt = diag.UpdatedAt.Unix()
+		info.History = diag.History
+	}
+	applyStreamSource := func(info *streamInfo, mount string) {
+		info.EffectiveMaxListeners = s.effectiveMountListenerLimit(mount)
+		if out, ok := s.Relay.GetStream(mount); ok {
+			info.ProducerLastProgress = out.ProducerLastProgress()
+			info.AvailabilityLastProgress = out.LastDataTime()
+			info.ProducerState = out.ProducerIntent()
+			info.AvailabilityState = "silent"
+			if !info.AvailabilityLastProgress.IsZero() && time.Since(info.AvailabilityLastProgress) <= 5*time.Second {
+				info.AvailabilityState = "available"
+			}
+		}
+		if s.StreamerM != nil {
+			if streamer := s.StreamerM.GetStreamer(mount); streamer != nil {
+				info.Recovery = streamer.RecoverySnapshot()
+			}
+		}
+		sourceKind := ""
+		sourceLabel := ""
+		if s.RuntimeRegistry != nil {
+			if rt, ok := s.RuntimeRegistry.Get(mount); ok {
+				sourceKind = string(rt.Source)
+				switch rt.Source {
+				case relay.SourceAutoDJ:
+					sourceLabel = "AutoDJ"
+				case relay.SourceTranscode:
+					sourceLabel = "Transcode"
+				case relay.SourceRelay:
+					sourceLabel = "Relay"
+				case relay.SourceWebRTC:
+					sourceLabel = "WebRTC"
+				case relay.SourceRTMP:
+					sourceLabel = "RTMP"
+				case relay.SourceSRT:
+					sourceLabel = "SRT"
+				case relay.SourceIcecast:
+					sourceLabel = "Icecast"
+				default:
+					sourceKind = ""
+				}
+			}
+		}
+		info.SourceKind = sourceKind
+		info.SourceLabel = sourceLabel
+		if info.Status == "" && sourceKind != "" && sourceKind != string(relay.SourceUnknown) {
+			info.Status = string(relay.DiagnosticStatusRunning)
+			info.StatusClass = string(relay.DiagnosticClassPlaybackStarted)
+			info.StatusReason = "stream is running"
+		}
 	}
 
 	var result []streamInfo
@@ -139,19 +257,24 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		if s.hasAccess(user, st.MountName) {
 			seen[st.MountName] = true
 			info := streamInfo{
-				Mount:       st.MountName,
-				ContentType: st.ContentType,
-				Bitrate:     st.Bitrate,
-				Listeners:   st.ListenersCount,
-				SourceIP:    st.SourceIP,
-				Visible:     st.Visible,
-				Enabled:     st.Enabled,
-				Health:      st.Health,
-				Uptime:      st.Uptime,
-				CurrentSong: st.CurrentSong,
-				Name:        st.Name,
-				HasVideo:    videoMounts[st.MountName],
+				Mount:          st.MountName,
+				ContentType:    st.ContentType,
+				Bitrate:        st.Bitrate,
+				BurstSize:      mountBurstSize(s.Config, st.MountName),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, st.MountName),
+				Listeners:      st.ListenersCount,
+				MaxListeners:   mountMaxListeners(s.Config, st.MountName),
+				SourceIP:       st.SourceIP,
+				Visible:        st.Visible,
+				Enabled:        st.Enabled,
+				Health:         st.Health,
+				Uptime:         st.Uptime,
+				CurrentSong:    st.CurrentSong,
+				Name:           st.Name,
+				HasVideo:       videoMounts[st.MountName],
 			}
+			applyStreamDiagnostic(&info, s.Relay, st.MountName)
+			applyStreamSource(&info, st.MountName)
 			// Pull video metrics from the /video sibling (that's where
 			// ingest records them) so the parent row in the UI carries
 			// the numbers the operator expects to see alongside its
@@ -179,10 +302,15 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 			disabled := s.Config.DisabledMounts[mount]
 			visible := s.Config.VisibleMounts[mount]
 			result = append(result, streamInfo{
-				Mount:   mount,
-				Visible: visible,
-				Enabled: !disabled,
+				Mount:          mount,
+				BurstSize:      mountBurstSize(s.Config, mount),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, mount),
+				MaxListeners:   mountMaxListeners(s.Config, mount),
+				Visible:        visible,
+				Enabled:        !disabled,
 			})
+			applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+			applyStreamSource(&result[len(result)-1], mount)
 		}
 	}
 	for _, u := range s.Config.Users {
@@ -192,10 +320,15 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				disabled := s.Config.DisabledMounts[mount]
 				visible := s.Config.VisibleMounts[mount]
 				result = append(result, streamInfo{
-					Mount:   mount,
-					Visible: visible,
-					Enabled: !disabled,
+					Mount:          mount,
+					BurstSize:      mountBurstSize(s.Config, mount),
+					EffectiveBurst: effectiveMountBurstSize(s.Config, mount),
+					MaxListeners:   mountMaxListeners(s.Config, mount),
+					Visible:        visible,
+					Enabled:        !disabled,
 				})
+				applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+				applyStreamSource(&result[len(result)-1], mount)
 			}
 		}
 	}
@@ -204,6 +337,34 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		result = []streamInfo{}
 	}
 	jsonResponse(w, result)
+}
+
+func (s *Server) apiGetStreamDiagnostics(w http.ResponseWriter, r *http.Request) {
+	mount := r.URL.Query().Get("mount")
+	if mount == "" {
+		jsonError(w, "Mount is required", http.StatusBadRequest)
+		return
+	}
+	if _, ok := s.requireMountAccess(w, r, mount); !ok {
+		return
+	}
+	if s.Relay.History == nil {
+		jsonError(w, "History disabled", http.StatusServiceUnavailable)
+		return
+	}
+
+	limit := 10
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		fmt.Sscanf(raw, "%d", &limit)
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	if limit > 100 {
+		limit = 100
+	}
+
+	jsonResponse(w, s.Relay.History.GetDiagnostics(mount, limit))
 }
 
 func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
@@ -223,7 +384,8 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		// The create form has always had a burst-size field; the handler
 		// never read it, so the value was collected and thrown away and
 		// every mount ran on the 512 KiB default.
-		BurstSize int `json:"burst_size"`
+		BurstSize    int `json:"burst_size"`
+		MaxListeners int `json:"max_listeners"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -231,6 +393,10 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Mount == "" || body.Password == "" {
 		jsonError(w, "Mount and password are required", http.StatusBadRequest)
+		return
+	}
+	if body.MaxListeners < 0 {
+		jsonError(w, "max_listeners must not be negative", http.StatusBadRequest)
 		return
 	}
 	if body.BurstSize < 0 || body.BurstSize > maxBurstSize {
@@ -261,7 +427,7 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		user.Mounts[body.Mount] = hashed
 		s.Config.UnlockMaps()
 	}
-	if body.BurstSize > 0 {
+	if body.BurstSize > 0 || body.MaxListeners > 0 {
 		s.Config.LockMaps()
 		adv, ok := s.Config.AdvancedMounts[body.Mount]
 		if !ok || adv == nil {
@@ -269,6 +435,7 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 			s.Config.AdvancedMounts[body.Mount] = adv
 		}
 		adv.BurstSize = body.BurstSize
+		adv.MaxListeners = body.MaxListeners
 		s.Config.UnlockMaps()
 	}
 	s.Config.SaveConfig()
@@ -292,13 +459,23 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Mount    string  `json:"mount"`
-		Password *string `json:"password,omitempty"`
-		Enabled  *bool   `json:"enabled,omitempty"`
-		Visible  *bool   `json:"visible,omitempty"`
+		Mount        string  `json:"mount"`
+		Password     *string `json:"password,omitempty"`
+		Enabled      *bool   `json:"enabled,omitempty"`
+		Visible      *bool   `json:"visible,omitempty"`
+		BurstSize    *int    `json:"burst_size,omitempty"`
+		MaxListeners *int    `json:"max_listeners,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.BurstSize != nil && (*body.BurstSize < 0 || *body.BurstSize > maxBurstSize) {
+		jsonError(w, "invalid burst_size", http.StatusBadRequest)
+		return
+	}
+	if body.MaxListeners != nil && *body.MaxListeners < 0 {
+		jsonError(w, "invalid max_listeners", http.StatusBadRequest)
 		return
 	}
 	if body.Mount == "" {
@@ -380,6 +557,24 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	if body.BurstSize != nil || body.MaxListeners != nil {
+		s.Config.LockMaps()
+		if s.Config.AdvancedMounts == nil {
+			s.Config.AdvancedMounts = make(map[string]*config.MountSettings)
+		}
+		ms := s.Config.AdvancedMounts[body.Mount]
+		if ms == nil {
+			ms = &config.MountSettings{}
+			s.Config.AdvancedMounts[body.Mount] = ms
+		}
+		if body.BurstSize != nil {
+			ms.BurstSize = *body.BurstSize
+		}
+		if body.MaxListeners != nil {
+			ms.MaxListeners = *body.MaxListeners
+		}
+		s.Config.UnlockMaps()
+	}
 	s.Config.SaveConfig()
 	jsonResponse(w, map[string]string{"status": "updated", "mount": body.Mount})
 	s.Audit(r, "mount_updated", "stream", body.Mount, "")

@@ -409,6 +409,9 @@ func (s *Server) RegisterHLS(mount string) *relay.HLSOutput {
 	hls.Start(s.hlsCtx, tracks)
 	s.hlsOutputs[mount] = hls
 	s.hlsMu.Unlock()
+	if s.RuntimeRegistry != nil {
+		s.RuntimeRegistry.AttachOutput(mount, relay.OutputHLS)
+	}
 
 	logger.L.Infow("HLS: Registered output", "mount", mount, "has_video", len(tracks) > 1)
 	return hls
@@ -423,4 +426,7 @@ func (s *Server) UnregisterHLS(mount string) {
 		delete(s.hlsLastAccess, mount)
 	}
 	s.hlsMu.Unlock()
+	if s.RuntimeRegistry != nil {
+		s.RuntimeRegistry.DetachOutput(mount, relay.OutputHLS)
+	}
 }

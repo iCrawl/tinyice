@@ -36,7 +36,17 @@ const (
 // address.
 const autoDJSourceLabel = "autodj"
 
+type RecoveryState struct {
+	Phase     string    `json:"phase"`
+	Attempt   int       `json:"attempt"`
+	NextRetry time.Time `json:"next_retry,omitzero"`
+	LastError string    `json:"last_error"`
+}
+
 type Streamer struct {
+	Recovery             RecoveryState
+	commandCancel        context.CancelFunc
+	loopDone             chan struct{}
 	Name                 string
 	OutputMount          string
 	MusicDir             string
@@ -57,6 +67,7 @@ type Streamer struct {
 	OnPlayCommand        string
 	OnPlayCommandTimeout int
 	Volume               float64 // 0..1 playback gain applied before encode
+	manualStop           bool
 
 	relay  *Relay
 	ctx    context.Context // streamer-lifetime context, parents file/command ctxs
@@ -66,6 +77,7 @@ type Streamer struct {
 	fileCancel    context.CancelFunc
 	titleCache    map[string]string
 	titleFetching map[string]struct{} // in-flight tag reads, keyed by path
+	outputSession *AutoDJOutputSession
 	titleFetchWg  sync.WaitGroup
 
 	// Stats
@@ -90,13 +102,15 @@ type Streamer struct {
 	PlaylistVersion    uint32
 	idleCh             chan string
 	stateCh            chan struct{}
+	runtimeRegistry    *RuntimeRegistry
 }
 
 type StreamerManager struct {
-	instances map[string]*Streamer // key is OutputMount
-	mu        sync.RWMutex
-	relay     *Relay
-	config    *config.Config
+	instances       map[string]*Streamer // key is OutputMount
+	mu              sync.RWMutex
+	relay           *Relay
+	runtimeRegistry *RuntimeRegistry
+	config          *config.Config
 
 	// OnTrackStart fires once per track, after metadata is parsed and just
 	// before encoding begins. Used by the server to dispatch the
@@ -126,16 +140,66 @@ type TrackStartInfo struct {
 }
 
 func NewStreamerManager(r *Relay, cfg *config.Config) *StreamerManager {
-	return &StreamerManager{
+	sm := &StreamerManager{
 		instances: make(map[string]*Streamer),
 		relay:     r,
 		config:    cfg,
 	}
+
+	return sm
+}
+
+func (sm *StreamerManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.runtimeRegistry = rr
+	for _, inst := range sm.instances {
+		inst.runtimeRegistry = rr
+	}
+}
+
+func (sm *StreamerManager) DeadRecoveryActive(mount string) bool {
+	sm.mu.RLock()
+	s := sm.instances[mount]
+	sm.mu.RUnlock()
+	if s == nil {
+		return false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Recovery.Phase == "recovering" || s.Recovery.Phase == "backoff"
+}
+func (sm *StreamerManager) RecoverDeadSongCommandMount(mount string) {
+	sm.mu.RLock()
+	s := sm.instances[mount]
+	sm.mu.RUnlock()
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	if s.State != StatePlaying || s.manualStop || s.SongCommand == "" {
+		s.mu.Unlock()
+		return
+	}
+	s.Recovery.Phase = "recovering"
+	cancel := s.fileCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.signalStateChange()
+}
+func (sm *StreamerManager) mountHasFreshData(mount string) bool {
+	out, ok := sm.relay.GetStream(mount)
+	if !ok {
+		return false
+	}
+	last := out.ProducerLastProgress()
+	return !last.IsZero() && time.Since(last) <= 5*time.Second
 }
 
 func (s *Streamer) Play() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	// A non-looping playlist that ran to the end leaves CurrentPos past
 	// the last entry and the state Stopped. Without this rewind, pressing
 	// Play again re-entered the same "past the end, not looping" branch
@@ -144,7 +208,14 @@ func (s *Streamer) Play() {
 	if s.CurrentPos >= len(s.Playlist) {
 		s.CurrentPos = 0
 	}
+	s.manualStop = false
 	s.State = StatePlaying
+	s.mu.Unlock()
+	if s.relay != nil {
+		if out, ok := s.relay.GetStream(s.OutputMount); ok && out.GetSourceIP() == autoDJSourceLabel {
+			out.SetProducerIntent("playing")
+		}
+	}
 	s.signalStateChange()
 }
 
@@ -200,16 +271,14 @@ func (s *Streamer) GetVolume() float64 {
 }
 
 func (s *Streamer) TogglePlay() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.State == StatePlaying {
-		// Suspend mid-track (pauseGate stops the encoder reading);
-		// don't cancel, so unpausing resumes the same file.
-		s.State = StatePaused
+	s.mu.RLock()
+	state := s.State
+	s.mu.RUnlock()
+	if state == StatePlaying {
+		s.Pause()
 	} else {
-		s.State = StatePlaying
+		s.Play()
 	}
-	s.signalStateChange()
 }
 
 func (s *Streamer) ToggleShuffle() {
@@ -246,10 +315,23 @@ func (s *Streamer) ClearQueue() {
 // instance. Use Shutdown for the teardown case.
 func (s *Streamer) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	s.manualStop = true
 	s.State = StateStopped
-	if s.fileCancel != nil {
-		s.fileCancel()
+	s.Recovery = RecoveryState{Phase: "idle"}
+	fileCancel := s.fileCancel
+	commandCancel := s.commandCancel
+	session := s.outputSession
+	s.outputSession = nil
+	s.mu.Unlock()
+	if fileCancel != nil {
+		fileCancel()
+	}
+	if commandCancel != nil {
+		commandCancel()
+	}
+	s.recordIntent("stopped", DiagnosticStatusStopped, "AutoDJ stopped")
+	if session != nil {
+		session.Stop()
 	}
 	s.signalStateChange()
 }
@@ -263,9 +345,29 @@ func (s *Streamer) Stop() {
 // with no backlog, so listeners hear the gap.
 func (s *Streamer) Pause() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.State = StatePaused
+	s.Recovery = RecoveryState{Phase: "idle"}
+	cancel := s.commandCancel
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	s.recordIntent("paused", DiagnosticStatusPaused, "AutoDJ paused")
 	s.signalStateChange()
+}
+func (s *Streamer) recordIntent(intent string, status DiagnosticStatus, reason string) {
+	if s.relay == nil {
+		return
+	}
+	out, ok := s.relay.GetStream(s.OutputMount)
+	if !ok {
+		return
+	}
+	if out.GetSourceIP() != autoDJSourceLabel && out.ProducerIntent() == "" {
+		return
+	}
+	out.SetProducerIntent(intent)
+	s.relay.Diagnostics.Record(DiagnosticUpdate{Mount: s.OutputMount, Status: status, Class: DiagnosticClassManualStop, Reason: reason, Actor: DiagnosticActorAutoDJ, Timestamp: time.Now()})
 }
 
 // Shutdown tears the streamer down for good: playback stops and the
@@ -274,16 +376,20 @@ func (s *Streamer) Pause() {
 // letting them live out their per-command timeout. The instance is not
 // reusable afterwards — StartStreamer must build a new one.
 func (s *Streamer) Shutdown() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.State = StateStopped
-	if s.fileCancel != nil {
-		s.fileCancel()
+	s.Stop()
+	s.mu.RLock()
+	cancel := s.cancel
+	done := s.loopDone
+	s.mu.RUnlock()
+	if cancel != nil {
+		cancel()
 	}
-	if s.cancel != nil {
-		s.cancel()
+	if done != nil {
+		<-done
 	}
-	s.signalStateChange()
+	if s.MPDServer != nil {
+		s.MPDServer.Stop()
+	}
 }
 
 func (s *Streamer) Restart() {
@@ -848,10 +954,21 @@ func (s *Streamer) execSongCommand() (string, error) {
 		timeout = 5
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
+	s.mu.RLock()
+	parent := s.ctx
+	s.mu.RUnlock()
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
+	s.mu.Lock()
+	s.commandCancel = cancel
+	s.mu.Unlock()
+	defer func() { s.mu.Lock(); s.commandCancel = nil; s.mu.Unlock() }()
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "sh", "-c", s.SongCommand)
+	cancelCommandTree(cmd)
 	cmd.Dir = s.MusicDir
 
 	output, err := cmd.Output()
@@ -912,6 +1029,7 @@ func (s *Streamer) execOnPlayCommand(artist, title, album, filePath, mount strin
 		defer cancel()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", s.OnPlayCommand)
+		cancelCommandTree(cmd)
 		cmd.Dir = s.MusicDir
 		cmd.Env = append(os.Environ(),
 			"TINYICE_ARTIST="+artist,
@@ -1041,6 +1159,7 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 		OnPlayCommand:        onPlayCommand,
 		OnPlayCommandTimeout: onPlayCommandTimeout,
 		relay:                sm.relay,
+		runtimeRegistry:      sm.runtimeRegistry,
 		ctx:                  ctx,
 		cancel:               cancel,
 		titleCache:           make(map[string]string),
@@ -1083,7 +1202,8 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 		s.LoadPlaylist("")
 	}
 
-	go sm.runStreamerLoop(ctx, s)
+	s.loopDone = make(chan struct{})
+	go func() { defer close(s.loopDone); sm.runStreamerLoop(ctx, s) }()
 	return s, nil
 }
 
@@ -1137,6 +1257,19 @@ func (sm *StreamerManager) DeleteStreamer(mount string) {
 		}
 		s.Shutdown()
 		delete(sm.instances, mount)
+	}
+}
+
+func (sm *StreamerManager) Shutdown() {
+	sm.mu.Lock()
+	streamers := make([]*Streamer, 0, len(sm.instances))
+	for _, s := range sm.instances {
+		streamers = append(streamers, s)
+	}
+	sm.mu.Unlock()
+
+	for _, s := range streamers {
+		s.Shutdown()
 	}
 }
 
@@ -1196,6 +1329,16 @@ func (s *Streamer) MovePlaylistItem(from, to int) {
 
 func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 	logger.L.Infof("Streamer %s starting for mount %s", s.Name, s.OutputMount)
+	defer func() {
+		s.mu.Lock()
+		outputSession := s.outputSession
+		s.outputSession = nil
+		s.fileCancel = nil
+		s.mu.Unlock()
+		if outputSession != nil {
+			outputSession.Stop()
+		}
+	}()
 
 	// Counts files rejected by validateAudioFile since the last one that
 	// played. Drives the backoff below; see the comment there.
@@ -1210,13 +1353,13 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			state := s.State
 			s.mu.RUnlock()
 			if state != StatePlaying {
-				// Release the source label while parked: a stopped
-				// AutoDJ is not a live source, and leaving the field
-				// set would both show the mount as sourced in the admin
-				// UI and block TryClaimSource for a real encoder.
-				if out, ok := sm.relay.GetStream(s.OutputMount); ok {
-					if out.GetSourceIP() == autoDJSourceLabel {
-						out.SetSourceIP("")
+				if state == StateStopped {
+					s.mu.Lock()
+					session := s.outputSession
+					s.outputSession = nil
+					s.mu.Unlock()
+					if session != nil {
+						session.Stop()
 					}
 				}
 				select {
@@ -1247,6 +1390,18 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 					filePos = -1
 				} else {
 					logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
+					if s.relay != nil && s.OutputMount != "" {
+						s.relay.Diagnostics.Record(DiagnosticUpdate{
+							Mount:     s.OutputMount,
+							Status:    DiagnosticStatusError,
+							Class:     classifySongCommandError(err),
+							Reason:    songCommandReason(err),
+							Error:     err.Error(),
+							Actor:     DiagnosticActorAutoDJ,
+							Timestamp: time.Now(),
+							Details:   songCommandDiagnosticDetails(err),
+						})
+					}
 				}
 				s.mu.Lock()
 				// If command failed, try playlist as fallback
@@ -1282,6 +1437,7 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 						} else {
 							s.State = StateStopped
 							s.mu.Unlock()
+							s.recordIntent("stopped", DiagnosticStatusStopped, "playlist exhausted")
 							continue
 						}
 					}
@@ -1294,9 +1450,28 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 				}
 			}
 			s.mu.Unlock()
+			s.mu.RLock()
+			stillPlaying := s.State == StatePlaying
+			s.mu.RUnlock()
+			if !stillPlaying {
+				continue
+			}
 
 			if filePath == "" {
-				time.Sleep(1 * time.Second)
+				if s.SongCommand == "" && s.relay != nil && s.OutputMount != "" {
+					s.relay.Diagnostics.Record(DiagnosticUpdate{
+						Mount:     s.OutputMount,
+						Status:    DiagnosticStatusStopped,
+						Class:     DiagnosticClassPlaylistExhausted,
+						Reason:    "playlist exhausted",
+						Actor:     DiagnosticActorAutoDJ,
+						Timestamp: time.Now(),
+					})
+				}
+
+				if !s.retryPlayback(ctx, fmt.Errorf("no playable track")) {
+					return
+				}
 				continue
 			}
 
@@ -1318,10 +1493,8 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 				consecutiveInvalid++
 				if consecutiveInvalid >= playlistLen(s) {
 					consecutiveInvalid = 0
-					select {
-					case <-ctx.Done():
+					if !s.retryPlayback(ctx, err) {
 						return
-					case <-time.After(1 * time.Second):
 					}
 				}
 				continue
@@ -1337,7 +1510,9 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			err := sm.streamFile(fileCtx, s, filePath, filePos, fileID)
 			if err != nil && fileCtx.Err() == nil {
 				logger.L.Errorf("Streamer %s: Failed to stream %s: %v", s.Name, filePath, err)
-				time.Sleep(1 * time.Second)
+				if !s.retryPlayback(ctx, err) {
+					return
+				}
 			}
 
 			s.mu.Lock()
@@ -1345,6 +1520,42 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			fileCancel()
 			s.mu.Unlock()
 		}
+	}
+}
+
+func (s *Streamer) retryPlayback(ctx context.Context, err error) bool {
+	s.mu.Lock()
+	if s.State != StatePlaying {
+		s.mu.Unlock()
+		return true
+	}
+	s.Recovery.Attempt++
+	attempt := s.Recovery.Attempt
+	delay := time.Duration(attempt) * time.Second
+	if delay > time.Minute {
+		delay = time.Minute
+	}
+	s.Recovery.Phase = "backoff"
+	s.Recovery.LastError = err.Error()
+	s.Recovery.NextRetry = time.Now().Add(delay)
+	session := s.outputSession
+	s.mu.Unlock()
+	if session != nil {
+		session.Park()
+		session.stream.SetCurrentSong("", s.relay)
+	}
+	if s.relay != nil {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{Mount: s.OutputMount, Status: DiagnosticStatusRecovering, Class: DiagnosticClassRecoveryFailed, Reason: "playback retry pending", Error: err.Error(), Actor: DiagnosticActorAutoDJ, Timestamp: time.Now()})
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-s.stateCh:
+		return true
+	case <-timer.C:
+		return true
 	}
 }
 
@@ -1398,124 +1609,160 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		return err
 	}
 	defer f.Close()
-
-	// Extract metadata
 	songTitle := filepath.Base(path)
-	var tagMeta tag.Metadata
+	artist, title, album := "", songTitle, ""
 	if m, err := tag.ReadFrom(f); err == nil {
-		tagMeta = m
-		if m.Artist() != "" && m.Title() != "" {
-			songTitle = fmt.Sprintf("%s - %s", m.Artist(), m.Title())
-		} else if m.Title() != "" {
-			songTitle = m.Title()
+		artist = m.Artist()
+		title = m.Title()
+		album = m.Album()
+		if artist != "" && title != "" {
+			songTitle = fmt.Sprintf("%s - %s", artist, title)
+		} else if title != "" {
+			songTitle = title
+		}
+		if title == "" {
+			title = songTitle
 		}
 	}
-	// Seek back to start after reading tags
-	f.Seek(0, 0)
-
+	if _, err = f.Seek(0, 0); err != nil {
+		return err
+	}
 	decoder, err := OpenDecoder(f)
 	if err != nil {
 		return err
 	}
-
+	if s.relay == nil {
+		s.relay = sm.relay
+	}
 	s.mu.Lock()
-	s.CurrentFile = songTitle
-	s.CurrentArtist = ""
-	s.CurrentTitle = songTitle
-	s.CurrentAlbum = ""
-	s.CurrentFilePath = path
-	s.CurrentPlayingPos = pos
-	s.CurrentPlayingID = id
-	if tagMeta != nil {
-		s.CurrentArtist = tagMeta.Artist()
-		s.CurrentTitle = tagMeta.Title()
-		s.CurrentAlbum = tagMeta.Album()
-		if s.CurrentTitle == "" {
-			s.CurrentTitle = songTitle
-		}
+	if s.State != StatePlaying || ctx.Err() != nil {
+		s.mu.Unlock()
+		return context.Canceled
 	}
-	s.CurrentSampleRate = decoder.SampleRate()
-	s.CurrentChannels = 2 // decoders always emit 2 channels via OpenDecoder
-	s.CurrentFileTime = time.Now()
-	s.CurrentPausedNanos.Store(0)
-	s.CurrentFileDuration = 0 // PCM length isn't known up-front for non-MP3 inputs
+	session := s.outputSession
+	if session == nil {
+		session, err = NewAutoDJOutputSession(s)
+		if err != nil {
+			s.mu.Unlock()
+			return err
+		}
+		s.outputSession = session
+	}
+	lifetime := s.ctx
+	if lifetime == nil {
+		lifetime = ctx
+	}
+	inject := s.InjectMetadata
 	s.mu.Unlock()
-	s.broadcastIdle("player") // new track: idle MPD clients refresh currentsong
-
-	// Update stream metadata under the output stream's mutex so concurrent
-	// Snapshot / listener reads see a coherent set of fields.
-	output := sm.relay.GetOrCreateStream(s.OutputMount)
-	// Don't write into a mount a live encoder owns. The label used to be
-	// assigned unconditionally, which both mislabelled the source in the
-	// admin UI and let the AutoDJ interleave its bytes with the
-	// encoder's — torn frames for every listener.
-	if !output.ClaimSourceIfFree(autoDJSourceLabel) {
-		return fmt.Errorf("mount %s already has a live source (%s); AutoDJ standing by",
-			s.OutputMount, output.GetSourceIP())
+	if err = session.Start(lifetime); err != nil {
+		return err
 	}
-	output.mu.Lock()
-	if s.InjectMetadata {
-		output.CurrentSong = s.CurrentFile
-		output.Name = s.Name
-		output.Visible = true
-	}
-	// Identify the AutoDJ as the mount's source. Every other ingest does
-	// this — icecast/RTMP/SRT record the peer address, the relay client
-	// uses "relay-pull" and WebRTC uses "webrtc-source" — but the AutoDJ
-	// writes in-process and left the field empty, so the admin UI showed a
-	// playing AutoDJ mount as "No source" with a grey (offline) dot.
-	output.Bitrate = fmt.Sprintf("%d", s.Bitrate)
-	if s.Format == "opus" {
-		output.ContentType = "audio/ogg"
-	} else {
-		output.ContentType = "audio/mpeg"
-	}
-	output.mu.Unlock()
-	if s.InjectMetadata {
-		sm.relay.UpdateMetadata(s.OutputMount, s.CurrentFile)
-	}
-
-	// Fire on_play_command hook (runs in background, non-blocking).
-	s.execOnPlayCommand(s.CurrentArtist, s.CurrentTitle, s.CurrentAlbum, path, s.OutputMount)
-
-	// Notify the server so it can dispatch webhook subscribers. Run in a
-	// goroutine: the server callback may block briefly on JSON marshal /
-	// HTTP send setup and we don't want to delay the encoder start.
-	// recover() because this runs outside any HTTP handler so net/http's
-	// own panic guard doesn't apply — a panic here would otherwise crash
-	// the whole process.
-	if cb := sm.OnTrackStart; cb != nil {
-		info := TrackStartInfo{
-			Mount:           s.OutputMount,
-			StreamerName:    s.Name,
-			Artist:          s.CurrentArtist,
-			Title:           s.CurrentTitle,
-			Album:           s.CurrentAlbum,
-			FilePath:        path,
-			Format:          s.Format,
-			Bitrate:         s.Bitrate,
-			DurationSeconds: s.CurrentFileDuration.Seconds(),
-		}
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.L.Errorw("OnTrackStart callback panicked",
-						"mount", info.Mount, "panic", fmt.Sprintf("%v", r))
-				}
-			}()
-			cb(info)
-		}()
-	}
-
 	pcm := s.buildPCMChain(ctx, decoder, decoder.SampleRate())
+	source := newReaderPCMFrameSource(ctx, pcm, f)
+	session.SetSourceWithActivation(source, func() {
+		if ctx.Err() != nil {
+			return
+		}
+		metadataTitle := songTitle
+		if !inject {
+			metadataTitle = ""
+		}
+		mc, ok := session.stream.ActivatePlayback(session.token, metadataTitle, sm.relay)
+		if !ok {
+			return
+		}
+		s.mu.Lock()
+		s.CurrentFile = songTitle
+		s.CurrentArtist = artist
+		s.CurrentTitle = title
+		s.CurrentAlbum = album
+		s.CurrentFilePath = path
+		s.CurrentPlayingPos = pos
+		s.CurrentPlayingID = id
+		s.CurrentSampleRate = decoder.SampleRate()
+		s.CurrentChannels = 2
+		s.CurrentFileTime = mc.StartedAt
+		s.CurrentPausedNanos.Store(0)
+		s.CurrentFileDuration = 0
+		s.Recovery = RecoveryState{Phase: "idle"}
+		s.mu.Unlock()
+		s.broadcastIdle("player")
+		sm.recordAutoDJPlaybackStarted(s.OutputMount)
+		s.execOnPlayCommand(artist, title, album, path, s.OutputMount)
+		if cb := sm.OnTrackStart; cb != nil {
+			info := TrackStartInfo{Mount: s.OutputMount, StreamerName: s.Name, Artist: artist, Title: title, Album: album, FilePath: path, Format: s.Format, Bitrate: s.Bitrate}
+			go func() { defer func() { _ = recover() }(); cb(info) }()
+		}
+	})
+	select {
+	case <-ctx.Done():
+		session.SetSource(nil)
+		return ctx.Err()
+	case <-source.Done():
+		return nil
+	}
+}
 
-	if s.Format == "opus" {
-		EncodeOpus(ctx, sm.relay, output, pcm, s.Bitrate, &s.BytesStreamed, true)
-	} else {
-		EncodeMP3(ctx, sm.relay, output, pcm, s.Bitrate, &s.BytesStreamed, true, decoder.SampleRate())
+func (sm *StreamerManager) recordAutoDJPlaybackStarted(mount string) {
+	if sm == nil || sm.relay == nil || sm.relay.Diagnostics == nil || mount == "" {
+		return
+	}
+	if current, ok := sm.relay.Diagnostics.Current(mount); ok && current.Status == DiagnosticStatusRunning {
+		return
+	}
+	sm.relay.Diagnostics.Record(DiagnosticUpdate{
+		Mount:     mount,
+		Status:    DiagnosticStatusRunning,
+		Class:     DiagnosticClassPlaybackStarted,
+		Reason:    "AutoDJ playback started",
+		Actor:     DiagnosticActorAutoDJ,
+		Timestamp: time.Now(),
+	})
+}
+
+func classifySongCommandError(err error) DiagnosticClass {
+	if err == nil {
+		return DiagnosticClassSongCommandFailure
 	}
 
-	return nil
+	msg := strings.ToLower(err.Error())
+	switch {
+	case strings.Contains(msg, "empty output"):
+		return DiagnosticClassSongCommandEmpty
+	case strings.Contains(msg, "invalid file"):
+		return DiagnosticClassSongCommandInvalid
+	default:
+		return DiagnosticClassSongCommandFailure
+	}
+}
+
+func songCommandReason(err error) string {
+	switch classifySongCommandError(err) {
+	case DiagnosticClassSongCommandEmpty:
+		return "song_command returned empty output"
+	case DiagnosticClassSongCommandInvalid:
+		return "song_command returned invalid file"
+	default:
+		return "song_command failed"
+	}
+}
+
+func songCommandDiagnosticDetails(err error) map[string]string {
+	if err == nil || classifySongCommandError(err) != DiagnosticClassSongCommandInvalid {
+		return nil
+	}
+
+	msg := err.Error()
+	start := strings.Index(msg, "\"")
+	if start < 0 {
+		return nil
+	}
+	rest := msg[start+1:]
+	end := strings.Index(rest, "\"")
+	if end < 0 {
+		return nil
+	}
+	return map[string]string{"path": rest[:end]}
 }
 
 // buildPCMChain assembles the reader the encoder pulls from: volume, then
@@ -1533,10 +1780,14 @@ func (s *Streamer) buildPCMChain(ctx context.Context, decoded io.Reader, srcRate
 	if gain := s.GetVolume(); gain < 1.0 {
 		pcm = newGainReader(pcm, gain)
 	}
-	if s.Format == "opus" && srcRate != 48000 {
+	targetRate := 44100
+	if s.Format == "opus" {
+		targetRate = 48000
+	}
+	if srcRate != targetRate {
 		// The Opus encoder is locked at 48 kHz; resample so playback
 		// isn't sped up / slowed down.
-		pcm = NewLinearResampler(pcm, srcRate, 48000)
+		pcm = NewLinearResampler(pcm, srcRate, targetRate)
 	}
 	return newPauseGate(ctx, s, pcm)
 }
@@ -1660,4 +1911,10 @@ func playlistLen(s *Streamer) int {
 		return 1
 	}
 	return n
+}
+
+func (s *Streamer) RecoverySnapshot() RecoveryState {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.Recovery
 }

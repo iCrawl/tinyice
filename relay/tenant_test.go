@@ -12,10 +12,7 @@ func TestTenantLimits(t *testing.T) {
 		t.Fatal("free plan should allow 1 stream initially")
 	}
 
-	// Simulate adding a pipeline
-	tenant.mu.Lock()
-	tenant.pipelines["/stream"] = NewPipeline("/stream")
-	tenant.mu.Unlock()
+	tenant.AttachMount("/stream")
 
 	if tenant.CanCreateStream() {
 		t.Fatal("free plan should not allow more than 1 stream")

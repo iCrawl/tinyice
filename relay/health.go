@@ -76,6 +76,12 @@ func (hm *HealthMonitor) WithAutoRemove(timeout time.Duration) *HealthMonitor {
 	return hm
 }
 
+func (hm *HealthMonitor) AutoRemoveDeadEnabled() bool {
+	hm.mu.Lock()
+	defer hm.mu.Unlock()
+	return hm.autoRemoveDead
+}
+
 func (hm *HealthMonitor) OnEvent(fn func(StreamHealthEvent)) {
 	hm.onEvent = fn
 }
@@ -109,7 +115,15 @@ func (hm *HealthMonitor) check() {
 		}
 
 		stream.mu.RLock()
+		if stream.producerIntent == "paused" || stream.producerIntent == "stopped" {
+			stream.mu.RUnlock()
+			delete(hm.lastStatus, ss.MountName)
+			continue
+		}
 		lastData := stream.LastDataReceived
+		if stream.SourceIP == autoDJSourceLabel {
+			lastData = stream.producerLastProgress
+		}
 		started := stream.Started
 		stream.mu.RUnlock()
 
@@ -124,17 +138,62 @@ func (hm *HealthMonitor) check() {
 			oldStatus = StatusHealthy
 		}
 
-		if newStatus != oldStatus {
+		recordTransition := newStatus != oldStatus
+		eventOldStatus := oldStatus
+		if !recordTransition && newStatus == StatusHealthy {
+			if current, ok := hm.relay.Diagnostics.Current(ss.MountName); ok && current.Actor == DiagnosticActorHealthMonitor {
+				switch current.Class {
+				case DiagnosticClassHealthDegraded:
+					recordTransition = true
+					eventOldStatus = StatusDegraded
+				case DiagnosticClassHealthDead:
+					recordTransition = true
+					eventOldStatus = StatusDead
+				}
+			}
+		}
+
+		if recordTransition {
 			hm.lastStatus[ss.MountName] = newStatus
+			reason := "no data for " + time.Since(checkTime).Round(time.Second).String()
+			switch newStatus {
+			case StatusHealthy:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusRunning,
+					Class:     DiagnosticClassHealthRecovered,
+					Reason:    "stream healthy again",
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			case StatusDegraded:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDegraded,
+					Class:     DiagnosticClassHealthDegraded,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			case StatusDead:
+				hm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     ss.MountName,
+					Status:    DiagnosticStatusDead,
+					Class:     DiagnosticClassHealthDead,
+					Reason:    reason,
+					Actor:     DiagnosticActorHealthMonitor,
+					Timestamp: time.Now(),
+				})
+			}
 			logger.L.Infow("Stream health changed",
 				"mount", ss.MountName,
-				"from", oldStatus.String(),
+				"from", eventOldStatus.String(),
 				"to", newStatus.String(),
 			)
 			if hm.onEvent != nil {
 				hm.onEvent(StreamHealthEvent{
 					Mount:     ss.MountName,
-					OldStatus: oldStatus,
+					OldStatus: eventOldStatus,
 					NewStatus: newStatus,
 					Timestamp: time.Now(),
 				})

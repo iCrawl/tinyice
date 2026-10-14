@@ -409,6 +409,9 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	flusher, _ := w.(http.Flusher)
 	ticker := time.NewTicker(500 * time.Millisecond)
 	defer ticker.Stop()
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
 	type PublicStreamInfo struct {
 		Mount       string `json:"mount"`
 		Name        string `json:"name"`
@@ -509,8 +512,34 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 		flusher.Flush()
 		return nil
 	}
+	sendMetadata := func(mc relay.MetadataChange) error {
+		if current, exists := s.Relay.GetStream(mc.Mount); exists {
+			if !current.IsVisible() {
+				return nil
+			}
+		} else if !mc.Visible {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]interface{}{
+			"mount":       mc.Mount,
+			"title":       mc.Title,
+			"artist":      mc.Artist,
+			"started_at":  mc.StartedAt.UTC().Format(time.RFC3339),
+			"playback_id": mc.PlaybackID, "revision": mc.Revision,
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
 	if err := send(); err != nil {
 		return
+	}
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
 	}
 	for {
 		select {
@@ -518,8 +547,64 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
+				return
+			}
 		case <-ticker.C:
 			if err := send(); err != nil {
+				return
+			}
+		}
+	}
+}
+
+func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher, _ := w.(http.Flusher)
+
+	metaCh := s.Relay.SubscribeMetadata()
+	defer s.Relay.UnsubscribeMetadata(metaCh)
+
+	sendMetadata := func(mc relay.MetadataChange) error {
+		if current, exists := s.Relay.GetStream(mc.Mount); exists {
+			if !current.IsVisible() {
+				return nil
+			}
+		} else if !mc.Visible {
+			return nil
+		}
+		metadataJSON, _ := json.Marshal(map[string]interface{}{
+			"mount":       mc.Mount,
+			"title":       mc.Title,
+			"artist":      mc.Artist,
+			"started_at":  mc.StartedAt.UTC().Format(time.RFC3339),
+			"playback_id": mc.PlaybackID, "revision": mc.Revision,
+		})
+		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
+			return err
+		}
+		flusher.Flush()
+		return nil
+	}
+
+	for _, mc := range s.Relay.LastMetadata() {
+		if err := sendMetadata(mc); err != nil {
+			return
+		}
+	}
+
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-r.Context().Done():
+			return
+		case mc := <-metaCh:
+			if err := sendMetadata(mc); err != nil {
 				return
 			}
 		}
@@ -945,7 +1030,16 @@ func (s *Server) handleGoLiveChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream := s.Relay.GetOrCreateStream(mount)
-	stream.SetSourceIP("webaudio-http")
+	token, claimed := stream.ClaimSource("webaudio-http")
+	if !claimed {
+		http.Error(w, "Mount already has an active source", http.StatusConflict)
+		return
+	}
+	defer stream.ReleaseSourceIfCurrent(token)
+	if s.RuntimeRegistry != nil {
+		s.RuntimeRegistry.AttachClaim(stream, token, relay.SourceWebRTC, "default")
+		defer s.RuntimeRegistry.DetachClaim(stream, token)
+	}
 	stream.Broadcast(body, s.Relay)
 
 	w.WriteHeader(http.StatusOK)

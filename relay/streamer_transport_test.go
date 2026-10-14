@@ -307,22 +307,23 @@ func TestPlaylistEditsKeepCursorOnTheSameTrack(t *testing.T) {
 func TestAutoDJDeclinesAMountWithALiveSource(t *testing.T) {
 	r := NewRelay(false, nil)
 	out := r.GetOrCreateStream("/contested")
-	if !out.TryClaimSource("203.0.113.9") {
-		t.Fatal("setup: encoder could not claim the mount")
+	token, ok := out.ClaimSource("203.0.113.9")
+	if !ok {
+		t.Fatal("encoder claim failed")
 	}
-	if out.ClaimSourceIfFree(autoDJSourceLabel) {
-		t.Error("AutoDJ claimed a mount a live encoder owns")
+	if _, ok := out.ClaimSource(autoDJSourceLabel); ok {
+		t.Fatal("AutoDJ stole live source")
 	}
-	if got := out.GetSourceIP(); got != "203.0.113.9" {
-		t.Errorf("source is now %q — the encoder's claim was overwritten", got)
+	out.ReleaseSourceIfCurrent(token)
+	autoToken, ok := out.ClaimSource(autoDJSourceLabel)
+	if !ok {
+		t.Fatal("AutoDJ could not claim free mount")
 	}
-	// Once the encoder leaves, the AutoDJ may take it.
-	out.ReleaseSource()
-	if !out.ClaimSourceIfFree(autoDJSourceLabel) {
-		t.Error("AutoDJ could not claim a free mount")
+	if _, ok := out.ClaimSource(autoDJSourceLabel); ok {
+		t.Fatal("a second producer sharing a label was accepted")
 	}
-	// And re-claiming its own mount is fine.
-	if !out.ClaimSourceIfFree(autoDJSourceLabel) {
-		t.Error("AutoDJ could not re-claim its own mount")
+	out.ReleaseSourceIfCurrent(token)
+	if !out.IsCurrentSource(autoToken) {
+		t.Fatal("old release lost successor")
 	}
 }

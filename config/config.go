@@ -100,8 +100,9 @@ type RelayConfig struct {
 }
 
 type MountSettings struct {
-	Password  string `json:"password"` // Hashed
-	BurstSize int    `json:"burst_size"`
+	Password     string `json:"password"` // Hashed
+	BurstSize    int    `json:"burst_size"`
+	MaxListeners int    `json:"max_listeners"`
 	// NameOverride: when set, replaces the source's Ice-Name header on
 	// metadata update. Lets ops rebrand a station server-side without
 	// touching the encoder.
@@ -568,6 +569,9 @@ var configMapMu sync.RWMutex
 // LockMaps / UnlockMaps bracket a mutation of any Config map. (Not
 // named Lock/Unlock: that would make Config a sync.Locker in vet's eyes
 // and flag every by-value use of the struct.)
+func (c *Config) RLockMaps()   { configMapMu.RLock() }
+func (c *Config) RUnlockMaps() { configMapMu.RUnlock() }
+
 func (c *Config) LockMaps()   { configMapMu.Lock() }
 func (c *Config) UnlockMaps() { configMapMu.Unlock() }
 

@@ -151,9 +151,19 @@ func (wm *WebRTCManager) pumpVideoTrack(ctx context.Context, mount string, track
 	// larger than audio, and a keyframe-aligned burst for a late joiner
 	// has to fit.
 	vs := wm.relay.GetOrCreateStreamSized(videoMount, 8*1024*1024)
+	token, claimed := vs.ClaimSource("webrtc-source")
+	if !claimed {
+		return
+	}
+	defer vs.ReleaseSourceIfCurrent(token)
+	vs.SetSourceCloserIfCurrent(token, func() { _ = pc.Close() })
+	defer vs.SetSourceCloserIfCurrent(token, nil)
+	if wm.runtimeRegistry != nil {
+		wm.runtimeRegistry.AttachClaim(vs, token, SourceWebRTC, "default")
+		defer wm.runtimeRegistry.DetachClaim(vs, token)
+	}
 	vs.mu.Lock()
 	vs.ContentType = "video/h264"
-	vs.SourceIP = "webrtc-source"
 	vs.Visible = false // surfaced through the parent mount's has_video
 	vs.mu.Unlock()
 	// Fresh producer session: drops page/keyframe state from any previous
@@ -173,7 +183,7 @@ func (wm *WebRTCManager) pumpVideoTrack(ctx context.Context, mount string, track
 	defer func() {
 		logger.L.Infow("WebRTC Source: video track ended", "mount", videoMount)
 		if st, ok := wm.relay.GetStream(videoMount); ok && st == vs {
-			wm.relay.RemoveStream(videoMount)
+			wm.relay.RemoveStreamIfCurrent(vs, token)
 		}
 	}()
 
