@@ -128,13 +128,16 @@ func (s *Server) mountDiagnostics(mount string) mountDiagnosticInfo {
 		if r.History != nil {
 			history := r.History.GetDiagnostics(mount, 10)
 			if len(history) > 0 {
+				info.History = history
+				if current, exists := r.GetStream(mount); exists && current.GetSourceIP() != "" {
+					return info
+				}
 				latest := history[0]
 				info.Status = string(latest.Status)
 				info.StatusClass = string(latest.Class)
 				info.StatusReason = latest.Reason
 				info.LastError = latest.Error
 				info.StatusUpdatedAt = latest.Timestamp.Unix()
-				info.History = history
 			}
 		}
 		return info

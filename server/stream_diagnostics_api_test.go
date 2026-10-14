@@ -157,6 +157,16 @@ func TestAPIGetStreamDiagnosticsReturnsPersistedHistory(t *testing.T) {
 func TestAPIGetStreamsMarksRuntimeOwnedAutoDJMountAsRunningWithoutRemoteSourceIP(t *testing.T) {
 	s := newListenerAPITestServer(t)
 	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"]}
+	history, err := relay.NewHistoryManager(t.TempDir() + "/history.db")
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Relay.History = history
+	history.RecordDiagnostic(relay.DiagnosticUpdate{
+		Mount: "/auto", Status: relay.DiagnosticStatusStopped,
+		Class: relay.DiagnosticClassManualStop, Actor: relay.DiagnosticActorAutoDJ,
+		Reason: "previous process stopped", Timestamp: time.Now().Add(-time.Hour),
+	})
 
 	stream := s.Relay.GetOrCreateStream("/auto")
 	token, _ := stream.ClaimSource("autodj")

@@ -243,8 +243,8 @@ func TestAutoDJPublishesMetadataAfterTrackFrameIsWritten(t *testing.T) {
 		if evt.Mount != "/gap" {
 			t.Fatalf("expected metadata for /gap, got %+v", evt)
 		}
-		if evt.Title != streamer.CurrentFile {
-			t.Fatalf("expected metadata title %q, got %+v", streamer.CurrentFile, evt)
+		if evt.Title != "track.mp3" {
+			t.Fatalf("expected metadata title track.mp3, got %+v", evt)
 		}
 	case err := <-done:
 		t.Fatalf("streamFile returned before metadata event: %v", err)
