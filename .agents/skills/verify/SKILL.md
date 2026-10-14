@@ -39,6 +39,14 @@ Run smoke once per fresh launch. It exercises mount creation, partial visibility
 
 For browser work, call native T3 `preview_status`, then `preview_open` at the manifest's URL with `reuseExistingTab=false`. Use the returned `tabId` on every later tool call. Log in with `input[name=username]`, `input[name=password]`, and `button[type=submit]`. Inspect with `preview_snapshot` before interaction. Prefer ARIA labels and exact button text from the feature map. Use standalone browser automation only if native tools are absent, unavailable, or fail twice.
 
+After baseline smoke, run the retained HTTP and SSE checks once:
+
+```sh
+python3 .agents/skills/verify/scripts/integration.py "$MANIFEST"
+```
+
+This creates disposable acceptance mounts and records `integration.json`. It checks persisted create flags, listener limits, full-destination rejection, accepted move completion, disconnect accounting, real playback identities, pause health, unlisted stream reconciliation, and terminal clear replay. It consumes actual HTTP audio and both event endpoints. Browser media, encoder pitch, bounded gaps, fallback, and recovery cancellation need the feature journeys or Go behavior checks.
+
 Use public API routes and ordinary cookie sessions for additional journeys. Form endpoints need the session's `X-CSRF-Token` or `csrf` field. JSON `/api/` requests use `Content-Type: application/json`, matching the shipped UI's CSRF rule. Never use internal setters or test-only endpoints as proof.
 
 ## Evidence

@@ -16,4 +16,4 @@ Inspect Go Live's error message after a rejected handshake. Test a claimed AutoD
 
 ## Gotchas
 
-Loopback HTTP qualifies for browser media APIs. Remote HTTP may not. A native preview host without microphone, camera, screen capture, or a suitable audio-bearing video file can prove the form and error handling only. Report publishing as unverified in that case. A silent video file must fail clearly rather than look live. Do not change production source permissions or fabricate a WebRTC success response to bypass missing devices.
+Loopback HTTP qualifies for browser media APIs. Remote HTTP may not. A native preview host without microphone, camera, or screen capture can use a real generated audio-bearing video file through the file input. Upstream supports video-only capture without audio meters. Verify its actual video output separately from audio delivery. If no suitable source is available, report publishing as unverified. Do not change production source permissions or fabricate a WebRTC success response to bypass missing devices.

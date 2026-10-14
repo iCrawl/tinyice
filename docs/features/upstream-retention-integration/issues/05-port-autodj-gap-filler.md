@@ -1,6 +1,8 @@
 # Port AutoDJ Gap Filler
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -12,13 +14,13 @@ Port AutoDJ Gap Filler onto upstream's current decoder, encoder, and stream sess
 
 ## Acceptance criteria
 
-- [ ] A listener joining an AutoDJ mount during a normal between-track transition receives a decodable stream rather than an empty or tiny undecodable response.
-- [ ] Generated silence is used only for normal AutoDJ between-track gaps.
-- [ ] Generated silence does not publish metadata.
-- [ ] Track metadata is published only after the first real track frame has become active.
-- [ ] Manual stop, pause, delete, and shutdown are not masked by endless generated silence.
-- [ ] Decoder shutdown and recovery workers unblock and exit cleanly.
-- [ ] The implementation uses upstream stream session, Ogg/header, decoder, and encoder behavior instead of restoring old fork transcode or stream internals wholesale.
+- [x] A listener joining an AutoDJ mount during a normal between-track transition receives a decodable stream rather than an empty or tiny undecodable response.
+- [x] Generated silence is used only for normal AutoDJ between-track gaps.
+- [x] Generated silence does not publish metadata.
+- [x] Track metadata is published only after the first real track frame has become active.
+- [x] Manual stop, pause, delete, and shutdown are not masked by endless generated silence.
+- [x] Decoder shutdown and recovery workers unblock and exit cleanly.
+- [x] The implementation uses upstream stream session, Ogg/header, decoder, and encoder behavior instead of restoring old fork transcode or stream internals wholesale.
 
 ## Blocked by
 

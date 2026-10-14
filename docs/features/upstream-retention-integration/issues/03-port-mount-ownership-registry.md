@@ -1,6 +1,8 @@
 # Port Mount Ownership Registry
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -14,12 +16,12 @@ The completed slice should make source ownership visible to APIs and keep tenant
 
 ## Acceptance criteria
 
-- [ ] The Mount Ownership Registry records source kind, tenant ownership, attached runtime outputs, and lifecycle timestamps.
-- [ ] Icecast, AutoDJ, relay pull, WebRTC, RTMP, SRT, and HLS output lifecycle paths attach and detach ownership metadata correctly.
-- [ ] Tenant live stream counts update when ownership moves between tenants or is removed.
-- [ ] Stream APIs can report source kind and human-readable source labels, including runtime-owned AutoDJ mounts without a remote source IP.
-- [ ] Registry reads return snapshots or otherwise avoid exposing mutable runtime state as the public read contract.
-- [ ] Upstream source claim and release behavior remains the authority for source-connection locking.
+- [x] The Mount Ownership Registry records source kind, tenant ownership, attached runtime outputs, and lifecycle timestamps.
+- [x] Icecast, AutoDJ, relay pull, WebRTC, RTMP, SRT, and HLS output lifecycle paths attach and detach ownership metadata correctly.
+- [x] Tenant live stream counts update when ownership moves between tenants or is removed.
+- [x] Stream APIs can report source kind and human-readable source labels, including runtime-owned AutoDJ mounts without a remote source IP.
+- [x] Registry reads return snapshots or otherwise avoid exposing mutable runtime state as the public read contract.
+- [x] Upstream source claim and release behavior remains the authority for source-connection locking.
 
 ## Blocked by
 

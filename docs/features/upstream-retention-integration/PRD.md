@@ -1,6 +1,8 @@
 # Upstream Retention Integration PRD
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](verification.md).
 
 ## Problem Statement
 
@@ -28,7 +30,7 @@ The integrated product should:
 - preserve configured/effective burst visibility while using upstream's larger default listener burst;
 - preserve Metadata-Only Events as an external API at `/events/metadata`;
 - keep upstream stream, transcode, HLS/video, webhook, dashboard, release, and security improvements;
-- drop the in-process self-updater.
+- preserve the absence of an in-process self-updater.
 
 ## User Stories
 
@@ -36,7 +38,7 @@ The integrated product should:
 2. As a radio operator, I want upstream stream reliability fixes, so that source reconnects and listener fanout are less likely to hang or corrupt audio.
 3. As a radio operator, I want upstream security hardening, so that the fork does not reintroduce fixed auth, CSRF, URL validation, or session risks.
 4. As a radio operator, I want upstream release and packaging improvements, so that upgrades can use package, container, or manual binary replacement paths.
-5. As a radio operator, I want the in-process self-updater removed, so that the server does not overwrite its own binary at runtime.
+5. As a radio operator, I want upgrades handled through package, container, or manual binary replacement, so that the server does not overwrite its own binary at runtime.
 6. As an AutoDJ listener, I want AutoDJ playback to remain decodable during normal between-track gaps, so that my browser player does not fail when joining during a transition.
 7. As an AutoDJ listener, I want AutoDJ Gap Filler to avoid publishing fake track metadata, so that the now-playing display only reflects real tracks.
 8. As an AutoDJ listener, I want manual stop or pause to remain intentional silence or shutdown, so that AutoDJ Gap Filler does not mask operator control.
@@ -125,8 +127,7 @@ The October 14 integration retains product behavior without retaining fork imple
 - Upstream webhook APIs, webhook admin UI, `on_play_command`, and `now_playing` are preferred.
 - Upstream auth, CSRF, trusted URL, session, config-save, and role hardening are preferred.
 - Upstream dashboard map, kiosk, listener history, and traffic totals are preferred.
-- The in-process self-updater is dropped.
-- Updater config fields, CLI flag, settings UI, docs, and tests should be removed during integration.
+- Both pinned branches already lack an in-process self-updater. Preserve that baseline and revise stale specifications. HotSwap and restart controls remain restart mechanisms with upstream superadmin restrictions.
 - Generated frontend assets should be regenerated after source integration rather than hand-merged.
 - Stale April upstream integration docs should be treated as historical context, not current implementation authority.
 
@@ -138,7 +139,7 @@ The October 14 integration retains product behavior without retaining fork imple
 - Existing stream/listener handler tests are the preferred seam for listener burst defaults, per-mount burst overrides, per-mount listener caps, and stale source disconnect behavior.
 - Existing AutoDJ tests are the preferred seam for gap filler metadata timing, decoder shutdown, recovery cancellation, and `song_command` recovery.
 - Existing HLS/video/RTMP/SRT/WebRTC tests should be preserved and extended only where fork metadata/runtime ownership touches upstream lifecycle.
-- Existing frontend source tests are the preferred seam for admin streams diagnostics, listeners management, settings updater removal, and route visibility.
+- Frontend tests execute production metadata callbacks, history requests, listener move state, and API clients. Browser journeys verify compiled operator pages and media transport.
 - Public SSE tests should verify both `/events` metadata events and `/events/metadata` replay semantics.
 - Regression tests should explicitly prove that generated silence does not publish metadata and that metadata is published only after the first real track frame is active.
 - Regression tests should prove that a runtime-owned AutoDJ mount can be shown as running without a remote source IP.
@@ -159,13 +160,15 @@ The October 14 integration retains product behavior without retaining fork imple
 
 ## Further Notes
 
-The retention audit for this PRD is `docs/plans/2026-06-12-upstream-retention-audit.md`. That audit closes the major product decisions:
+The June retention audit on the historical `custom` branch supplied the original product decisions. The current implementation contract is this PRD and [the October lifecycle design](../../plans/2026-10-14-upstream-retention-design.txt). Earlier rebase plans are historical context.
+
+The retained decisions are:
 
 - keep AutoDJ Gap Filler;
 - keep Retained Dead Streams;
 - keep the Mount Ownership Registry as a narrow ownership registry;
 - keep Metadata-Only Events for external consumers;
 - use upstream's larger default listener burst;
-- drop the in-process self-updater;
+- preserve the absence of an in-process self-updater;
 - use upstream implementations for stream internals, transcodes, HLS/video transports, webhooks, security, dashboard history, packaging, and generated assets.
 

@@ -1,6 +1,8 @@
 # Preserve Metadata-Only Events
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -12,12 +14,12 @@ Preserve Metadata-Only Events as an external public API while keeping upstream's
 
 ## Acceptance criteria
 
-- [ ] `/events/metadata` exists as the canonical metadata-only SSE endpoint for external consumers.
-- [ ] `/events/metadata` replays the last known metadata for visible mounts when a client connects.
-- [ ] Metadata-only events are filtered so unlisted or invisible mounts are not exposed publicly.
-- [ ] `/events` continues to emit upstream public stream/video fields and also emits metadata events for combined public clients.
-- [ ] Transcoded outputs preserve upstream's broader metadata mirroring while still triggering fork metadata notification semantics where required.
-- [ ] AutoDJ Gap Filler behavior is respected: generated silence emits no metadata and real track metadata arrives after the first real track frame is active.
+- [x] `/events/metadata` exists as the canonical metadata-only SSE endpoint for external consumers.
+- [x] `/events/metadata` replays the last known metadata for visible mounts when a client connects.
+- [x] Metadata-only events are filtered so unlisted or invisible mounts are not exposed publicly.
+- [x] `/events` continues to emit upstream public stream/video fields and also emits metadata events for combined public clients.
+- [x] Transcoded outputs preserve upstream's broader metadata mirroring while still triggering fork metadata notification semantics where required.
+- [x] AutoDJ Gap Filler behavior is respected: generated silence emits no metadata and real track metadata arrives after the first real track frame is active.
 
 ## Blocked by
 

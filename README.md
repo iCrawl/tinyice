@@ -177,6 +177,8 @@ with the OpenAPI spec at `/api/openapi.yaml`.
 
 TinyIce is a single static binary with the admin UI, player, and assets embedded.
 
+This fork's [upstream integration guide](docs/upstream-integration.md) documents retained AutoDJ, diagnostics, listener controls, and metadata contracts. The [verification record](docs/features/upstream-retention-integration/verification.md) includes tested behavior and remaining environment limits.
+
 - **Direct / ACME:** enable `auto_https`, list your `domains`, and run on 80/443.
   TinyIce obtains and renews Let's Encrypt certificates itself. A reverse proxy
   is optional, not required.
