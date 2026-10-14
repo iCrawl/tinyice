@@ -1,6 +1,8 @@
 # Upstream-First Integration Baseline
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -14,11 +16,11 @@ This slice should not re-port every fork feature. It should produce the stable b
 
 ## Acceptance criteria
 
-- [ ] The integrated branch builds from upstream `main` as the behavioral baseline rather than restoring old fork implementations wholesale.
-- [ ] Upstream stream source claiming, read/write deadlines, fanout behavior, Ogg/session handling, transcode internals, HLS/video transport fixes, webhooks, security checks, dashboard history, release packaging, and generated asset strategy are retained.
-- [ ] Generated frontend assets are rebuilt from source after integration rather than manually merged.
-- [ ] The integration leaves intentional extension points for AutoDJ Gap Filler, Retained Dead Streams, Mount Ownership Registry, diagnostics, listener management, Metadata-Only Events, per-mount caps, and burst visibility.
-- [ ] Focused Go and frontend checks for the touched baseline pass or have documented pre-existing failures.
+- [x] The integrated branch builds from upstream `main` as the behavioral baseline rather than restoring old fork implementations wholesale.
+- [x] Upstream stream source claiming, read/write deadlines, fanout behavior, Ogg/session handling, transcode internals, HLS/video transport fixes, webhooks, security checks, dashboard history, release packaging, and generated asset strategy are retained.
+- [x] Generated frontend assets are rebuilt from source after integration rather than manually merged.
+- [x] The integration leaves intentional extension points for AutoDJ Gap Filler, Retained Dead Streams, Mount Ownership Registry, diagnostics, listener management, Metadata-Only Events, per-mount caps, and burst visibility.
+- [x] Focused Go and frontend checks for the touched baseline pass or have documented pre-existing failures.
 
 ## Blocked by
 

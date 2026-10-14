@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -63,18 +64,52 @@ type relayEventInfo struct {
 }
 
 type streamerEventInfo struct {
-	Name        string               `json:"name"`
-	Mount       string               `json:"mount"`
-	State       int                  `json:"state"`
-	CurrentSong string               `json:"song"`
-	StartTime   int64                `json:"start_time"`
-	Duration    float64              `json:"duration"`
+	Name        string `json:"name"`
+	Mount       string `json:"mount"`
+	State       int    `json:"state"`
+	CurrentSong string `json:"song"`
+	StartTime   int64  `json:"start_time"`
+	// Position is seconds elapsed in the current track, computed
+	// server-side. The UI can't derive it from start_time without
+	// trusting the browser clock to agree with ours.
+	Position float64 `json:"position"`
+	Duration float64 `json:"duration"`
+	// CurrentID is the playlist id of the track actually playing, so a
+	// UI can highlight the right row. -1 when the track came from the
+	// queue or an external song command.
+	CurrentID   int                  `json:"current_id"`
 	PlaylistPos int                  `json:"playlist_pos"`
 	PlaylistLen int                  `json:"playlist_len"`
 	Shuffle     bool                 `json:"shuffle"`
 	Loop        bool                 `json:"loop"`
 	Queue       []relay.PlaylistItem `json:"queue"`
-	Playlist    []relay.PlaylistItem `json:"playlist"`
+	// PlaylistVersion replaces the full playlist array, which used to be
+	// serialised into every tick of the event feed — twice, since the
+	// legacy unnamed frame carries the same struct. On a 200-track
+	// AutoDJ that was ~31 KB per frame at 2 Hz, i.e. ~99% of all bytes
+	// on /admin/events (#55). Clients refetch
+	// /api/autodj/{mount}/playlist when this number changes.
+	PlaylistVersion uint32 `json:"playlist_version"`
+}
+
+// trackPosition returns how far into the current track the AutoDJ is, in
+// seconds. Zero unless a track is actually playing — a paused or stopped
+// streamer would otherwise report an ever-growing position derived from
+// the last track's start time.
+func trackPosition(stats relay.StreamerStats) float64 {
+	if stats.State != relay.StatePlaying || stats.StartTime.IsZero() {
+		return 0
+	}
+	// Discount time spent paused — otherwise a track resumed after a
+	// 30 s pause reports 30 s more progress than it has actually played.
+	elapsed := (time.Since(stats.StartTime) - stats.PausedFor).Seconds()
+	if elapsed < 0 {
+		return 0
+	}
+	if d := stats.Duration.Seconds(); d > 0 && elapsed > d {
+		return d
+	}
+	return elapsed
 }
 
 func (s *Server) collectStatsPayload(user *config.User) ([]byte, error) {
@@ -163,17 +198,20 @@ func (s *Server) collectStatsPayload(user *config.User) ([]byte, error) {
 		if s.hasAccess(user, st.OutputMount) {
 			stats := st.GetStats()
 			streamers = append(streamers, streamerEventInfo{
-				Name:        stats.Name,
-				Mount:       stats.Mount,
-				State:       int(stats.State),
-				CurrentSong: stats.CurrentSong,
-				StartTime:   stats.StartTime.Unix(),
-				Duration:    stats.Duration.Seconds(),
-				PlaylistLen: stats.PlaylistLen,
-				Shuffle:     stats.Shuffle,
-				Loop:        stats.Loop,
-				Queue:       st.GetQueueInfo(),
-				Playlist:    st.GetPlaylistInfo(),
+				Name:            stats.Name,
+				Mount:           stats.Mount,
+				State:           int(stats.State),
+				CurrentSong:     stats.CurrentSong,
+				StartTime:       stats.StartTime.Unix(),
+				Position:        trackPosition(stats),
+				Duration:        stats.Duration.Seconds(),
+				CurrentID:       stats.CurrentID,
+				PlaylistPos:     stats.CurrentPos,
+				PlaylistLen:     stats.PlaylistLen,
+				Shuffle:         stats.Shuffle,
+				Loop:            stats.Loop,
+				Queue:           st.GetQueueInfo(),
+				PlaylistVersion: stats.PlaylistVersion,
 			})
 		}
 	}
@@ -222,335 +260,6 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	bi, bo := s.Relay.GetMetrics()
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]interface{}{"bytes_in": bi, "bytes_out": bo})
-}
-
-func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	user, ok := s.checkAuth(r)
-	if !ok {
-		http.Error(w, "Unauthorized", http.StatusUnauthorized)
-		return
-	}
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	flusher, _ := w.(http.Flusher)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-
-	// Track previous byte counters to compute bandwidth as a rate. The UI
-	// formats bandwidth_in/out as "bytes per second"; sending cumulative
-	// totals made the dashboard display the session's entire ingest as MB/s.
-	var lastBytesIn, lastBytesOut int64
-	lastTime := time.Now()
-
-	send := func() error {
-		payload, err := s.collectStatsPayload(user)
-		if err != nil {
-			return err
-		}
-		// Send as unnamed event for legacy clients
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
-			return err
-		}
-
-		// Also send named events for the new Preact frontend
-		var full map[string]interface{}
-		json.Unmarshal(payload, &full)
-
-		curIn, _ := full["bytes_in"].(float64)
-		curOut, _ := full["bytes_out"].(float64)
-		now := time.Now()
-		elapsed := now.Sub(lastTime).Seconds()
-		var rateIn, rateOut int64
-		if elapsed > 0 {
-			if lastTime.IsZero() || lastBytesIn == 0 && lastBytesOut == 0 {
-				// First tick: no prior sample, report 0 instead of a huge burst.
-				rateIn, rateOut = 0, 0
-			} else {
-				rateIn = int64(float64(int64(curIn)-lastBytesIn) / elapsed)
-				rateOut = int64(float64(int64(curOut)-lastBytesOut) / elapsed)
-				if rateIn < 0 {
-					rateIn = 0
-				}
-				if rateOut < 0 {
-					rateOut = 0
-				}
-			}
-		}
-		lastBytesIn = int64(curIn)
-		lastBytesOut = int64(curOut)
-		lastTime = now
-
-		// stats event
-		statsJSON, _ := json.Marshal(map[string]interface{}{
-			"listeners":     full["total_listeners"],
-			"streams":       full["total_sources"],
-			"bandwidth_in":  rateIn,
-			"bandwidth_out": rateOut,
-			"bandwidth":     rateOut, // backwards compat
-			"bytes_in":      int64(curIn),
-			"bytes_out":     int64(curOut),
-			"uptime":        int(time.Since(s.startTime).Seconds()),
-			"goroutines":    full["goroutines"],
-			"memory":        full["heap_alloc"],
-			"gc":            full["num_gc"],
-		})
-		fmt.Fprintf(w, "event: stats\ndata: %s\n\n", statsJSON)
-
-		// stream events
-		if streams, ok := full["streams"].([]interface{}); ok {
-			for _, st := range streams {
-				stMap := st.(map[string]interface{})
-				streamJSON, _ := json.Marshal(map[string]interface{}{
-					"mount":        stMap["mount"],
-					"format":       stMap["type"],
-					"bitrate":      stMap["bitrate"],
-					"listeners":    stMap["listeners"],
-					"viewers":      stMap["viewers"],
-					"health":       stMap["health"],
-					"title":        stMap["song"],
-					"artist":       "",
-					"video_width":  stMap["video_width"],
-					"video_height": stMap["video_height"],
-					"video_fps":    stMap["video_fps"],
-					"video_gop":    stMap["video_gop"],
-					"video_kbps":   stMap["video_kbps"],
-				})
-				fmt.Fprintf(w, "event: stream\ndata: %s\n\n", streamJSON)
-			}
-		}
-
-		// autodj events
-		if streamers, ok := full["streamers"].([]interface{}); ok {
-			for _, st := range streamers {
-				stJSON, _ := json.Marshal(st)
-				fmt.Fprintf(w, "event: autodj\ndata: %s\n\n", stJSON)
-			}
-		}
-
-		// geo event — full city list per tick. Cheap (the snapshot
-		// is in-memory) and lets the dashboard map auto-refresh
-		// without a separate /admin/geo poll. We send it on every
-		// SSE tick so the operator sees connect/disconnect events
-		// immediately.
-		if geo, ok := full["geo"]; ok {
-			geoJSON, _ := json.Marshal(geo)
-			fmt.Fprintf(w, "event: geo\ndata: %s\n\n", geoJSON)
-		}
-
-		flusher.Flush()
-		return nil
-	}
-
-	if err := send(); err != nil {
-		return
-	}
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-r.Context().Done():
-			return
-		case <-ticker.C:
-			if err := send(); err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	flusher, _ := w.(http.Flusher)
-	ticker := time.NewTicker(500 * time.Millisecond)
-	defer ticker.Stop()
-	metaCh := s.Relay.SubscribeMetadata()
-	defer s.Relay.UnsubscribeMetadata(metaCh)
-
-	type PublicStreamInfo struct {
-		Mount       string  `json:"mount"`
-		Name        string  `json:"name"`
-		Listeners   int     `json:"listeners"`
-		Viewers     int     `json:"viewers,omitempty"`
-		Bitrate     string  `json:"bitrate"`
-		Uptime      string  `json:"uptime"`
-		Genre       string  `json:"genre"`
-		Description string  `json:"description"`
-		CurrentSong string  `json:"song"`
-		HasVideo    bool    `json:"has_video,omitempty"`
-		VideoWidth  int     `json:"video_width,omitempty"`
-		VideoHeight int     `json:"video_height,omitempty"`
-		VideoFPS    float64 `json:"video_fps,omitempty"`
-		VideoGOP    float64 `json:"video_gop,omitempty"`
-		VideoKbps   int     `json:"video_kbps,omitempty"`
-	}
-	send := func() error {
-		allStreams := s.Relay.Snapshot()
-		videoMounts := make(map[string]bool)
-		for _, st := range allStreams {
-			if strings.HasSuffix(st.MountName, "/video") {
-				videoMounts[strings.TrimSuffix(st.MountName, "/video")] = true
-			}
-		}
-		var info []PublicStreamInfo
-		// We split visible-only from emitted-to-events: the unnamed
-		// `data:` payload (legacy landing card consumers) only sees
-		// visible mounts, while the per-stream named "stream" events
-		// (player consumers) see everything so a player tab can show
-		// stats for an unlisted mount.
-		var visible []PublicStreamInfo
-		for _, st := range allStreams {
-			if strings.HasSuffix(st.MountName, "/video") {
-				continue // sub-mount, surfaced via the parent
-			}
-			entry := PublicStreamInfo{
-				Mount: st.MountName, Name: st.Name, Listeners: st.ListenersCount,
-				Bitrate: st.Bitrate, Uptime: st.Uptime, Genre: st.Genre,
-				Description: st.Description, CurrentSong: st.CurrentSong,
-				HasVideo: videoMounts[st.MountName],
-			}
-			if liveStream, ok := s.Relay.GetStream(st.MountName); ok {
-				entry.Viewers = liveStream.ViewerCount()
-				if entry.HasVideo {
-					if vs, ok := s.Relay.GetStream(st.MountName + "/video"); ok {
-						vm := vs.VideoMetricsSnapshot()
-						if vm.Width > 0 {
-							entry.VideoWidth = vm.Width
-							entry.VideoHeight = vm.Height
-							entry.VideoFPS = vm.FPS
-							entry.VideoGOP = vm.GOPSeconds
-							entry.VideoKbps = vm.BitrateKbps
-						}
-						if c := vs.ViewerCount(); c > entry.Viewers {
-							entry.Viewers = c
-						}
-					}
-				}
-			}
-			info = append(info, entry)
-			if st.Visible {
-				visible = append(visible, entry)
-			}
-		}
-		payload, _ := json.Marshal(visible)
-		if _, err := fmt.Fprintf(w, "data: %s\n\n", payload); err != nil {
-			return err
-		}
-		// Per-stream named events so the player's `sse.on('stream', …)`
-		// handler actually fires; the unnamed `data:` frame above is
-		// kept for legacy listeners.
-		for _, entry := range info {
-			single, _ := json.Marshal(map[string]interface{}{
-				"mount":        entry.Mount,
-				"title":        entry.CurrentSong,
-				"artist":       entry.Name,
-				"format":       "",
-				"bitrate":      entry.Bitrate,
-				"listeners":    entry.Listeners,
-				"viewers":      entry.Viewers,
-				"video_width":  entry.VideoWidth,
-				"video_height": entry.VideoHeight,
-				"video_fps":    entry.VideoFPS,
-				"video_gop":    entry.VideoGOP,
-				"video_kbps":   entry.VideoKbps,
-			})
-			if _, err := fmt.Fprintf(w, "event: stream\ndata: %s\n\n", single); err != nil {
-				return err
-			}
-		}
-		flusher.Flush()
-		return nil
-	}
-	sendMetadata := func(mc relay.MetadataChange) error {
-		if !s.Relay.GetStreamVisibility(mc.Mount) {
-			return nil
-		}
-		metadataJSON, _ := json.Marshal(map[string]string{
-			"mount":      mc.Mount,
-			"title":      mc.Title,
-			"artist":     mc.Artist,
-			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
-		})
-		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
-	if err := send(); err != nil {
-		return
-	}
-	for _, mc := range s.Relay.LastMetadata() {
-		if err := sendMetadata(mc); err != nil {
-			return
-		}
-	}
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-r.Context().Done():
-			return
-		case mc := <-metaCh:
-			if err := sendMetadata(mc); err != nil {
-				return
-			}
-		case <-ticker.C:
-			if err := send(); err != nil {
-				return
-			}
-		}
-	}
-}
-
-func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.Header().Set("Access-Control-Allow-Origin", "*")
-	flusher, _ := w.(http.Flusher)
-
-	metaCh := s.Relay.SubscribeMetadata()
-	defer s.Relay.UnsubscribeMetadata(metaCh)
-
-	sendMetadata := func(mc relay.MetadataChange) error {
-		if !s.Relay.GetStreamVisibility(mc.Mount) {
-			return nil
-		}
-		metadataJSON, _ := json.Marshal(map[string]string{
-			"mount":      mc.Mount,
-			"title":      mc.Title,
-			"artist":     mc.Artist,
-			"started_at": mc.StartedAt.UTC().Format(time.RFC3339),
-		})
-		if _, err := fmt.Fprintf(w, "event: metadata\ndata: %s\n\n", metadataJSON); err != nil {
-			return err
-		}
-		flusher.Flush()
-		return nil
-	}
-
-	for _, mc := range s.Relay.LastMetadata() {
-		if err := sendMetadata(mc); err != nil {
-			return
-		}
-	}
-
-	for {
-		select {
-		case <-s.done:
-			return
-		case <-r.Context().Done():
-			return
-		case mc := <-metaCh:
-			if err := sendMetadata(mc); err != nil {
-				return
-			}
-		}
-	}
 }
 
 func (s *Server) handleLegacyStats(w http.ResponseWriter, r *http.Request) {
@@ -778,16 +487,39 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := s.WebRTCM.HandleOffer(mount, offer)
+	answer, err := s.WebRTCM.HandleOffer(mount, offer, relay.ListenerSnapshot{RemoteAddr: r.RemoteAddr, UserAgent: r.UserAgent()})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		status := http.StatusBadRequest
+		if errors.Is(err, relay.ErrListenerCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(status)
+		json.NewEncoder(w).Encode(map[string]string{"error": webrtcErrorHint(err)})
 		return
 	}
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(answer)
+}
+
+// webrtcErrorHint turns pion's interface-enumeration failure into
+// something an operator can act on. Go's net.Interfaces() opens a
+// NETLINK_ROUTE socket, so a hardened systemd unit whose
+// RestrictAddressFamilies omits AF_NETLINK breaks every peer connection
+// at creation — and the resulting message ("route ip+net: netlinkrib:
+// address family not supported by protocol") names neither systemd nor
+// the directive responsible. tinyice shipped exactly that unit in
+// packaging/ and contrib/, so operators who installed the deb or rpm hit
+// it with nothing to search for.
+func webrtcErrorHint(err error) string {
+	msg := err.Error()
+	if strings.Contains(msg, "netlinkrib") || strings.Contains(msg, "address family not supported") {
+		return msg + " — the server cannot enumerate its network interfaces, " +
+			"which WebRTC needs for ICE. If tinyice runs under systemd, add " +
+			"AF_NETLINK to RestrictAddressFamilies in the unit and restart."
+	}
+	return msg
 }
 
 func (s *Server) handleWebRTCSourceOffer(w http.ResponseWriter, r *http.Request) {
@@ -809,27 +541,58 @@ func (s *Server) handleWebRTCSourceOffer(w http.ResponseWriter, r *http.Request)
 	// any mount's broadcast — pion happily ingests whatever audio they
 	// send, and tinyice broadcasts it to the radio's listeners.
 	//
-	// Accept the credentials via either Basic auth (matches handleSource)
-	// or a `password` query parameter for browser callers that can't
-	// always send Basic on a fetch().
-	host, _, _ := net.SplitHostPort(r.RemoteAddr)
+	// Two credentials are accepted:
+	//
+	//  1. The per-mount source password, via Basic auth (matches
+	//     handleSource) or a `password` query parameter — this is what
+	//     scripted publishers use.
+	//
+	//  2. A logged-in admin session or API token that has access to the
+	//     mount. The "Go Live" page is already behind admin auth, and
+	//     asking the operator to re-type (or put in the URL) a password
+	//     the server already knows is why browser broadcasting never
+	//     worked. Session auth additionally requires the CSRF token, so
+	//     a third-party page can't start a broadcast with the operator's
+	//     cookie.
+	host := s.clientIP(r)
 	if err := s.checkAuthLimit(host); err != nil {
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
-	requiredPass, found := s.getSourcePassword(mount)
-	if !found {
-		requiredPass = s.Config.DefaultSourcePassword
-	}
+
 	supplied := ""
 	if _, p, ok := r.BasicAuth(); ok {
 		supplied = p
 	} else if q := r.URL.Query().Get("password"); q != "" {
 		supplied = q
 	}
-	if requiredPass == "" || !config.CheckPasswordHash(supplied, requiredPass) {
+
+	authorized := false
+	if supplied != "" {
+		requiredPass, found := s.getSourcePassword(mount)
+		if !found {
+			requiredPass = s.Config.DefaultSourcePassword
+		}
+		authorized = requiredPass != "" && config.CheckPasswordHash(supplied, requiredPass)
+	} else if user, ok := s.checkAuth(r); ok {
+		// Only reached when no source password was offered, so the
+		// Basic-auth branch of checkAuth can't burn a rate-limit slot
+		// on a publisher that authenticated the other way.
+		if !s.isCSRFSafe(r) {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		if !s.hasAccess(user, mount) {
+			s.logAuthFailed(user.Username, host, "no access to mount "+mount)
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		authorized = true
+	}
+
+	if !authorized {
 		s.recordAuthFailure(host)
-		s.logAuthFailed("webrtc-source", r.RemoteAddr, "invalid source password")
+		s.logAuthFailed("webrtc-source", host, "invalid source password")
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
@@ -850,7 +613,7 @@ func (s *Server) handleWebRTCSourceOffer(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]string{"error": err.Error()})
+		json.NewEncoder(w).Encode(map[string]string{"error": webrtcErrorHint(err)})
 		return
 	}
 
@@ -922,8 +685,20 @@ func (s *Server) handleGoLiveChunk(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream := s.Relay.GetOrCreateStream(mount)
-	stream.SetSourceIP("webaudio-http")
-	stream.Broadcast(body, s.Relay)
+	token, claimed := stream.ClaimSource("webaudio-http")
+	if !claimed {
+		http.Error(w, "Mount already has an active source", http.StatusConflict)
+		return
+	}
+	defer stream.ReleaseSourceIfCurrent(token)
+	if s.RuntimeRegistry != nil {
+		s.RuntimeRegistry.AttachClaim(stream, token, relay.SourceWebRTC, "default")
+		defer s.RuntimeRegistry.DetachClaim(stream, token)
+	}
+	if !s.Relay.PublishSource(stream, token, body) {
+		http.Error(w, "Source ownership revoked", http.StatusConflict)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 }

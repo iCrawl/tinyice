@@ -38,6 +38,7 @@ func TestStreamerFileAttachesAutoDJRuntime(t *testing.T) {
 	}
 
 	streamer := &Streamer{
+		State:           StatePlaying,
 		Name:            "AutoDJ",
 		OutputMount:     "/auto",
 		MusicDir:        dir,
@@ -49,6 +50,7 @@ func TestStreamerFileAttachesAutoDJRuntime(t *testing.T) {
 		runtimeRegistry: rr,
 	}
 
+	defer streamer.Shutdown()
 	if err := sm.streamFile(context.Background(), streamer, path, 0, 1); err != nil {
 		t.Fatalf("streamFile: %v", err)
 	}
@@ -59,8 +61,5 @@ func TestStreamerFileAttachesAutoDJRuntime(t *testing.T) {
 	}
 	if rt.Source != SourceAutoDJ {
 		t.Fatalf("expected AutoDJ source, got %q", rt.Source)
-	}
-	if rt.Stream != r.GetOrCreateStream("/auto") {
-		t.Fatal("expected runtime to reference the AutoDJ output stream")
 	}
 }

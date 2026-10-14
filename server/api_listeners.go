@@ -107,6 +107,10 @@ func (s *Server) apiMoveListener(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	}
+	if s.Config.DisabledMounts[body.TargetMount] {
+		jsonError(w, "Target mount disabled", http.StatusConflict)
+		return
+	}
 	if _, ok := s.Relay.GetStream(body.TargetMount); !ok {
 		jsonError(w, "Target mount not found", http.StatusNotFound)
 		return
@@ -115,9 +119,12 @@ func (s *Server) apiMoveListener(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, map[string]string{"status": "ok"})
 		return
 	}
-	if err := s.Relay.Listeners.RequestMove(body.ID, body.TargetMount); err != nil {
+	moveID, err := s.Relay.Listeners.RequestMoveWithLimit(body.ID, body.TargetMount, s.effectiveMountListenerLimit(body.TargetMount))
+	if err != nil {
 		jsonError(w, "Listener move failed", http.StatusConflict)
 		return
 	}
-	jsonResponse(w, map[string]string{"status": "ok"})
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusAccepted)
+	_ = json.NewEncoder(w).Encode(map[string]string{"status": "pending", "id": moveID, "listener_id": body.ID, "destination": body.TargetMount})
 }

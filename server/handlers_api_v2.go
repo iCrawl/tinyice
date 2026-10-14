@@ -3,7 +3,7 @@ package server
 import (
 	"encoding/json"
 	"fmt"
-	"net"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -44,11 +44,10 @@ func (s *Server) Audit(r *http.Request, action, resourceType, resourceID, detail
 	if user, ok := s.checkAuth(r); ok {
 		username = user.Username
 	}
-	ip := r.RemoteAddr
-	if host, _, err := net.SplitHostPort(ip); err == nil {
-		ip = host
-	}
-	s.Relay.History.RecordAudit(username, action, resourceType, resourceID, detail, ip)
+	// clientIP, not RemoteAddr: behind a reverse proxy every audit row
+	// would otherwise read as the proxy's address, which is what
+	// trusted_proxies exists to prevent.
+	s.Relay.History.RecordAudit(username, action, resourceType, resourceID, detail, s.clientIP(r))
 }
 
 func (s *Server) apiGetAuditLog(w http.ResponseWriter, r *http.Request) {
@@ -91,7 +90,72 @@ func (s *Server) apiGetAuditLog(w http.ResponseWriter, r *http.Request) {
 // Streams
 // ---------------------------------------------------------------------------
 
+type mountDiagnosticInfo struct {
+	ProducerState            string                  `json:"producer_state,omitempty"`
+	AvailabilityState        string                  `json:"availability_state"`
+	Recovery                 relay.RecoveryState     `json:"recovery"`
+	ProducerLastProgress     time.Time               `json:"producer_last_progress,omitzero"`
+	AvailabilityLastProgress time.Time               `json:"availability_last_progress,omitzero"`
+	Status                   string                  `json:"status,omitempty"`
+	StatusClass              string                  `json:"status_class,omitempty"`
+	StatusReason             string                  `json:"status_reason,omitempty"`
+	LastError                string                  `json:"last_error,omitempty"`
+	StatusUpdatedAt          int64                   `json:"status_updated_at,omitempty"`
+	History                  []relay.DiagnosticEntry `json:"history,omitempty"`
+}
+
+func (s *Server) mountDiagnostics(mount string) mountDiagnosticInfo {
+	info := mountDiagnosticInfo{AvailabilityState: "silent"}
+	r := s.Relay
+	if out, ok := r.GetStream(mount); ok {
+		info.ProducerLastProgress = out.ProducerLastProgress()
+		info.AvailabilityLastProgress = out.GetLastDataReceived()
+		info.ProducerState = out.ProducerIntent()
+		if !info.AvailabilityLastProgress.IsZero() && time.Since(info.AvailabilityLastProgress) <= 5*time.Second {
+			info.AvailabilityState = "available"
+		}
+	}
+	if s.StreamerM != nil {
+		if streamer := s.StreamerM.GetStreamer(mount); streamer != nil {
+			info.Recovery = streamer.RecoverySnapshot()
+			if info.Recovery.Phase == "recovering" || info.Recovery.Phase == "backoff" {
+				info.ProducerState = "recovering"
+			}
+		}
+	}
+	diag, ok := r.Diagnostics.Current(mount)
+	if !ok {
+		if r.History != nil {
+			history := r.History.GetDiagnostics(mount, 10)
+			if len(history) > 0 {
+				info.History = history
+				if current, exists := r.GetStream(mount); exists && current.GetSourceIP() != "" {
+					return info
+				}
+				latest := history[0]
+				info.Status = string(latest.Status)
+				info.StatusClass = string(latest.Class)
+				info.StatusReason = latest.Reason
+				info.LastError = latest.Error
+				info.StatusUpdatedAt = latest.Timestamp.Unix()
+			}
+		}
+		return info
+	}
+	info.Status = string(diag.Status)
+	info.StatusClass = string(diag.Class)
+	info.StatusReason = diag.Reason
+	info.LastError = diag.Error
+	info.StatusUpdatedAt = diag.UpdatedAt.Unix()
+	info.History = diag.History
+	return info
+}
+
 func mountBurstSize(cfg *config.Config, mount string) int {
+	if cfg != nil {
+		cfg.RLockMaps()
+		defer cfg.RUnlockMaps()
+	}
 	if cfg == nil || cfg.AdvancedMounts == nil {
 		return 0
 	}
@@ -102,6 +166,10 @@ func mountBurstSize(cfg *config.Config, mount string) int {
 }
 
 func mountMaxListeners(cfg *config.Config, mount string) int {
+	if cfg != nil {
+		cfg.RLockMaps()
+		defer cfg.RUnlockMaps()
+	}
 	if cfg == nil || cfg.AdvancedMounts == nil {
 		return 0
 	}
@@ -130,60 +198,33 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type streamInfo struct {
-		Mount           string                  `json:"mount"`
-		ContentType     string                  `json:"content_type"`
-		Bitrate         string                  `json:"bitrate"`
-		BurstSize       int                     `json:"burst_size"`
-		EffectiveBurst  int                     `json:"effective_burst_size"`
-		Listeners       int                     `json:"listeners"`
-		MaxListeners    int                     `json:"max_listeners"`
-		SourceIP        string                  `json:"source_ip"`
-		SourceKind      string                  `json:"source_kind,omitempty"`
-		SourceLabel     string                  `json:"source_label,omitempty"`
-		Visible         bool                    `json:"visible"`
-		Enabled         bool                    `json:"enabled"`
-		Health          float64                 `json:"health"`
-		Uptime          string                  `json:"uptime"`
-		CurrentSong     string                  `json:"current_song"`
-		Name            string                  `json:"name"`
-		Status          string                  `json:"status,omitempty"`
-		StatusClass     string                  `json:"status_class,omitempty"`
-		StatusReason    string                  `json:"status_reason,omitempty"`
-		LastError       string                  `json:"last_error,omitempty"`
-		StatusUpdatedAt int64                   `json:"status_updated_at,omitempty"`
-		History         []relay.DiagnosticEntry `json:"history,omitempty"`
-		HasVideo        bool                    `json:"has_video"`
-		VideoWidth      int                     `json:"video_width,omitempty"`
-		VideoHeight     int                     `json:"video_height,omitempty"`
-		VideoFPS        float64                 `json:"video_fps,omitempty"`
-		VideoGOP        float64                 `json:"video_gop,omitempty"`
-		VideoKbps       int                     `json:"video_kbps,omitempty"`
-	}
-	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
-		diag, ok := r.Diagnostics.Current(mount)
-		if !ok {
-			if r.History != nil {
-				history := r.History.GetDiagnostics(mount, 10)
-				if len(history) > 0 {
-					latest := history[0]
-					info.Status = string(latest.Status)
-					info.StatusClass = string(latest.Class)
-					info.StatusReason = latest.Reason
-					info.LastError = latest.Error
-					info.StatusUpdatedAt = latest.Timestamp.Unix()
-					info.History = history
-				}
-			}
-			return
-		}
-		info.Status = string(diag.Status)
-		info.StatusClass = string(diag.Class)
-		info.StatusReason = diag.Reason
-		info.LastError = diag.Error
-		info.StatusUpdatedAt = diag.UpdatedAt.Unix()
-		info.History = diag.History
+		mountDiagnosticInfo
+		EffectiveMaxListeners int     `json:"effective_max_listeners"`
+		Mount                 string  `json:"mount"`
+		ContentType           string  `json:"content_type"`
+		Bitrate               string  `json:"bitrate"`
+		BurstSize             int     `json:"burst_size"`
+		EffectiveBurst        int     `json:"effective_burst_size"`
+		Listeners             int     `json:"listeners"`
+		MaxListeners          int     `json:"max_listeners"`
+		SourceIP              string  `json:"source_ip"`
+		SourceKind            string  `json:"source_kind,omitempty"`
+		SourceLabel           string  `json:"source_label,omitempty"`
+		Visible               bool    `json:"visible"`
+		Enabled               bool    `json:"enabled"`
+		Health                float64 `json:"health"`
+		Uptime                string  `json:"uptime"`
+		CurrentSong           string  `json:"current_song"`
+		Name                  string  `json:"name"`
+		HasVideo              bool    `json:"has_video"`
+		VideoWidth            int     `json:"video_width,omitempty"`
+		VideoHeight           int     `json:"video_height,omitempty"`
+		VideoFPS              float64 `json:"video_fps,omitempty"`
+		VideoGOP              float64 `json:"video_gop,omitempty"`
+		VideoKbps             int     `json:"video_kbps,omitempty"`
 	}
 	applyStreamSource := func(info *streamInfo, mount string) {
+		info.EffectiveMaxListeners = s.effectiveMountListenerLimit(mount)
 		sourceKind := ""
 		sourceLabel := ""
 		if s.RuntimeRegistry != nil {
@@ -192,6 +233,8 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				switch rt.Source {
 				case relay.SourceAutoDJ:
 					sourceLabel = "AutoDJ"
+				case relay.SourceTranscode:
+					sourceLabel = "Transcode"
 				case relay.SourceRelay:
 					sourceLabel = "Relay"
 				case relay.SourceWebRTC:
@@ -243,7 +286,7 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Name:           st.Name,
 				HasVideo:       videoMounts[st.MountName],
 			}
-			applyStreamDiagnostic(&info, s.Relay, st.MountName)
+			info.mountDiagnosticInfo = s.mountDiagnostics(st.MountName)
 			applyStreamSource(&info, st.MountName)
 			// Pull video metrics from the /video sibling (that's where
 			// ingest records them) so the parent row in the UI carries
@@ -279,7 +322,7 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Visible:        visible,
 				Enabled:        !disabled,
 			})
-			applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+			result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(mount)
 			applyStreamSource(&result[len(result)-1], mount)
 		}
 	}
@@ -297,9 +340,26 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 					Visible:        visible,
 					Enabled:        !disabled,
 				})
-				applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+				result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(mount)
 				applyStreamSource(&result[len(result)-1], mount)
 			}
+		}
+	}
+
+	for _, adj := range s.Config.AutoDJs {
+		if !seen[adj.Mount] && s.hasAccess(user, adj.Mount) {
+			seen[adj.Mount] = true
+			result = append(result, streamInfo{
+				Mount:          adj.Mount,
+				Name:           adj.Name,
+				BurstSize:      mountBurstSize(s.Config, adj.Mount),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, adj.Mount),
+				MaxListeners:   mountMaxListeners(s.Config, adj.Mount),
+				Visible:        adj.Visible,
+				Enabled:        adj.Enabled && !s.Config.DisabledMounts[adj.Mount],
+			})
+			result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(adj.Mount)
+			applyStreamSource(&result[len(result)-1], adj.Mount)
 		}
 	}
 
@@ -349,8 +409,15 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
+		Enabled  *bool  `json:"enabled"`
+		Visible  *bool  `json:"visible"`
 		Mount    string `json:"mount"`
 		Password string `json:"password"`
+		// The create form has always had a burst-size field; the handler
+		// never read it, so the value was collected and thrown away and
+		// every mount ran on the 512 KiB default.
+		BurstSize    int `json:"burst_size"`
+		MaxListeners int `json:"max_listeners"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -360,28 +427,22 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Mount and password are required", http.StatusBadRequest)
 		return
 	}
+	if body.MaxListeners < 0 {
+		jsonError(w, "max_listeners must not be negative", http.StatusBadRequest)
+		return
+	}
+	if body.BurstSize < 0 || body.BurstSize > maxBurstSize {
+		jsonError(w, fmt.Sprintf("burst_size must be between 0 and %d", maxBurstSize), http.StatusBadRequest)
+		return
+	}
 	if body.Mount[0] != '/' {
 		body.Mount = "/" + body.Mount
 	}
 
 	// Check access or existence
-	if !s.hasAccess(user, body.Mount) {
-		exists := false
-		if _, ok := s.Config.Mounts[body.Mount]; ok {
-			exists = true
-		}
-		if !exists {
-			for _, u := range s.Config.Users {
-				if _, ok := u.Mounts[body.Mount]; ok {
-					exists = true
-					break
-				}
-			}
-		}
-		if exists {
-			jsonError(w, "Mount taken", http.StatusConflict)
-			return
-		}
+	if !s.hasAccess(user, body.Mount) && s.mountTaken(body.Mount) {
+		jsonError(w, "Mount taken", http.StatusConflict)
+		return
 	}
 
 	hashed, err := config.HashPassword(body.Password)
@@ -390,9 +451,51 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if user.Role == config.RoleSuperAdmin {
+		s.Config.LockMaps()
 		s.Config.Mounts[body.Mount] = hashed
+		s.Config.UnlockMaps()
 	} else {
+		s.Config.LockMaps()
 		user.Mounts[body.Mount] = hashed
+		s.Config.UnlockMaps()
+	}
+	if body.BurstSize > 0 || body.MaxListeners > 0 {
+		s.Config.LockMaps()
+		if s.Config.AdvancedMounts == nil {
+			s.Config.AdvancedMounts = make(map[string]*config.MountSettings)
+		}
+		adv, ok := s.Config.AdvancedMounts[body.Mount]
+		if !ok || adv == nil {
+			adv = &config.MountSettings{}
+			s.Config.AdvancedMounts[body.Mount] = adv
+		}
+		adv.BurstSize = body.BurstSize
+		adv.MaxListeners = body.MaxListeners
+		s.Config.UnlockMaps()
+	}
+	if body.Enabled != nil || body.Visible != nil {
+		s.Config.LockMaps()
+		if body.Enabled != nil {
+			if s.Config.DisabledMounts == nil {
+				s.Config.DisabledMounts = make(map[string]bool)
+			}
+			if *body.Enabled {
+				delete(s.Config.DisabledMounts, body.Mount)
+			} else {
+				s.Config.DisabledMounts[body.Mount] = true
+			}
+		}
+		if body.Visible != nil {
+			if s.Config.VisibleMounts == nil {
+				s.Config.VisibleMounts = make(map[string]bool)
+			}
+			if *body.Visible {
+				s.Config.VisibleMounts[body.Mount] = true
+			} else {
+				delete(s.Config.VisibleMounts, body.Mount)
+			}
+		}
+		s.Config.UnlockMaps()
 	}
 	s.Config.SaveConfig()
 	jsonResponse(w, map[string]string{"status": "created", "mount": body.Mount})
@@ -415,13 +518,23 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Mount    string  `json:"mount"`
-		Password *string `json:"password,omitempty"`
-		Enabled  *bool   `json:"enabled,omitempty"`
-		Visible  *bool   `json:"visible,omitempty"`
+		Mount        string  `json:"mount"`
+		Password     *string `json:"password,omitempty"`
+		Enabled      *bool   `json:"enabled,omitempty"`
+		Visible      *bool   `json:"visible,omitempty"`
+		BurstSize    *int    `json:"burst_size,omitempty"`
+		MaxListeners *int    `json:"max_listeners,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
+		return
+	}
+	if body.BurstSize != nil && (*body.BurstSize < 0 || *body.BurstSize > maxBurstSize) {
+		jsonError(w, "invalid burst_size", http.StatusBadRequest)
+		return
+	}
+	if body.MaxListeners != nil && *body.MaxListeners < 0 {
+		jsonError(w, "invalid max_listeners", http.StatusBadRequest)
 		return
 	}
 	if body.Mount == "" {
@@ -445,54 +558,111 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if !inGlobal && owningUser == nil {
+	var autoDJ *config.AutoDJConfig
+	for _, adj := range s.Config.AutoDJs {
+		if adj.Mount == body.Mount {
+			autoDJ = adj
+			break
+		}
+	}
+	if !inGlobal && owningUser == nil && autoDJ == nil {
 		jsonError(w, "Mount not found", http.StatusNotFound)
 		return
 	}
 
 	if body.Password != nil && *body.Password != "" {
+		if !inGlobal && owningUser == nil {
+			jsonError(w, "Mount has no source password", http.StatusBadRequest)
+			return
+		}
 		hashed, err := config.HashPassword(*body.Password)
 		if err != nil {
 			jsonError(w, "Failed to hash password", http.StatusInternalServerError)
 			return
 		}
 		if inGlobal {
+			s.Config.LockMaps()
 			s.Config.Mounts[body.Mount] = hashed
+			s.Config.UnlockMaps()
 		} else {
+			s.Config.LockMaps()
 			owningUser.Mounts[body.Mount] = hashed
+			s.Config.UnlockMaps()
 		}
 	}
 
 	if body.Enabled != nil {
+		s.Config.LockMaps()
 		if s.Config.DisabledMounts == nil {
 			s.Config.DisabledMounts = make(map[string]bool)
 		}
+		if autoDJ != nil {
+			autoDJ.Enabled = *body.Enabled
+		}
 		if *body.Enabled {
 			delete(s.Config.DisabledMounts, body.Mount)
+			s.Config.UnlockMaps()
+			if autoDJ != nil && s.StreamerM != nil {
+				s.StreamerM.ResumeStreamer(body.Mount)
+			}
 		} else {
 			s.Config.DisabledMounts[body.Mount] = true
-			// Kick the live source if it's currently connected so the new
-			// disabled state takes effect immediately.
-			if st, ok := s.Relay.GetStream(body.Mount); ok {
-				st.DisconnectListeners()
+			s.Config.UnlockMaps()
+			if autoDJ != nil && s.StreamerM != nil {
+				s.StreamerM.StopStreamer(body.Mount)
 			}
+			// Kick the live source if it's currently connected so the new
+			// disabled state takes effect immediately. DisconnectListeners
+			// alone left the encoder streaming — it just recreated the
+			// mount and carried on, so "disabled" disabled nothing.
+			s.Relay.RemoveStream(body.Mount)
 		}
 	}
 
 	if body.Visible != nil {
+		if autoDJ != nil {
+			autoDJ.Visible = *body.Visible
+			if s.StreamerM != nil {
+				if streamer := s.StreamerM.GetStreamer(body.Mount); streamer != nil {
+					streamer.SetVisible(*body.Visible)
+				}
+			}
+		}
 		if s.Config.VisibleMounts == nil {
 			s.Config.VisibleMounts = make(map[string]bool)
 		}
 		if *body.Visible {
+			s.Config.LockMaps()
 			s.Config.VisibleMounts[body.Mount] = true
+			s.Config.UnlockMaps()
 		} else {
+			s.Config.LockMaps()
 			delete(s.Config.VisibleMounts, body.Mount)
+			s.Config.UnlockMaps()
 		}
 		if st, ok := s.Relay.GetStream(body.Mount); ok {
 			st.SetVisible(*body.Visible)
 		}
 	}
 
+	if body.BurstSize != nil || body.MaxListeners != nil {
+		s.Config.LockMaps()
+		if s.Config.AdvancedMounts == nil {
+			s.Config.AdvancedMounts = make(map[string]*config.MountSettings)
+		}
+		ms := s.Config.AdvancedMounts[body.Mount]
+		if ms == nil {
+			ms = &config.MountSettings{}
+			s.Config.AdvancedMounts[body.Mount] = ms
+		}
+		if body.BurstSize != nil {
+			ms.BurstSize = *body.BurstSize
+		}
+		if body.MaxListeners != nil {
+			ms.MaxListeners = *body.MaxListeners
+		}
+		s.Config.UnlockMaps()
+	}
 	s.Config.SaveConfig()
 	jsonResponse(w, map[string]string{"status": "updated", "mount": body.Mount})
 	s.Audit(r, "mount_updated", "stream", body.Mount, "")
@@ -517,10 +687,18 @@ func (s *Server) apiDeleteStream(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
+	s.Config.LockMaps()
 	delete(s.Config.Mounts, mount)
+	s.Config.UnlockMaps()
+	s.Config.LockMaps()
 	delete(s.Config.DisabledMounts, mount)
+	s.Config.UnlockMaps()
+	s.Config.LockMaps()
 	delete(s.Config.VisibleMounts, mount)
+	s.Config.UnlockMaps()
+	s.Config.LockMaps()
 	delete(user.Mounts, mount)
+	s.Config.UnlockMaps()
 	s.Relay.RemoveStream(mount)
 	s.Config.SaveConfig()
 	jsonResponse(w, map[string]string{"status": "deleted"})
@@ -578,12 +756,15 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type autoDJInfo struct {
+		mountDiagnosticInfo
 		Name                 string               `json:"name"`
 		Mount                string               `json:"mount"`
 		State                int                  `json:"state"`
 		CurrentSong          string               `json:"current_song"`
 		StartTime            int64                `json:"start_time"`
+		Position             float64              `json:"position"`
 		Duration             float64              `json:"duration"`
+		CurrentID            int                  `json:"current_id"`
 		PlaylistPos          int                  `json:"playlist_pos"`
 		PlaylistLen          int                  `json:"playlist_len"`
 		Shuffle              bool                 `json:"shuffle"`
@@ -617,7 +798,7 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 		if !s.hasAccess(user, adj.Mount) {
 			continue
 		}
-		info := autoDJInfo{
+		info := autoDJInfo{mountDiagnosticInfo: s.mountDiagnostics(adj.Mount),
 			Name:                 adj.Name,
 			Mount:                adj.Mount,
 			Format:               adj.Format,
@@ -640,8 +821,10 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 			info.State = int(stats.State)
 			info.CurrentSong = stats.CurrentSong
 			info.StartTime = stats.StartTime.Unix()
+			info.Position = trackPosition(stats)
 			info.Duration = stats.Duration.Seconds()
-			info.PlaylistPos = stats.PlaylistPos
+			info.CurrentID = stats.CurrentID
+			info.PlaylistPos = stats.CurrentPos
 			info.PlaylistLen = stats.PlaylistLen
 			info.Shuffle = stats.Shuffle
 			info.Loop = stats.Loop
@@ -714,6 +897,13 @@ func (s *Server) apiCreateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Format == "" {
 		body.Format = "mp3"
+	}
+	// Reject rather than silently store: the encoder only implements mp3
+	// and opus, and an accepted-but-ignored format is how "ogg" ended up
+	// on screen for AutoDJs that were streaming MP3.
+	if config.NormalizeAutoDJFormat(body.Format) != strings.ToLower(body.Format) {
+		jsonError(w, "format must be \"mp3\" or \"opus\"", http.StatusBadRequest)
+		return
 	}
 	if body.Bitrate == 0 {
 		body.Bitrate = 128
@@ -799,21 +989,25 @@ func (s *Server) apiUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Name                 string `json:"name"`
-		Mount                string `json:"mount"`
-		MusicDir             string `json:"music_dir"`
-		Format               string `json:"format"`
-		Bitrate              int    `json:"bitrate"`
-		Loop                 bool   `json:"loop"`
-		InjectMetadata       bool   `json:"inject_metadata"`
-		MPDEnabled           bool   `json:"mpd_enabled"`
-		MPDPort              string `json:"mpd_port"`
-		MPDPassword          string `json:"mpd_password"`
-		Visible              bool   `json:"visible"`
-		SongCommand          string `json:"song_command"`
-		SongCommandTimeout   int    `json:"song_command_timeout"`
-		OnPlayCommand        string `json:"on_play_command"`
-		OnPlayCommandTimeout int    `json:"on_play_command_timeout"`
+		Name     string `json:"name"`
+		Mount    string `json:"mount"`
+		MusicDir string `json:"music_dir"`
+		Format   string `json:"format"`
+		Bitrate  int    `json:"bitrate"`
+		// Pointers where a missing field must mean "leave it alone".
+		// The admin edit form doesn't submit these, and decoding an
+		// absent bool as false silently switched off the AutoDJ's MPD
+		// server and cleared its visibility on every edit.
+		Loop                 *bool   `json:"loop"`
+		InjectMetadata       *bool   `json:"inject_metadata"`
+		MPDEnabled           *bool   `json:"mpd_enabled"`
+		MPDPort              *string `json:"mpd_port"`
+		MPDPassword          string  `json:"mpd_password"`
+		Visible              *bool   `json:"visible"`
+		SongCommand          string  `json:"song_command"`
+		SongCommandTimeout   int     `json:"song_command_timeout"`
+		OnPlayCommand        string  `json:"on_play_command"`
+		OnPlayCommandTimeout int     `json:"on_play_command_timeout"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
@@ -849,6 +1043,18 @@ func (s *Server) apiUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 		absMusicDir, _ = filepath.Abs(body.MusicDir)
 	}
 
+	// Validate before anything is torn down. Everything below this point
+	// has already stopped the running streamer, so a late rejection would
+	// leave the mount with no AutoDJ at all.
+	if body.Format != "" && config.NormalizeAutoDJFormat(body.Format) != strings.ToLower(body.Format) {
+		jsonError(w, "format must be \"mp3\" or \"opus\"", http.StatusBadRequest)
+		return
+	}
+
+	// Snapshot the previous configuration so a failed restart can be
+	// rolled back rather than leaving no AutoDJ at all.
+	prev := *target
+
 	// Stop the old instance before mutating config.
 	s.StreamerM.DeleteStreamer(originalMount)
 
@@ -863,21 +1069,33 @@ func (s *Server) apiUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 	if body.Bitrate != 0 {
 		target.Bitrate = body.Bitrate
 	}
-	target.Loop = body.Loop
-	target.InjectMetadata = body.InjectMetadata
-	target.MPDEnabled = body.MPDEnabled
-	target.MPDPort = body.MPDPort
+	if body.Loop != nil {
+		target.Loop = *body.Loop
+	}
+	if body.InjectMetadata != nil {
+		target.InjectMetadata = *body.InjectMetadata
+	}
+	if body.MPDEnabled != nil {
+		target.MPDEnabled = *body.MPDEnabled
+	}
+	if body.MPDPort != nil {
+		target.MPDPort = *body.MPDPort
+	}
 	if body.MPDPassword != "" {
 		target.MPDPassword = body.MPDPassword
 	}
-	target.Visible = body.Visible
+	if body.Visible != nil {
+		target.Visible = *body.Visible
+	}
 	target.SongCommand = body.SongCommand
 	target.SongCommandTimeout = body.SongCommandTimeout
 	target.OnPlayCommand = body.OnPlayCommand
 	target.OnPlayCommandTimeout = body.OnPlayCommandTimeout
 
-	s.Config.SaveConfig()
-
+	// Start BEFORE persisting: the old streamer is already torn down, so
+	// if the new configuration can't start (a taken MPD port, a bad
+	// music dir) we must be able to put the previous one back. Saving
+	// first left the config describing an AutoDJ that doesn't exist.
 	streamer, err := s.StreamerM.StartStreamer(
 		target.Name, target.Mount, target.MusicDir, target.Loop, target.Format, target.Bitrate,
 		target.InjectMetadata, target.Playlist, target.MPDEnabled, target.MPDPort, target.MPDPassword,
@@ -885,9 +1103,24 @@ func (s *Server) apiUpdateAutoDJ(w http.ResponseWriter, r *http.Request) {
 		target.OnPlayCommand, target.OnPlayCommandTimeout,
 	)
 	if err != nil {
+		*target = prev
+		if restored, rerr := s.StreamerM.StartStreamer(
+			target.Name, target.Mount, target.MusicDir, target.Loop, target.Format, target.Bitrate,
+			target.InjectMetadata, target.Playlist, target.MPDEnabled, target.MPDPort, target.MPDPassword,
+			target.Visible, target.LastPlaylist, target.SongCommand, target.SongCommandTimeout,
+			target.OnPlayCommand, target.OnPlayCommandTimeout,
+		); rerr == nil {
+			restored.Play()
+			logger.L.Warnw("AutoDJ update failed; previous configuration restored",
+				"mount", target.Mount, "error", err)
+		} else {
+			logger.L.Errorw("AutoDJ update failed and the previous configuration could not be restored",
+				"mount", target.Mount, "error", err, "restore_error", rerr)
+		}
 		jsonError(w, fmt.Sprintf("Failed to restart AutoDJ: %v", err), http.StatusInternalServerError)
 		return
 	}
+	s.Config.SaveConfig()
 	if target.MusicDir != "" {
 		streamer.ScanMusicDir()
 	}
@@ -946,6 +1179,10 @@ func (s *Server) apiAutoDJPlay(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if s.Config.DisabledMounts[mount] {
+		jsonError(w, "Mount disabled", http.StatusConflict)
+		return
+	}
 	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
@@ -969,7 +1206,7 @@ func (s *Server) apiAutoDJPause(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
 		return
 	}
-	streamer.Stop()
+	streamer.Pause()
 	jsonResponse(w, map[string]string{"status": "paused"})
 }
 
@@ -1012,9 +1249,9 @@ func (s *Server) apiAutoDJPrev(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "rewound"})
 }
 
-// apiAutoDJVolume sets playback volume for an AutoDJ mount. Accepts
-// either {"volume": 0.8} as a float in [0,1] or {"volume": 80} as a
-// percentage.
+// apiAutoDJVolume sets playback volume for an AutoDJ mount. The body is
+// {"volume": v, "unit": "percent"|"fraction"}; with no unit the value is
+// guessed by range (> 1 means percent) for legacy callers.
 func (s *Server) apiAutoDJVolume(w http.ResponseWriter, r *http.Request) {
 	if !s.isCSRFSafe(r) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
@@ -1031,14 +1268,28 @@ func (s *Server) apiAutoDJVolume(w http.ResponseWriter, r *http.Request) {
 	}
 	var body struct {
 		Volume float64 `json:"volume"`
+		// Unit disambiguates the range. Without it the endpoint guessed
+		// "> 1 means percent", which makes every value in 0..1 ambiguous:
+		// the Studio's slider at 1% sent 1, the guess read that as the
+		// fraction 1.0, and the knob jumped to full volume.
+		Unit string `json:"unit"` // "percent" | "fraction"
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "Invalid request body", http.StatusBadRequest)
 		return
 	}
 	v := body.Volume
-	if v > 1.0 { // accept either 0..1 or 0..100
+	switch strings.ToLower(body.Unit) {
+	case "percent":
 		v = v / 100.0
+	case "fraction":
+		// already 0..1
+	default:
+		// Legacy callers sent either range with no unit; keep guessing
+		// for them, but the UI now says which it means.
+		if v > 1.0 {
+			v = v / 100.0
+		}
 	}
 	streamer.SetVolume(v)
 	jsonResponse(w, map[string]interface{}{"status": "ok", "volume": streamer.GetVolume()})
@@ -1236,9 +1487,9 @@ func (s *Server) apiRemoveFromPlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	idx := body.ID
-	if idx == 0 {
-		fmt.Sscanf(r.URL.Query().Get("id"), "%d", &idx)
+	id := body.ID
+	if id == 0 {
+		fmt.Sscanf(r.URL.Query().Get("id"), "%d", &id)
 	}
 
 	streamer := s.StreamerM.GetStreamer(mount)
@@ -1246,7 +1497,13 @@ func (s *Server) apiRemoveFromPlaylist(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
 		return
 	}
-	streamer.RemoveFromPlaylist(idx)
+	// By ID, not index: the UI sends back the PlaylistItem.ID it was
+	// given, and treating that as an index removed the wrong track as
+	// soon as IDs and positions diverged (i.e. after any removal).
+	if !streamer.RemoveFromPlaylistByID(id) {
+		jsonError(w, "Playlist entry not found", http.StatusNotFound)
+		return
+	}
 
 	playlistCopy := streamer.GetPlaylist()
 	for _, adj := range s.Config.AutoDJs {
@@ -1381,33 +1638,66 @@ func (s *Server) apiAddToQueue(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Mount string `json:"mount"`
 		Path  string `json:"path"`
+		// ID queues an existing playlist entry (what the Studio's
+		// "play next" button sends); Path queues an arbitrary file
+		// from the music directory.
+		ID    int  `json:"id"`
+		Front bool `json:"front"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		jsonError(w, "Invalid request body", http.StatusBadRequest)
-		return
+	json.NewDecoder(r.Body).Decode(&body)
+
+	// The path-based routes (/api/autodj/{mount}/queue) inject the mount
+	// as a query parameter, so requiring it in the body made every call
+	// from the Studio fail with "Mount is required".
+	mount := body.Mount
+	if mount == "" {
+		mount = r.URL.Query().Get("mount")
 	}
-	if body.Mount == "" {
+	if mount == "" {
 		jsonError(w, "Mount is required", http.StatusBadRequest)
 		return
 	}
-	if !s.hasAccess(user, body.Mount) {
+	if !s.hasAccess(user, mount) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
-	streamer := s.StreamerM.GetStreamer(body.Mount)
+	streamer := s.StreamerM.GetStreamer(mount)
 	if streamer == nil {
 		jsonError(w, "Streamer not found", http.StatusNotFound)
 		return
 	}
 
-	musicDir := streamer.GetMusicDir()
-	fullPath, err := s.validatePathInMusicDir(musicDir, body.Path)
-	if err != nil {
-		jsonError(w, "Forbidden", http.StatusForbidden)
+	fullPath := ""
+	if body.Path != "" {
+		p, err := s.validatePathInMusicDir(streamer.GetMusicDir(), body.Path)
+		if err != nil {
+			jsonError(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+		fullPath = p
+	} else if body.ID != 0 {
+		p, ok := streamer.PathForPlaylistID(body.ID)
+		if !ok {
+			jsonError(w, "Playlist entry not found", http.StatusNotFound)
+			return
+		}
+		fullPath = p
+	} else {
+		jsonError(w, "Either path or id is required", http.StatusBadRequest)
 		return
 	}
-	streamer.PushToQueue(fullPath)
+
+	// The /playlist/playnext route signals front-of-queue via the query
+	// string, since it has no control over the caller's JSON body.
+	if r.URL.Query().Get("front") == "true" {
+		body.Front = true
+	}
+	if body.Front {
+		streamer.PushToQueueFront(fullPath)
+	} else {
+		streamer.PushToQueue(fullPath)
+	}
 	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
@@ -1469,7 +1759,7 @@ func (s *Server) apiGetFiles(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	supportedExts := map[string]bool{".mp3": true, ".ogg": true, ".opus": true, ".flac": true, ".wav": true}
+	supportedExts := relay.AudioExtensions
 	for _, f := range entries {
 		ext := strings.ToLower(filepath.Ext(f.Name()))
 		if f.IsDir() || supportedExts[ext] {
@@ -1947,7 +2237,9 @@ func (s *Server) apiDeleteTranscoder(w http.ResponseWriter, r *http.Request) {
 		} else {
 			s.TranscoderM.StopTranscoder(tc.OutputMount)
 			if tc.Visibility != "" {
+				s.Config.LockMaps()
 				delete(s.Config.VisibleMounts, tc.OutputMount)
+				s.Config.UnlockMaps()
 			}
 			found = true
 		}
@@ -2033,12 +2325,14 @@ func (s *Server) apiCreateUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Failed to hash password: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	s.Config.LockMaps()
 	s.Config.Users[body.Username] = &config.User{
 		Username: body.Username,
 		Password: hp,
 		Role:     body.Role,
 		Mounts:   make(map[string]string),
 	}
+	s.Config.UnlockMaps()
 	s.Config.SaveConfig()
 	jsonResponse(w, map[string]string{"status": "created", "username": body.Username})
 	s.Audit(r, "user_created", "user", body.Username, body.Role)
@@ -2122,7 +2416,9 @@ func (s *Server) apiDeleteUser(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "User not found", http.StatusNotFound)
 		return
 	}
+	s.Config.LockMaps()
 	delete(s.Config.Users, username)
+	s.Config.UnlockMaps()
 	// Invalidate any live sessions belonging to the deleted user; otherwise
 	// their cookie keeps working until it expires even though the account
 	// no longer exists.
@@ -2294,13 +2590,52 @@ func (s *Server) apiGetBranding(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// logoPathAllowed reports whether p is something /branding/logo may serve:
+// empty (no logo) or a regular file inside the branding directory that
+// apiUploadLogo writes to. Any authenticated user used to be able to set
+// LogoPath to an arbitrary string, and handleServeLogo hands whatever it
+// holds to http.ServeFile with no auth — so "tinyice.json" made the whole
+// config (relay/MPD/SMTP passwords, OIDC secret, token hashes) public.
+func logoPathAllowed(p string) bool {
+	if p == "" {
+		return true
+	}
+	base, err := filepath.Abs("branding")
+	if err != nil {
+		return false
+	}
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return false
+	}
+	if resolved, err := filepath.EvalSymlinks(abs); err == nil {
+		abs = resolved
+	}
+	if resolvedBase, err := filepath.EvalSymlinks(base); err == nil {
+		base = resolvedBase
+	}
+	rel, err := filepath.Rel(base, abs)
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return false
+	}
+	info, err := os.Stat(abs)
+	return err == nil && info.Mode().IsRegular()
+}
+
 func (s *Server) apiUpdateBranding(w http.ResponseWriter, r *http.Request) {
 	if !s.isCSRFSafe(r) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
+	user, ok := s.checkAuth(r)
+	if !ok {
 		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	// Branding is server-wide; only a superadmin may change it, matching
+	// apiUpdateSettings. Previously any DJ-role account could.
+	if user.Role != config.RoleSuperAdmin {
+		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -2326,6 +2661,10 @@ func (s *Server) apiUpdateBranding(w http.ResponseWriter, r *http.Request) {
 		s.Config.AccentColor = *body.AccentColor
 	}
 	if body.LogoPath != nil {
+		if !logoPathAllowed(*body.LogoPath) {
+			jsonError(w, "logo_path must be empty or a file uploaded via /api/branding/logo", http.StatusBadRequest)
+			return
+		}
 		s.Config.LogoPath = *body.LogoPath
 	}
 	if body.LandingMarkdown != nil {
@@ -2346,8 +2685,13 @@ func (s *Server) apiUploadLogo(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
-	if _, ok := s.checkAuth(r); !ok {
+	user, ok := s.checkAuth(r)
+	if !ok {
 		jsonError(w, "Unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if user.Role != config.RoleSuperAdmin {
+		jsonError(w, "Forbidden", http.StatusForbidden)
 		return
 	}
 
@@ -2362,9 +2706,26 @@ func (s *Server) apiUploadLogo(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
+	// The file is served from this origin by /branding/logo. Trusting the
+	// upload's extension let any account store logo.html or logo.svg with
+	// a script in it — stored XSS against whoever opens the site. Only
+	// raster image types, and the bytes must actually decode as one.
 	ext := strings.ToLower(filepath.Ext(header.Filename))
-	if ext == "" {
-		ext = ".png"
+	switch ext {
+	case ".png", ".jpg", ".jpeg", ".gif", ".webp":
+	default:
+		jsonError(w, "logo must be a PNG, JPEG, GIF or WebP image", http.StatusBadRequest)
+		return
+	}
+	sniff := make([]byte, 512)
+	n, _ := io.ReadFull(file, sniff)
+	if ct := http.DetectContentType(sniff[:n]); !strings.HasPrefix(ct, "image/") || ct == "image/svg+xml" {
+		jsonError(w, "logo does not look like an image", http.StatusBadRequest)
+		return
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		jsonError(w, "Failed to read upload", http.StatusBadRequest)
+		return
 	}
 	destPath := filepath.Join("branding", "logo"+ext)
 
@@ -2388,11 +2749,20 @@ func (s *Server) apiUploadLogo(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleServeLogo(w http.ResponseWriter, r *http.Request) {
-	if s.Config.LogoPath == "" {
+	// Re-checked at serve time as well as at write time, so a LogoPath
+	// that predates the validation (or was hand-edited into the config)
+	// still can't expose an arbitrary file. ServeFile would also happily
+	// render a directory listing for a directory path.
+	p := s.Config.LogoPath
+	if p == "" || !logoPathAllowed(p) {
 		http.NotFound(w, r)
 		return
 	}
-	http.ServeFile(w, r, s.Config.LogoPath)
+	// Belt and braces for a pre-existing logo file: never let the browser
+	// interpret this as a document.
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Content-Security-Policy", "default-src 'none'; sandbox")
+	http.ServeFile(w, r, p)
 }
 
 // ---------------------------------------------------------------------------
@@ -2446,6 +2816,14 @@ func (s *Server) apiGetTokens(w http.ResponseWriter, r *http.Request) {
 func (s *Server) apiCreateToken(w http.ResponseWriter, r *http.Request) {
 	if !s.isCSRFSafe(r) {
 		jsonError(w, "Forbidden", http.StatusForbidden)
+		return
+	}
+	// Token management needs an interactive session. A request that
+	// authenticated with a Bearer token could otherwise mint further
+	// tokens — including non-expiring ones from an expiring one — so a
+	// leaked short-lived token became permanent access.
+	if strings.HasPrefix(r.Header.Get("Authorization"), "Bearer ") {
+		jsonError(w, "API tokens cannot create tokens; use a logged-in session", http.StatusForbidden)
 		return
 	}
 	user, ok := s.checkAuth(r)
@@ -2615,7 +2993,9 @@ func (s *Server) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := body["max_listeners"]; ok {
 		if n, ok := v.(float64); ok {
+			s.Config.LockMaps()
 			s.Config.MaxListeners = int(n)
+			s.Config.UnlockMaps()
 		}
 	}
 	if v, ok := body["directory_listing"]; ok {

@@ -12,6 +12,7 @@ type DiagnosticClass string
 type DiagnosticActor string
 
 const (
+	DiagnosticStatusPaused     DiagnosticStatus = "paused"
 	DiagnosticStatusRunning    DiagnosticStatus = "running"
 	DiagnosticStatusDegraded   DiagnosticStatus = "degraded"
 	DiagnosticStatusDead       DiagnosticStatus = "dead"

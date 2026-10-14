@@ -1,4 +1,4 @@
-import { useEffect, useRef, useCallback } from 'preact/hooks'
+import { useMemo, useEffect, useRef, useCallback } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Visualizer } from '@/components/Visualizer'
 import { ModeToggle } from '@/components/ModeToggle'
@@ -6,25 +6,11 @@ import { VolumeKnob } from '@/components/VolumeKnob'
 import { createSSE } from '@/lib/sse'
 import { connectAudio, getFrequencyData, resumeAudio } from '@/lib/audio'
 import { useAlbumArt } from '@/hooks/useAlbumArt'
+import { createMetadataCallbacks } from '@/lib/metadata'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
 
-const playing = signal(false)
-const playbackError = signal('')
-const title = signal(data.title || 'Untitled')
-const artist = signal(data.artist || 'Unknown Artist')
-const mode = signal<'http' | 'webrtc'>('http')
-const volume = signal(80)
-const listeners = signal(data.listeners || 0)
-// Seconds of continuous playback since the user most recently pressed play.
-// Resets to 0 on pause so the number always reflects "how long the current
-// listening session has been running" rather than page-open time.
-const elapsed = signal(0)
-const showStats = signal(false)
-
-// Live stream info (refreshed from SSE) — these reflect what the source is
-// currently producing, independent of how well our player is keeping up.
 type StreamStats = {
   audioCodec: string
   audioBitrateKbps: number
@@ -35,30 +21,7 @@ type StreamStats = {
   videoGOP: number
   videoKbps: number
 }
-const initialBitrate = (() => {
-  const v = data.bitrate as unknown
-  if (typeof v === 'number') return v > 0 ? v : 0
-  if (typeof v === 'string') {
-    const n = parseInt(v, 10)
-    return Number.isFinite(n) ? n : 0
-  }
-  return 0
-})()
-const streamStats = signal<StreamStats>({
-  audioCodec: codecFromMime(data.format),
-  audioBitrateKbps: initialBitrate,
-  videoCodec: data.hasVideo ? 'H264' : '—',
-  videoWidth: 0,
-  videoHeight: 0,
-  videoFPS: 0,
-  videoGOP: 0,
-  videoKbps: 0,
-})
 
-// Client-side playback health (sampled from the <video>/<audio> element
-// every second). Buffered seconds is forward-looking; dropped frames is a
-// running counter from the browser's playback quality stats; latency is
-// (live edge − currentTime) when hls.js exposes it.
 type PlaybackStats = {
   bufferedSec: number
   droppedFrames: number
@@ -66,13 +29,50 @@ type PlaybackStats = {
   latencySec: number
   transport: string
 }
-const playbackStats = signal<PlaybackStats>({
-  bufferedSec: 0,
-  droppedFrames: 0,
-  totalFrames: 0,
-  latencySec: 0,
-  transport: '—',
-})
+
+function createPlayerStore() {
+  const playing = signal(false)
+  const playbackError = signal('')
+  const title = signal(data.title || 'Untitled')
+  const artist = signal(data.artist || '')
+  const mode = signal<'http' | 'webrtc'>('http')
+  const volume = signal(80)
+  const listeners = signal(data.listeners || 0)
+  // Seconds of continuous playback since the user most recently pressed play.
+  // Resets to 0 on pause so the number always reflects "how long the current
+  // listening session has been running" rather than page-open time.
+  const elapsed = signal(0)
+  const showStats = signal(false)
+
+  const initialBitrate = (() => {
+    const v = data.bitrate as unknown
+    if (typeof v === 'number') return v > 0 ? v : 0
+    if (typeof v === 'string') {
+      const n = parseInt(v, 10)
+      return Number.isFinite(n) ? n : 0
+    }
+    return 0
+  })()
+  const streamStats = signal<StreamStats>({
+    audioCodec: codecFromMime(data.format),
+    audioBitrateKbps: initialBitrate,
+    videoCodec: data.hasVideo ? 'H264' : '—',
+    videoWidth: 0,
+    videoHeight: 0,
+    videoFPS: 0,
+    videoGOP: 0,
+    videoKbps: 0,
+  })
+
+  const playbackStats = signal<PlaybackStats>({
+    bufferedSec: 0,
+    droppedFrames: 0,
+    totalFrames: 0,
+    latencySec: 0,
+    transport: '—',
+  })
+  return { playing, playbackError, title, artist, mode, volume, listeners, elapsed, showStats, streamStats, playbackStats }
+}
 
 function formatElapsed(secs: number): string {
   secs = Math.max(0, Math.floor(secs))
@@ -99,16 +99,14 @@ function audienceLabel(n: number, isVideo: boolean): string {
   return n === 1 ? 'listener' : 'listeners'
 }
 
-function StatsPanel({ isVideo }: { isVideo: boolean }) {
-  const s = streamStats.value
-  const p = playbackStats.value
+function StatsPanel({ isVideo, stream: s, playback: p, onClose }: { isVideo: boolean; stream: StreamStats; playback: PlaybackStats; onClose: () => void }) {
   const droppedPct = p.totalFrames > 0 ? ((p.droppedFrames / p.totalFrames) * 100) : 0
   return (
     <div class="fixed bottom-20 right-5 z-30 w-[280px] rounded-lg border border-border bg-surface-base/95 backdrop-blur p-3 shadow-2xl font-mono text-[11px] text-text-secondary">
       <div class="flex items-center justify-between mb-2">
         <span class="text-[9px] tracking-widest text-text-tertiary uppercase">STREAM STATS</span>
         <button
-          onClick={() => (showStats.value = false)}
+          onClick={onClose}
           class="text-text-tertiary hover:text-text-primary"
           aria-label="Close stats"
         >
@@ -262,6 +260,7 @@ async function attachHLS(url: string, el: HTMLMediaElement): Promise<HlsLike | n
 }
 
 export function Player() {
+  const { playing, playbackError, title, artist, mode, volume, listeners, elapsed, showStats, streamStats, playbackStats } = useMemo(createPlayerStore, [])
   const audioRef = useRef<HTMLAudioElement>(null)
   const analyserRef = useRef<AnalyserNode | null>(null)
   const hlsRef = useRef<HlsLike | null>(null)
@@ -274,17 +273,20 @@ export function Player() {
   }, [])
 
   useEffect(() => {
-    const sse = createSSE('/events')
-
-    sse.on('metadata', (evt) => {
-      if (evt.mount === data.mount) {
-        title.value = evt.title
-        artist.value = evt.artist
-      }
+    const metadata = createMetadataCallbacks({
+      mount: data.mount,
+      initial: { title: title.value, artist: artist.value },
+      update(current) {
+        title.value = current.title
+        artist.value = current.artist
+      },
     })
+    const sse = createSSE('/events', metadata.onOpen)
+    sse.on('metadata', metadata.metadata)
 
     sse.on('stream', (evt) => {
       if (evt.mount !== data.mount) return
+      metadata.stream(evt)
       // Audience: prefer viewers (HLS / WHEP) when this is a video
       // mount; otherwise fall through to the raw listener count.
       const audience =
@@ -363,10 +365,23 @@ async function pickAudioSource(mountPath: string): Promise<string> {
     srcAttachedRef.current = true
     const mountPath = data.mount!.startsWith('/') ? data.mount! : `/${data.mount}`
     const wantsWebRTC = new URLSearchParams(window.location.search).get('webrtc') === '1'
-    if (wantsWebRTC) {
+    // hasHLS === false means the server will not build a playlist for
+    // this mount because its audio codec is outside MPEG-TS (Opus, from
+    // any WebRTC publisher). WHEP is then the only transport that can
+    // carry it, so try it first rather than attaching hls.js to a 404.
+    const mustUseWebRTC = data.hasHLS === false
+    if (wantsWebRTC || mustUseWebRTC) {
       const whep = await attachWHEP(mountPath, el)
       if (whep) {
         whepCleanup.current = whep
+        return
+      }
+      // WHEP is the only viable transport here, so there is nothing to
+      // fall back to. Leaving the element without a src is better than
+      // pointing it at a playlist that cannot be parsed: the overlay
+      // shows the offline state instead of a decode error.
+      if (mustUseWebRTC) {
+        srcAttachedRef.current = false
         return
       }
     }
@@ -530,7 +545,11 @@ async function pickAudioSource(mountPath: string): Promise<string> {
       if (hls && typeof hls.latency === 'number') {
         latency = hls.latency
       }
-      const transport = whepCleanup.current ? 'WebRTC' : (data.hasVideo ? 'HLS' : 'Icecast')
+      const transport = whepCleanup.current
+        ? 'WebRTC'
+        : hlsRef.current || data.hasVideo
+          ? 'HLS'
+          : 'Icecast'
       playbackStats.value = {
         bufferedSec: Math.max(0, bufferedSec),
         droppedFrames: dropped,
@@ -636,7 +655,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
                 class="absolute inset-0 flex items-center justify-center group"
                 aria-label="Play"
               >
-                <span class="w-20 h-20 rounded-full bg-accent/90 flex items-center justify-center shadow-[0_0_32px_rgba(var(--color-accent-rgb),0.45)] group-hover:scale-105 transition-transform">
+                <span class="w-20 h-20 rounded-full bg-accent/90 flex items-center justify-center shadow-[0_0_32px_rgba(255,102,0,0.45)] group-hover:scale-105 transition-transform">
                   <svg class="w-10 h-10 text-surface-base ml-1" viewBox="0 0 24 24" fill="currentColor">
                     <path d="M8 5v14l11-7z" />
                   </svg>
@@ -683,15 +702,26 @@ async function pickAudioSource(mountPath: string): Promise<string> {
               <VolumeKnob value={volume.value} onChange={handleVolumeChange} />
             </div>
           </div>
-          {showStats.value && <StatsPanel isVideo={true} />}
+          {showStats.value && <StatsPanel isVideo={true} stream={streamStats.value} playback={playbackStats.value} onClose={() => { showStats.value = false }} />}
         </div>
       </div>
     )
   }
 
-  // Audio-only layout — unchanged vinyl visualizer design.
+  // Audio-only layout — vinyl visualizer design.
+  //
+  // pt-16 / pb-24 reserve the space taken by the fixed mini-nav and the
+  // fixed bottom strip (both z-20). Without them the centred column runs
+  // underneath the bottom strip on short viewports and the strip, being
+  // above it, swallowed every click on the volume slider — the control
+  // was visible but dead (#53). The video layout above already reserved
+  // this space; this one didn't.
+  //
+  // overflow-x-hidden rather than overflow-hidden: clipping both axes
+  // meant that once the column was taller than the viewport, the parts
+  // that overflowed could not be scrolled to at all.
   return (
-    <div class="min-h-screen bg-surface-base relative overflow-hidden flex flex-col items-center justify-center">
+    <div class="min-h-screen bg-surface-base relative overflow-x-hidden flex flex-col items-center justify-center px-4 pt-16 pb-24">
       {/* Dot grid texture */}
       <div
         class="fixed inset-0 pointer-events-none z-0"
@@ -710,7 +740,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
           top: '50%',
           left: '50%',
           transform: 'translate(-50%, -60%)',
-          background: 'radial-gradient(ellipse, rgba(var(--color-accent-rgb), 0.08) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse, rgba(255,102,0,0.08) 0%, transparent 70%)',
         }}
       />
 
@@ -748,7 +778,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
         {/* Play / Pause — radio only needs this */}
         <button
           onClick={playing.value ? handlePause : handlePlay}
-          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center accent-shadow-control"
+          class="w-14 h-14 rounded-full bg-accent flex items-center justify-center shadow-[0_0_20px_rgba(255,102,0,0.3)] hover:shadow-[0_0_28px_rgba(255,102,0,0.45)] transition-shadow"
           aria-label={playing.value ? 'Pause' : 'Play'}
         >
           {playing.value ? (
@@ -778,7 +808,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
             {data.mount}
           </span>
           <span class="font-mono text-[9px] tracking-widest text-text-tertiary/50 uppercase">
-            {data.bitrate}kbps {data.format}
+            {streamStats.value.audioBitrateKbps || data.bitrate}kbps {data.format}
           </span>
           <span class="font-mono text-[9px] tracking-widest text-text-tertiary/50 uppercase">
             {listeners} {audienceLabel(listeners.value, false)}
@@ -800,7 +830,7 @@ async function pickAudioSource(mountPath: string): Promise<string> {
           </button>
         </div>
       </div>
-      {showStats.value && <StatsPanel isVideo={false} />}
+      {showStats.value && <StatsPanel isVideo={false} stream={streamStats.value} playback={playbackStats.value} onClose={() => { showStats.value = false }} />}
     </div>
   )
 }

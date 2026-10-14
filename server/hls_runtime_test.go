@@ -15,7 +15,7 @@ func TestRegisterHLSRegistersRuntimeOutput(t *testing.T) {
 
 	stream := s.Relay.GetOrCreateStream("/live")
 	stream.ContentType = "audio/mpeg"
-	s.RuntimeRegistry.GetOrCreate("/live").Stream = stream
+	s.RuntimeRegistry.GetOrCreate("/live")
 
 	hls := s.RegisterHLS("/live")
 	if hls == nil {

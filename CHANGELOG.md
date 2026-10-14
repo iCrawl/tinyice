@@ -5,6 +5,660 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [2.12.3] - 2026-09-30
+
+### Fixed
+
+- **An AutoDJ playlist whose files have all become unreadable span the
+  streamer loop at full speed.** Found by sweeping for the bug class
+  behind 2.12.2: every `continue` in the streamer loop bypasses the only
+  sleeps it has, and the invalid-file skip was one of them. When the
+  music directory is unmounted, a network share drops, or permissions
+  change, the loop stats files as fast as it can and logs one warning
+  each — measured at 1,108,734 skips in 1.5 s, about 739k log lines per
+  second, and with `loop` enabled it never ends on its own.
+
+  Skipping now backs off once a full pass has failed end to end, so a
+  few dead entries still skip at full speed while a wholly unplayable
+  playlist retries at 1 Hz until the files return. Measured after the
+  fix: 6 skips in 1.5 s for a three-file playlist.
+
+## [2.12.2] - 2026-09-30
+
+### Fixed
+
+- **An AutoDJ mount with no listeners burned a full CPU core.** Measured
+  on the production r4dio instance: 207% CPU and 1d10h of CPU time in
+  16h of uptime, serving two listeners. A 20 s profile put ~90% of
+  samples inside go-mp3 frame decoding with only 27 goroutines alive, so
+  it was one free-running loop per mount rather than a leak or a retry
+  storm.
+
+  Both encoders skip encoding while a mount has no listeners, but that
+  gate was a bare `continue` over the rest of the loop body — including
+  the pacing sleep at the bottom. The read above it still pulled PCM,
+  which is what runs the MP3 decoder, so the gate skipped the cheap half
+  and left the expensive half unbounded. On a file-backed source the
+  sleep is the only thing tying playback to the clock, so an idle mount
+  decoded its entire playlist as fast as the CPU allowed. Live sources
+  pace themselves, which is why only the AutoDJ path showed it.
+
+  Measured on two idle AutoDJ mounts before and after, same machine and
+  fixtures: 232% CPU before, 3.5% after. A listener pulling for 20 s
+  receives 20.01 s of 128 kbps MP3 and 19.98 s of Ogg Opus, so pacing is
+  accurate rather than merely slower.
+- The frame counter that drives pacing now advances on idle frames too.
+  It counted only encoded frames, so after any idle stretch `expected`
+  sat permanently behind `elapsed` and pacing never re-engaged for the
+  rest of the track once a listener arrived.
+- An idle mount now marks its producer alive. Stream health is derived
+  from the last time bytes were broadcast, so a correctly-paced idle
+  mount would emit nothing for minutes, flap to `degraded` after 5 s and
+  eventually be auto-removed as a dead stream — the mount would vanish
+  from the dashboard and 404 the first listener to tune in. The old bug
+  masked this by restarting tracks constantly, each restart writing Ogg
+  headers, which is the healthy/degraded flapping seen on both AutoDJ
+  mounts (200 health log lines in 6 minutes).
+
+## [2.12.1] - 2026-09-27
+
+### Fixed
+
+- **Browser-published video would not play.** Three separate faults sat
+  on that path, each measured rather than inferred:
+  - A browser WebRTC encoder emits exactly one keyframe when its track
+    starts and then never again unless a receiver asks over RTCP.
+    Chrome 141 publishing a 640x480 camera produced 542 non-IDR slices,
+    one SPS and one PPS, and zero IDRs after the opening frame in the
+    first eight seconds. Nothing joining mid-broadcast could decode
+    that: HLS could not start a segment on a keyframe and a WHEP viewer
+    had nothing to begin from. tinyice now asks for an IDR on track
+    acceptance and every two seconds after, matching what OBS and every
+    other streaming encoder default to. The same window then carried
+    five IDRs with their parameter sets, and ffprobe reports
+    `h264 (Baseline), yuv420p, 640x480`.
+  - The MPEG-TS muxer can declare two audio stream types, MP3 and ADTS
+    AAC. An Ogg/Opus mount was segmented anyway, so segments carried
+    raw Ogg pages under the MP3 stream type — `mp3float: Header
+    missing` from ffprobe, `MEDIA_ERR_SRC_NOT_SUPPORTED` in Chrome. The
+    2.12.0 notes claimed HLS picked browser video up with no further
+    configuration; that was wrong.
+  - The player attached hls.js to every video mount, including those.
+- An HLS output registered before a mount's `/video` sibling appeared
+  stayed audio-only for the rest of the source session. The sub-mount
+  can arrive seconds late — an RTMP publisher creates it on its first
+  video tag, and Chrome's H.264 encoder took 13 s to emit its first
+  frame — so a viewer who loaded the playlist in that window lost the
+  picture. The output is now re-registered as A/V the first time the
+  sub-mount shows up.
+- The systemd units shipped in the deb and rpm packages restricted
+  address families to AF_INET, AF_INET6 and AF_UNIX. Go's
+  `net.Interfaces()` needs AF_NETLINK to enumerate addresses, so every
+  WebRTC publish attempt under those units failed with `route ip+net:
+  netlinkrib: address family not supported by protocol`. The API now
+  also explains that error where it surfaces.
+
+### Changed
+
+- Mounts whose audio codec is outside MPEG-TS — Opus, FLAC, Vorbis, and
+  so every WebRTC publisher — no longer serve an HLS playlist. The
+  request is a clean 404 and the player uses WHEP, which carries Opus
+  and H.264 natively with no transcode. These mounts previously
+  returned a playlist whose segments no player could decode. Carrying
+  Opus over HLS needs fMP4 segments or an AAC encoder, neither of which
+  exists here yet; RTMP, SRT and Icecast MP3/AAC sources are
+  unaffected.
+
+## [2.12.0] - 2026-09-27
+
+### Added
+
+- **Browser video broadcasting.** Go Live could only send a microphone,
+  and the WebRTC ingest path declined every non-Opus track, so a browser
+  had no way to contribute video while RTMP and SRT sources could. The
+  page now offers four sources — microphone, camera, screen share, or a
+  local video file — and publishes audio plus video over one peer
+  connection. Video is republished on the mount's `/video` sibling in
+  the same shape the RTMP ingest produces, so HLS, the player and WHEP
+  pick it up with no further configuration. A screencast mixes the
+  microphone in so it can be narrated; a video file loops while live.
+- The ingest codec set is restricted to Opus and H.264 on purpose.
+  pion's defaults also offer VP8 and VP9 and a browser will choose VP8
+  given the option, but every video consumer here is H.264 and the
+  binary has no video transcoder — accepting VP8 would mean taking a
+  publisher whose picture nothing could play. A browser that cannot
+  encode H.264 fails negotiation with a clear message instead.
+
+## [2.11.1] - 2026-09-27
+
+### Security
+
+- **SSRF via IPv6 transition addresses (GHSA-7r38-rfcc-8x22).** The
+  outbound address policy judged IPv6 literals on the stdlib predicates
+  alone, none of which look at an embedded IPv4 — `IsLoopback` knows only
+  `::1`, `IsPrivate` only `fc00::/7`, and `net.IP.To4` decodes
+  IPv4-mapped and nothing else. A webhook or relay URL written as
+  `64:ff9b::a9fe:a9fe` (NAT64 for the cloud metadata endpoint),
+  `2002:c0a8:0101::` (6to4 for 192.168.1.1), a Teredo form of any private
+  address, or the deprecated `::127.0.0.1` reached exactly the ranges the
+  policy exists to refuse. The embedded address is now extracted and
+  judged on the same policy for IPv4-mapped, IPv4-compatible, NAT64 (RFC
+  6052 and RFC 8215 prefixes), 6to4 and Teredo. Transition addresses
+  carrying a genuinely public IPv4 still work, so a publisher reachable
+  over 6to4 is unaffected. NAT64 on a network-specific prefix cannot be
+  enumerated and remains out of reach of this check; that limit is
+  documented at the function.
+
+## [2.11.0] - 2026-09-27
+
+### Added
+
+- Sources that advertise no bitrate (Traktor over Ogg Vorbis sends no
+  `Ice-Bitrate` or `Ice-Audio-Info`) no longer display as `0k`: the
+  measured ingest rate is published after 10 s, and a bitrate the source
+  did declare is never overwritten. Landing, Explore and the player
+  footer update from the live `stream` events rather than only the
+  page-load payload.
+- `TestEncodeOpusRoundTripHasNoDroppedAudio` and a fuzz harness for the
+  Ogg comment sniffer. Opus had no content test at all, which is the same
+  gap that let #63 ship; the sniffer parses bytes straight off an ingest
+  socket, and 2,989,271 fuzz executions found no panic, spin or unbounded
+  growth. The Opus test is tagged `!race`: opus-go does null-pointer
+  arithmetic in `Opus_silk_Get_Encoder_Size` that checkptr calls fatal,
+  in 1.3.0 and 1.4.0 alike — pre-existing, not a regression, and simply
+  never reached under `-race` before.
+
+### Changed
+
+- `/admin/metadata` returns 404 for a mount with no live source instead
+  of reporting success. This matches Icecast, but a source client pushing
+  metadata during a reconnect gap now sees an error where it previously
+  saw a silent OK.
+- Dependencies: `kazzmir/opus-go` 1.3.0 -> 1.4.0, `pion/webrtc` 4.2.19 ->
+  4.2.20, `go-webauthn` 0.18.0 -> 0.18.1, `x/crypto` 0.55 -> 0.57,
+  `x/oauth2` 0.36 -> 0.37, `x/sys` 0.47 -> 0.48. The Opus bump was
+  verified against the new audio content test, not just a build; the
+  webauthn bump is compile-and-test verified only.
+
+### Fixed
+
+- **MP3 transcoders and AutoDJ mounts produced distorted, stuttering
+  audio (#63).** shine-mp3 v0.2.0's `Encoder.Write` slices each chunk as
+  `data[i:i+samplesPerPass]` but advances by `samplesPerPass*channels`, so
+  for stereo it encoded only the first half of every 1152-sample frame,
+  zero-padded the rest and discarded the remaining PCM. Opus was
+  unaffected. Introduced in 2.8.0 with the shine-mp3 0.2.0 update.
+  `EncodeMP3` now feeds each frame to `EncodeBufferInterleaved` directly.
+  A round-trip test encodes a continuous tone, decodes it and fails on
+  any dropout; it fails without the fix.
+- **Track history stayed empty for Ogg Vorbis sources (#64).** Only the
+  relay pull path looked for tags, and only for the literal `OpusTags`, so
+  Vorbis comment headers (Traktor, Mixxx) never reached `SetCurrentSong`;
+  direct source connections were never sniffed at all. A new
+  `OggCommentSniffer` parses whole Ogg pages, handles Vorbis and Opus
+  comment headers split across reads or pages, and is used on both paths.
+  The metadata endpoint now returns 404 instead of success when the mount
+  has no live source.
+  Sources that send no `Ice-Bitrate`/`Ice-Audio-Info` header (Traktor) no
+  longer show `0k`: after 10 s the measured ingest rate is used, and a
+  declared bitrate is never overwritten.
+
+## [2.10.2] - 2026-09-16
+
+### Fixed
+
+- **Ogg mounts played silence in browsers.** The AutoDJ starts a fresh
+  Ogg stream per track, so each track's OpusHead/OpusTags pages stay in
+  the mount's circular buffer under their own serial. `Subscribe`
+  clamped a new listener's start offset to `OggHeaderOffset` and then
+  let the page alignment undo it — with no tracked page at or after the
+  current headers (the state immediately after a track change) the
+  `oldestValid` fallback rewound to the oldest page in the whole buffer.
+  Listeners received several previous tracks' header pairs, granule 0
+  and no audio, before the real stream. ffmpeg skips to the chain that
+  has audio, so every command-line check looked healthy; browsers latch
+  onto the first chain, find it empty and play nothing. Measured on a
+  live mount: five orphan header pairs in the first 515 bytes ahead of
+  1591 continuous pages. The header offset is now a floor the alignment
+  respects.
+
+## [2.10.1] - 2026-09-16
+
+### Fixed
+
+- **`ScanMusicDir` never scanned the music directory.** It re-cached
+  titles for the tracks already in the playlist and returned, so on an
+  empty playlist it did nothing. The boot path calls it in exactly that
+  case (`if len(adj.Playlist) == 0`) and then calls `Play()`, so an
+  AutoDJ configured with nothing but a `music_dir` started, played
+  nothing and never appeared as a source; the Studio's SCAN button was
+  equally inert. It now walks the directory (skipping dotfiles and dot
+  directories) and appends every playable file not already present, so a
+  scan on a live playlist picks up new music without reordering or
+  re-adding what is queued.
+- **Loading a `.pls` was invisible in the Studio.** `LoadPlaylist`
+  replaced the playlist without bumping `playlist_version`, and since
+  2.8.0 the SSE `autodj` event carries only that version rather than the
+  playlist itself — so nothing told the UI to refetch. It also left the
+  playback cursor pointing into the old playlist, potentially past the
+  end of the new one.
+- The playable-extension list existed in three copies (scanner, file
+  browser, directory picker) and had begun to drift; it is now one
+  exported set.
+
+## [2.10.0] - 2026-09-16
+
+### Added
+
+- **Sandboxed directory browser for the AutoDJ music path.** The music
+  directory was a free-text field, so configuring one meant knowing an
+  absolute server path and typing it correctly — the existing file
+  browser only walks *inside* an already-configured directory, which
+  cannot help you choose one. `GET /api/autodj/browse` lists directories
+  (never files) at or below the configured media roots, reporting the
+  tracks and subfolders in each so the library is recognisable without
+  opening every candidate. Superadmin only, matching AutoDJ create and
+  update. Confinement is the same function the MPD path arguments use,
+  so a symlink inside a root that points out of it is refused rather
+  than followed.
+- **`media_roots`** bounds what that browser can list. Unset, it defaults
+  to the process working directory plus the music directory of every
+  configured AutoDJ — useful on an install that already works, and
+  exposing nothing the operator has not already pointed the server at.
+- **MPD control port and visibility are editable.** `mpd_enabled`,
+  `mpd_port` and `visible` have always existed in the config, the API and
+  the instance response, with no fields in the form: an MPD control port
+  could only be configured by editing tinyice.json by hand.
+- **Shuffle has a control.** It was in the model, the SSE event and the
+  API, and absent from the card.
+- **`burst_size` on mount creation** (2.9.0 shipped the handler side; the
+  form now sends the field it always collected).
+
+### Changed
+
+- **Deleting an AutoDJ asks first.** It took the playlist and queue with
+  it on the first click of a small icon sitting between the transport
+  controls.
+- A stopped AutoDJ names the playlist it would resume and its music
+  directory instead of showing only a track count, which is the answer
+  whenever that count is zero.
+
+### Fixed
+
+- **The OGG format was offered, stored, displayed and never
+  implemented.** Every encoder path is `Format == "opus"` with MP3 as the
+  fallback, so an AutoDJ configured as OGG encoded MP3 and advertised
+  `audio/mpeg` while every surface reported OGG. The option is gone, the
+  API rejects anything but mp3 and opus, and a stored format the encoder
+  does not implement is rewritten to mp3 on load — which cannot change
+  what any listener receives, since mp3 is what was already being
+  produced for that value. The update handler validates before tearing
+  the running streamer down, so a rejected format no longer costs the
+  operator their AutoDJ.
+
+## [2.9.0] - 2026-09-16
+
+### Security
+
+- **CSRF via cached HTTP Basic credentials.** `isCSRFSafe` treated a
+  request with no session cookie as safe, on the reasoning that it could
+  not be authenticated anyway. It could: `checkAuth` also accepts Basic,
+  and `/admin/metadata` answers with `WWW-Authenticate: Basic
+  realm="TinyIce"`, so a browser that has ever authenticated there
+  re-attaches those credentials to every same-origin request — including
+  one a third-party page triggers. A token-free cross-site POST to
+  `/admin/add-user` created a superadmin. Such requests are refused now;
+  Bearer-authenticated ones stay exempt, since a cross-origin form
+  cannot set an `Authorization` header.
+- **SSRF past `validateOutboundURL`.** The check only ever inspected
+  literal IPs in the string an operator typed. Both DNS and any redirect
+  the remote returns are under the other side's control, so a webhook
+  aimed at a hostname resolving to `169.254.169.254`, or at a public URL
+  that 302s to `127.0.0.1`, went straight through — and for a relay pull
+  the response body is broadcast to listeners. Every outbound client
+  (webhooks, YP directory, GeoIP downloads, relay pulls) now applies the
+  address policy at connect time, to the address actually being dialled,
+  on every hop of a redirect chain. The policy also gained RFC 6598
+  carrier-grade NAT space and `0.0.0.0/8`.
+
+### Fixed
+
+- **AutoDJ edits switched off settings the form never submitted.** Absent
+  `mpd_enabled` / `visible` / `loop` decoded as `false`, so any unrelated
+  edit disabled the MPD server and hid the mount. Omitted fields are now
+  left alone.
+- **A rejected AutoDJ update left the mount with no AutoDJ at all.** The
+  old instance was torn down and the new config saved before the restart
+  was attempted, so a taken MPD port produced a config describing an
+  AutoDJ that does not run. It now starts first and restores the previous
+  streamer and config on failure.
+- **The Studio's metadata switch could invert.** The endpoint always
+  flipped the flag while the UI posts the state it wants; a double click
+  or a second tab left the switch showing the opposite of reality.
+- **The volume knob jumped to full at 1%.** The endpoint guessed its unit
+  by range, which makes every value in 0..1 ambiguous. The body carries
+  an explicit `unit` now (`percent` / `fraction`); callers that send none
+  keep the old guess.
+- **"Load playlist" loaded nothing and then remembered it.** With no file
+  named, `filepath.Base("")` is `"."`, which was accepted and persisted
+  as `last_playlist`. The Studio now tracks the selected library entry.
+- **The mount create form's burst size was discarded.** It was posted as
+  `burstSize` and no handler read it, so every mount ran on the 512 KiB
+  default. It is `burst_size` on both sides now, stored per mount and
+  bounded by a cap the listener path also applies.
+- **The audit-log category filter hid 16 of the 36 recorded actions.** It
+  was a hand-written list of exact action names that had gone stale:
+  "Streams" hid every `mount_updated` / `mount_enabled` /
+  `mount_disabled` / kick, and webhooks had no category at all. Filtering
+  is prefix-based now, an unknown category matches nothing instead of
+  everything, and a test scans the handlers so a new action cannot fall
+  outside the filter.
+- **Login ignored `?next=`.** `/kiosk` has always redirected through it,
+  but every login landed on `/admin`. It is followed now, refusing
+  anything that is not a same-origin path.
+- **Disconnected sources stayed on screen until reload.** The SSE feeds
+  send one event per live mount per tick and nothing when a mount goes
+  away, so the dashboard, kiosk wall, landing page and explore
+  accumulated stale entries. They expire now, and the public feed carries
+  the source's actual live state rather than leaving the client to assume
+  that receiving an event means "on air".
+- **The admin `stream` event dropped half its fields.** `artist` was
+  hardcoded empty and the whole transcode group never left the server, so
+  the dashboard's "source format to output format" display had nothing to
+  render.
+- **The explore page marked video mounts as audio-only** — it built its
+  own stream list, which had drifted from the landing page's and omitted
+  `has_video`.
+- **The kiosk wall never showed the station name**, reading `title` from
+  the page data where the server injects `pageTitle`.
+- **A silent relay upstream parked its goroutine forever.** The idle
+  watchdog cancelled a context derived after the request was already in
+  flight, which does nothing to a parked `body.Read` — precisely the
+  stall it exists for.
+- **Every HLS source flap leaked two goroutines, permanently.** A
+  `FrameHub` subscriber's watcher waited on the caller's context alone,
+  so a subscription ended by `Close` stayed parked, and the framed loop
+  resubscribes with the same long-lived context on every flap.
+- **MPD `lsinfo` held the streamer lock across `os.ReadDir`**, stalling
+  playback for as long as the filesystem took.
+- **Pausing an Opus AutoDJ on a file that was not already 48 kHz** made
+  the encoder think it was behind schedule on resume and dump the rest of
+  the track into the ring buffer at full speed: the resampler sat on top
+  of the pause gate and hid it from the encoder's pacing.
+- Data race on `Buffer.Head` in `Subscribe` and the decoder hub.
+- A source connection whose `ResponseWriter` cannot carry a read deadline
+  is reported instead of silently running the ingest with no idle timeout.
+- `Login.tsx` and `Embed.tsx` typecheck again (a duplicate
+  `window.__TINYICE__` declaration), and `Embed` no longer throws when
+  opened without a mount.
+
+### Removed
+
+- The `streams` SSE event type and the landing page's subscription to it.
+  No handler has ever emitted that event.
+
+## [2.8.2] - 2026-09-11
+
+### Security
+
+- **Any DJ could store HTML at `/branding/logo`** — the upload had no role
+  check and trusted the file extension, and the logo is served from the
+  site's origin: stored XSS against every visitor, the superadmin
+  included. Superadmin only, raster images only, content sniffed, and
+  served with `nosniff` and a sandboxing CSP.
+- **MPD `rm` deleted arbitrary `.pls` files** via a traversing playlist
+  name. Names are bare filenames now.
+- **`/admin/hotswap` restarted the server for any account**; superadmin
+  only.
+- **Icecast SOURCE passwords could be brute-forced** with no lockout;
+  they now count like every other credential check.
+- **API tokens could mint tokens**, so an expiring token could create a
+  permanent one. Token creation needs a logged-in session.
+- **A deleted original superadmin was recreated on every restart** with
+  its original password (legacy `admin_user` migration). The lift now
+  only bootstraps an empty user table.
+- **Rejected WebRTC offers leaked the peer connection** (four goroutines
+  plus tickers each) on the unauthenticated `/webrtc/offer`.
+- **Passkey login/begin** could grow server state without bound; pending
+  challenges are capped.
+
+### Fixed
+
+- **OIDC login behind a TLS-terminating reverse proxy** registered an
+  `http://` redirect URI and was refused by the provider. It now uses
+  `base_url`, else `X-Forwarded-Proto`/`Host` from a trusted proxy.
+- Poster uploads are limited to mounts with video and to decodable JPEGs.
+
+## [2.8.1] - 2026-09-11
+
+### Security
+
+- **Setup could be completed with an empty token after a restart.** A
+  restart before the first-run wizard finished booted with no setup
+  token, and the completion handler compared the client's token against
+  `""` with a constant-time compare that reports two empty strings as
+  equal — anyone reaching `/setup/complete` became superadmin. A fresh
+  token is minted (and printed) on every boot that still needs setup,
+  and an empty token is refused outright.
+- **Legacy `/admin/player/*` handlers never checked per-mount access.** A
+  DJ with `/a` could drive, clear, reorder, set metadata on and browse
+  the music directory of `/b`. All 17 handlers now enforce it.
+- **CSRF via GET on every legacy admin form handler.** `isCSRFSafe`
+  whitelisted GET, the handlers read parameters from the query string and
+  never checked the method, and the session cookie is `SameSite=Lax`
+  (sent on cross-site top-level navigations). A link to
+  `/admin/add-user?username=..&password=..` — or `/admin/autodj/add`
+  with a `song_command`, which is a shell exec — was a one-click,
+  token-free mutation. Mutating handlers reached by GET now return 403.
+  The Icecast `updinfo` GET keeps working with Basic auth but no longer
+  accepts the session cookie.
+- **`/branding/logo` could serve any file, including `tinyice.json`.**
+  Any authenticated account (no role check) could set `logo_path`
+  verbatim; the logo endpoint served it unauthenticated. Superadmin
+  only, and the path must be a regular file under `branding/`.
+- **A DJ could take over an AutoDJ, relay or transcoder mount** by
+  creating a stream with that mount name; the "mount taken" check never
+  consulted those. It does now.
+
+### Fixed
+
+- **Two process-ending panics from wire input**: an MPEG-TS packet with
+  an out-of-range `pointer_field` (SRT publishers), and MPD
+  `albumart "x" -1`. Both are bounds-checked, and the SRT/RTMP/MPD
+  goroutines now recover a panic per connection instead of taking the
+  server down.
+- **A WebRTC source offer with two tracks crashed the server** on
+  disconnect (`close of closed channel`); the first Opus track now owns
+  the pump and extra tracks are declined.
+- **WebRTC/WHEP viewer pump spun at 100% CPU** forever when its mount
+  closed before it found the first Ogg page.
+- **MPD `currentsong` / `playlistid` could deadlock the AutoDJ** via a
+  recursive `RLock` racing the playback loop's writer.
+- **Audio-only HLS output died permanently after the first source
+  drop**; it now resubscribes like the A/V path.
+- **Listeners on a mount with a fallback hung forever** with no response
+  when both mounts were down, leaking a goroutine per reconnect; fresh
+  connections get 404, mid-stream listeners wait bounded and honour
+  disconnects. A fallback *cycle* (`/a → /b → /a`) additionally spun at
+  100% CPU; the fallback is now followed once per pass.
+- **`SaveConfig` raced handler map writes** — Go's fatal "concurrent map
+  iteration and map write", which ends the process. It runs from a
+  background timer (API-token last-used tracking) as well as from
+  handlers; an API client plus one admin action at the wrong moment was
+  enough. Config maps are now guarded by a lock taken by every mutator
+  and by the marshal.
+- **MPD password authentication could never succeed.** With
+  `mpd_password` set, a correct `password` was answered OK and every
+  following command "permission denied". Fixed, and the argument is
+  unquoted as libmpdclient sends it.
+- **MPD `idle` froze clients.** `noidle` sat unread for up to 30 s (every
+  keypress in ncmpcpp/cantata froze) and was then answered "unknown
+  command", desynchronising later replies. `idle` is interruptible,
+  reports the subsystem that changed, and play/pause/track changes now
+  wake idle clients.
+- **The player's now-playing title never updated**: it listened for a
+  `metadata` event the server never emits. It follows the `stream` event
+  now.
+
+## [2.8.0] - 2026-09-11
+
+### Fixed
+
+- **The LIVE badge and Stop Broadcast button flickered while
+  broadcasting** (reported on iOS, but present everywhere). Both carried
+  the `pulse-glow` animation, which dips `opacity` from 1 to 0.5 twice
+  every two seconds. That's the intended effect on a 2.5 px status dot,
+  but on a full-width 56 px button it fades the whole control and its
+  label in and out. They now use a new `pulse-live-glow` keyframe that
+  pulses only the box-shadow and never touches opacity (measured: the
+  opacity swing goes from 0.50 to 0.00).
+
+  `pulse-glow`'s midpoint also hard-coded the green live colour, so a red
+  indicator pulsed red-to-green; both stops now derive from
+  `--color-live`. Added a `prefers-reduced-motion` opt-out for both.
+
+- **The Go Live page re-rendered on every animation frame while live.**
+  The level meters wrote their values to signals that the page read
+  during render, so a 60 Hz meter update meant a 60 Hz full re-render of
+  the page. The meters now write to the DOM through refs, as the bars and
+  peak markers already did.
+
+- **Icecast sources behind an HTTP reverse proxy** (#58). A source that
+  frames its body properly (chunked, or a length) is now read through
+  `r.Body` instead of the raw hijacked socket. Hijacking a framed request
+  broadcast the chunk headers to listeners as if they were audio — a
+  stream would begin `d08\r\n` instead of an MP3 frame sync. Direct
+  encoders, which send no framing at all, keep the hijack path unchanged.
+
+  A source that connects and then sends nothing for 10 s now logs a
+  warning naming the likely cause. The classic Icecast source protocol
+  has no `Content-Length` and no `Transfer-Encoding`, so an HTTP reverse
+  proxy sees a bodiless request and forwards no body; that case cannot be
+  rescued server-side, but it no longer looks like an unexplained dead
+  mount. Point the encoder at TinyIce directly (it terminates TLS itself)
+  or proxy that port at TCP/stream level.
+
+- **The player's volume control was unreachable** (#53). The audio layout
+  reserved no space for its own fixed bottom strip, so on shorter
+  viewports the controls sat underneath it and the strip — being above
+  them — swallowed every click and drag. `overflow-hidden` meant they
+  could not be scrolled to either.
+
+  The speaker icon is now a real mute toggle (it was decorative), the
+  slider responds to touch drags and to arrow/Home/End keys, and it
+  reports whole percentages instead of `74.59677419354838`.
+
+- **AutoDJ pause then play skipped a track** (#54, a regression in
+  2.7.0). Pause cancelled the current track, so resuming could only start
+  the next one. It now suspends the encoder's reads and resumes the same
+  file where it stopped. Reported position no longer counts paused time
+  as playback progress.
+
+- **A playing AutoDJ showed as offline in Streams** (#56). The status dot
+  keys off the mount's source descriptor, which every ingest sets except
+  the AutoDJ; it now identifies itself as `autodj` while playing and
+  releases the mount when stopped.
+
+### Changed
+
+- **Dependencies updated** (the three open Dependabot PRs, rolled up):
+  pion/webrtc 4.2.12 → 4.2.16 and its ice/dtls/srtp/sctp/stun/turn
+  stack, coreos/go-oidc 3.18 → 3.20, go-webauthn 0.17.3 → 0.17.4,
+  wneessen/go-mail 0.7.3 → 0.8.1, gorm 1.31.1 → 1.31.2, x/crypto
+  0.51 → 0.54 plus x/sys, x/net and x/text; actions/checkout, setup-go
+  and setup-node v6 → v7; alpine 3.23 → 3.24 in the runtime image.
+
+- **`/admin/events` is roughly 40x smaller** (#55). The `autodj` event
+  carried the entire playlist array on every tick — twice, counting the
+  legacy unnamed frame — which on a 200-track AutoDJ was ~99% of all
+  bytes on the feed (measured 126 KB/s, now 2.9 KB/s). It now sends
+  `playlist_version`; clients refetch `/api/autodj/{mount}/playlist` when
+  that number changes, which also picks up edits made elsewhere.
+
+- **Dependencies updated** (Dependabot #59, #61): shine-mp3 0.1.0 → 0.2.0
+  (needed a source change — see the bitrate-override test), coreos/go-oidc
+  3.20 → 3.21, go-webauthn 0.17.4 → 0.18.0, mewkiz/flac 1.0.13 → 1.0.14,
+  pion/webrtc 4.2.16 → 4.2.19 with its ice/dtls/srtp/sctp/stun/turn stack,
+  x/crypto 0.54 → 0.55, x/net, x/text; the build image moves to
+  golang:1.27-alpine.
+
+## [2.7.0] - 2026-08-10
+
+### Added
+
+- **`tinyice --version` / `tinyice version`.** Prints the version, short
+  commit, Go version and platform, before any config is loaded, so it
+  works on a half-configured install and gives bug reports something to
+  quote.
+
+- **Monitor player in the AutoDJ Studio.** A local `<audio>` bound to the
+  mount, so the operator can hear what listeners hear. `preload="none"`
+  — it doesn't open a listener connection until you press play.
+
+### Fixed
+
+- **`trusted_proxies` was ignored everywhere except OIDC login.** The
+  setting documents itself as governing "scan-detection, bans and audit
+  logging", but `clientIP()` had exactly one caller. Behind Caddy/nginx
+  the audit log, auth log, API-token last-used IP, listener and source
+  logs, the `source_connect` webhook, HLS/WHEP viewer tracking and the
+  listener geo map all recorded the reverse proxy's address.
+
+  Rate limiting and bans were worse than cosmetic: keyed on the proxy,
+  five bad logins from anyone locked out every client behind it, and a
+  per-client ban could never match again. Two matching bugs are fixed
+  too — exact `trusted_proxies` entries were compared as strings (so a
+  dual-stack listener reporting `::ffff:10.0.0.1` never matched a
+  configured `10.0.0.1`), and `X-Forwarded-For` entries carrying a port
+  were used verbatim as a map key.
+
+- **Browser "Go Live" always returned 401.** The page sent no credentials
+  at all while `/webrtc/source-offer` requires the mount's source
+  password, and the failure was only logged to the console. The endpoint
+  now also accepts an authenticated admin session or API token with
+  access to the mount (CSRF-protected), which is what the page uses, and
+  the page renders handshake failures instead of swallowing them.
+
+- **Pausing an AutoDJ made it unrecoverable.** `Streamer.Stop` cancelled
+  the streamer-lifetime context, ending the playback loop for good;
+  every transport stop went through it, so a later play only flipped a
+  flag nobody was listening for. Transport stop and teardown are now
+  separate operations. Pause also cancels the in-flight track, which it
+  previously didn't — the mount kept broadcasting until the file ended.
+
+- **AutoDJ page refetched twice a second, flashing "Loading...".** Both
+  admin AutoDJ pages subscribed to the public `/events` feed, which
+  emits no `autodj` event; the page compensated by refetching
+  `/api/autodj` on every `stream` event and toggling the full-page
+  loading state each time. They now use `/admin/events` and apply
+  events in place.
+
+- **Studio's transport reported the wrong state.** The `AutoDJEvent`
+  type described a payload the server never sent, so the handler threw
+  inside the SSE dispatcher's per-listener `try/catch` after assigning
+  the raw numeric state — leaving `state === 'playing'` permanently
+  false and the button stuck on Play. Playlist rows and the file
+  browser had the same class of key mismatch and rendered blank /
+  non-navigable.
+
+- **Studio endpoints that could never succeed.** `/playlist/remove`
+  treated the item id it was handed as an index (removing the wrong
+  track once ids and positions diverged); `/queue` and
+  `/playlist/playnext` demanded `mount` in the request body while the
+  path-based routes inject it as a query parameter, so every call 400'd.
+  `playnext` now really queues to the front.
+
+### Changed
+
+- **AutoDJ playlist and queue items are snake_case on the wire.**
+  `{"Title","Path","ID"}` became `{"title","path","id"}`, matching every
+  other field of the AutoDJ API. Affects `/api/autodj/{mount}/playlist`,
+  `/api/autodj/{mount}/queue`, and the `queue` / `playlist` arrays in the
+  `autodj` SSE event.
+
+- **`autodj` payloads gained `position` and `current_id`**, and
+  `playlist_pos` is now actually populated.
+
 ## [2.6.2] - 2026-05-13
 
 ### Added
@@ -285,4 +939,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   this release line as `daf5368`). The previous full-lock fan-
   out was the dominant lock-contention vector under load.
 
+[2.12.3]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.12.3
+[2.12.2]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.12.2
+[2.12.1]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.12.1
+[2.12.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.12.0
+[2.11.1]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.11.1
+[2.11.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.11.0
+[2.10.2]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.10.2
+[2.10.1]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.10.1
+[2.10.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.10.0
+[2.9.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.9.0
+[2.8.2]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.8.2
+[2.8.1]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.8.1
+[2.8.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.8.0
+[2.7.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.7.0
 [2.5.0]: https://github.com/DatanoiseTV/tinyice/releases/tag/v2.5.0

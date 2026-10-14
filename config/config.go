@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"os"
+	"strings"
 	"sync"
 
 	"golang.org/x/crypto/bcrypt"
@@ -176,6 +177,35 @@ type WebhookConfig struct {
 	Enabled      bool              `json:"enabled"`
 }
 
+// normalizeAutoDJFormats rewrites any stored format the encoder does not
+// implement to the one it actually produced. Done in-place at load so the
+// next SaveConfig persists it and the admin UI stops displaying a setting
+// that never took effect.
+func normalizeAutoDJFormats(c *Config) {
+	for _, dj := range c.AutoDJs {
+		if dj == nil {
+			continue
+		}
+		dj.Format = NormalizeAutoDJFormat(dj.Format)
+	}
+}
+
+// NormalizeAutoDJFormat maps a stored format onto what the encoder
+// actually implements. The admin UI used to offer "ogg" while every
+// encoder path is `Format == "opus"` with MP3 as the fallback, so an
+// AutoDJ configured as OGG streamed MP3 and advertised audio/mpeg — the
+// setting was accepted, persisted and displayed, and did nothing.
+//
+// Anything that is not Opus becomes MP3, which is what the server was
+// already doing: this makes the stored config honest without changing a
+// single listener's stream.
+func NormalizeAutoDJFormat(format string) string {
+	if strings.ToLower(strings.TrimSpace(format)) == "opus" {
+		return "opus"
+	}
+	return "mp3"
+}
+
 type AutoDJConfig struct {
 	Name                 string   `json:"name"`
 	Mount                string   `json:"mount"`
@@ -290,6 +320,11 @@ type Config struct {
 	// Internal Streamer (AutoDJ)
 	AutoDJs []*AutoDJConfig `json:"autodjs"`
 
+	// MediaRoots bounds the AutoDJ directory browser. Only paths at or
+	// below one of these are listable; everything else is refused. Leave
+	// it unset to accept the defaults BrowsableRoots computes.
+	MediaRoots []string `json:"media_roots,omitempty"`
+
 	// Ingest (RTMP/SRT)
 	Ingest *IngestConfig `json:"ingest"`
 
@@ -381,7 +416,7 @@ func LoadConfig(path string) (*Config, error) {
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
-	config := &Config{}
+	config := &Config{MaxListeners: 100}
 	err = decoder.Decode(config)
 	if err != nil {
 		return nil, err
@@ -408,9 +443,6 @@ func (config *Config) setBasicDefaults() {
 	}
 	if config.AdminUser == "" {
 		config.AdminUser = "admin"
-	}
-	if config.MaxListeners == 0 {
-		config.MaxListeners = 100
 	}
 	if config.PageTitle == "" {
 		config.PageTitle = "TinyIce"
@@ -478,6 +510,7 @@ func (config *Config) initMapsAndArrays() {
 	if config.AutoDJs == nil {
 		config.AutoDJs = make([]*AutoDJConfig, 0)
 	}
+	normalizeAutoDJFormats(config)
 	if config.OIDCProviders == nil {
 		config.OIDCProviders = make([]*OIDCProvider, 0)
 	}
@@ -502,7 +535,11 @@ func (config *Config) initMapsAndArrays() {
 func (config *Config) handleMigrations() {
 	// Migration/Backward compatibility — lift a legacy top-level
 	// AdminUser/AdminPassword pair into the unified Users map.
-	if config.AdminUser != "" && config.Users[config.AdminUser] == nil {
+	// Only when there are no users at all. Lifting whenever the legacy
+	// name was missing meant a superadmin who had deleted the original
+	// account (or renamed it) got it silently recreated on every restart,
+	// with the original password from the legacy admin_password field.
+	if config.AdminUser != "" && len(config.Users) == 0 {
 		config.Users[config.AdminUser] = &User{
 			Username: config.AdminUser,
 			Password: config.AdminPassword,
@@ -515,10 +552,32 @@ func (config *Config) handleMigrations() {
 	// That line is gone — the Enabled flag is now honoured as persisted.
 }
 
+// configMapMu guards every map inside Config (Users, Mounts, VisibleMounts,
+// DisabledMounts, AdvancedMounts, FallbackMounts and each User's Mounts)
+// against concurrent iteration and mutation. SaveConfig marshals the live
+// struct — reflect walks those maps — and it runs from a background timer
+// (API-token last-used tracking) as well as from handlers, so any handler
+// mutating a map at that moment hit Go's fatal "concurrent map iteration
+// and map write", which is not a panic and ends the process. Mutators
+// take Lock() around the write; SaveConfig takes the read side. Never
+// call SaveConfig while holding Lock().
+var configMapMu sync.RWMutex
+
+// LockMaps / UnlockMaps bracket a mutation of any Config map. (Not
+// named Lock/Unlock: that would make Config a sync.Locker in vet's eyes
+// and flag every by-value use of the struct.)
+func (c *Config) RLockMaps()   { configMapMu.RLock() }
+func (c *Config) RUnlockMaps() { configMapMu.RUnlock() }
+
+func (c *Config) LockMaps()   { configMapMu.Lock() }
+func (c *Config) UnlockMaps() { configMapMu.Unlock() }
+
 func (c *Config) SaveConfig() error {
 	configSaveMu.Lock()
 	defer configSaveMu.Unlock()
+	configMapMu.RLock()
 	data, err := json.MarshalIndent(c, "", "    ")
+	configMapMu.RUnlock()
 	if err != nil {
 		return err
 	}

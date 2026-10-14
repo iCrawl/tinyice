@@ -2,6 +2,8 @@ package relay
 
 import (
 	"bytes"
+	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -38,6 +40,10 @@ import (
 //	stream.Broadcast(audioData, relayInstance)
 //	offset, signal := stream.Subscribe("listener-id", 32*1024)
 type Stream struct {
+	producerIntent       string
+	playback             MetadataChange
+	producerLastProgress time.Time
+
 	// Basic stream information
 	MountName   string // Mount point path (e.g., "/stream", "/live")
 	ContentType string // MIME type (e.g., "audio/mpeg", "audio/ogg")
@@ -50,8 +56,10 @@ type Stream struct {
 	// Timing and source information
 	Started          time.Time // When the stream was created
 	SourceIP         string    // IP address of the source client
+	sourceCloser     func()    // terminates the source connection (see KickSource)
 	LastDataReceived time.Time // Last time data was received from source
-	sourceGeneration int64     // Monotonic token for replacing same-mount sources
+	sourceGeneration int64
+	sourceClaimed    bool
 
 	// Stream state and visibility
 	Enabled      bool // Whether the stream is accepting connections
@@ -153,50 +161,50 @@ type Stream struct {
 //	    // Handle Ogg/Opus specific logic
 //	}
 func (s *Stream) IsOgg() bool {
+	// ContentType is written under s.mu by every ingest (source connect,
+	// AutoDJ track start, WebRTC OnTrack); read it the same way. No
+	// caller holds s.mu when calling this (audited), so the RLock here
+	// is not recursive.
+	s.mu.RLock()
 	ct := strings.ToLower(s.ContentType)
+	s.mu.RUnlock()
 	return strings.Contains(ct, "ogg") || strings.Contains(ct, "opus")
 }
 
-// SetSourceIP records the source address under the stream mutex so readers
-// (Snapshot, listener handlers, status handlers) see a consistent value.
-// Use TryClaimSource for the Icecast SOURCE / RTMP / SRT paths where two
-// concurrent clients could race for the same mount; SetSourceIP is fine
-// for paths that own their stream by construction (relay pull, WebRTC
-// ingest, web-audio publisher) and just want a label for the dashboard.
-func (s *Stream) SetSourceIP(ip string) {
+func (s *Stream) ClaimSource(label string) (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.SourceIP = ip
+	if s.sourceClaimed || atomic.LoadInt32(&s.closed) != 0 {
+		return 0, false
+	}
+	s.sourceGeneration++
+	s.sourceClaimed = true
+	s.producerLastProgress = time.Time{}
+	s.producerIntent = ""
+	s.SourceIP = label
+	return s.sourceGeneration, true
 }
 
-// TryClaimSource atomically takes source ownership of this stream if it
-// has none, returning true. If the mount already has an active source
-// (SourceIP non-empty) it returns false WITHOUT changing state — the
-// caller MUST reject the new connection. Pair with ReleaseSource in a
-// defer.
-//
-// Without this, two concurrent SOURCE clients hitting the same mount
-// both pass auth, both call SetSourceIP, and both spawn read loops that
-// interleave bytes into the same ring buffer. Listeners then see two
-// MP3 / Ogg streams shredded together byte-by-byte and every decoder
-// errors out on missing frame headers. Observed in production with
-// robodj retrying a connect 3× within 25 ms on every restart.
-func (s *Stream) TryClaimSource(ip string) bool {
+func (s *Stream) SetSourceCloserIfCurrent(token int64, closer func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SourceIP != "" {
+	if token == 0 || token != s.sourceGeneration || !s.sourceClaimed {
 		return false
 	}
-	s.SourceIP = ip
+	s.sourceCloser = closer
 	return true
 }
 
-// ReleaseSource clears the source claim so the next TryClaimSource on
-// this stream succeeds. Idempotent.
-func (s *Stream) ReleaseSource() {
+// KickSource terminates the source connection if one is registered.
+// Safe to call with no source.
+func (s *Stream) KickSource() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.SourceIP = ""
+	fn := s.sourceCloser
+	s.sourceCloser = nil
+	s.mu.Unlock()
+	if fn != nil {
+		fn()
+	}
 }
 
 // ReleaseSourceIfCurrent clears the source claim only if token still owns
@@ -206,7 +214,12 @@ func (s *Stream) ReleaseSourceIfCurrent(token int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if token != 0 && s.sourceGeneration == token {
+		s.sourceClaimed = false
+		if s.producerIntent != "paused" && s.producerIntent != "stopped" {
+			s.producerIntent = "ended"
+		}
 		s.SourceIP = ""
+		s.sourceCloser = nil
 	}
 }
 
@@ -218,21 +231,11 @@ func (s *Stream) GetSourceIP() string {
 	return s.SourceIP
 }
 
-// BeginSource marks a new source owner for this stream and returns a token
-// that later disconnect cleanup can use to avoid removing a successor source.
-func (s *Stream) BeginSource(ip string) int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.sourceGeneration++
-	s.SourceIP = ip
-	return s.sourceGeneration
-}
-
 // IsCurrentSource reports whether token still owns this stream's source slot.
 func (s *Stream) IsCurrentSource(token int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return token != 0 && s.sourceGeneration == token
+	return token != 0 && s.sourceGeneration == token && s.sourceClaimed
 }
 
 // StoreVideoHeaders records the Annex-B SPS and PPS bytes for an H.264
@@ -623,9 +626,11 @@ func (s *Stream) DisconnectListeners() {
 // Example:
 //
 //	stream.Broadcast(audioChunk, relayInstance)
-func (s *Stream) Broadcast(data []byte, relay *Relay) {
+func (s *Stream) Broadcast(data []byte, relay *Relay) { s.broadcast(data, relay, 0) }
+
+func (s *Stream) broadcast(data []byte, relay *Relay, token int64) bool {
 	if atomic.LoadInt32(&s.closed) == 1 {
-		return
+		return false
 	}
 
 	// 1. Write phase — hold the write lock only for the bookkeeping
@@ -644,7 +649,14 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 	//    goroutines so we capture the listener slice under RLock
 	//    and signal outside any lock.
 	s.mu.Lock()
+	if atomic.LoadInt32(&s.closed) != 0 || (token != 0 && (!s.sourceClaimed || token != s.sourceGeneration)) {
+		s.mu.Unlock()
+		return false
+	}
 	s.LastDataReceived = time.Now()
+	if s.producerIntent == "" {
+		s.producerLastProgress = s.LastDataReceived
+	}
 	atomic.AddInt64(&relay.BytesIn, int64(len(data)))
 	atomic.AddInt64(&s.BytesIn, int64(len(data)))
 	if s.IsOggStream {
@@ -685,33 +697,32 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 	s.Buffer.Write(data)
 	s.mu.Unlock()
 
-	// 2. Signal phase — copy the listener channel slice under
-	//    RLock then drop the lock before sending. Subscribe /
-	//    Unsubscribe holds the write lock to mutate the map; an
-	//    Unsubscribe racing with a Broadcast can leave us holding a
-	//    reference to a channel that has been closed in the meantime.
-	//    A select-default does NOT protect against that — sending on
-	//    a closed channel panics regardless of select. The recover
-	//    inside the per-channel anon-func contains the panic to one
-	//    listener so a subscriber tearing down at the wrong moment
-	//    can't crash the source / encoder goroutine that called us.
+	// 2. Signal phase — under RLock, which is what makes it safe.
+	//
+	//    This used to snapshot the channels and send after dropping the
+	//    lock, with a recover() per send to contain the panic when
+	//    Close/Unsubscribe had closed a channel in between. That worked
+	//    in production but is a genuine data race (close vs send), which
+	//    the race detector reports on every run, and "recover from a
+	//    panic we know we are causing" is not a synchronisation strategy.
+	//
+	//    Holding RLock instead excludes Close and Unsubscribe (both take
+	//    the write lock) for the duration. The cost is bounded: every
+	//    send is non-blocking, so this is a map walk and at most one
+	//    channel write per listener — no I/O under the lock. RLock is
+	//    shared, so concurrent Broadcasts on other streams and readers
+	//    are unaffected.
 	s.mu.RLock()
-	chans := make([]chan struct{}, 0, len(s.listeners))
 	for _, ch := range s.listeners {
-		chans = append(chans, ch)
+		select {
+		case ch <- struct{}{}:
+			// signalled
+		default:
+			// already pending; slow listener, skip
+		}
 	}
 	s.mu.RUnlock()
-	for _, ch := range chans {
-		func(ch chan struct{}) {
-			defer func() { _ = recover() }()
-			select {
-			case ch <- struct{}{}:
-				// signalled
-			default:
-				// already pending; slow listener, skip
-			}
-		}(ch)
-	}
+	return true
 }
 
 // Subscribe adds a listener and returns its starting offset and a signal channel.
@@ -775,8 +786,23 @@ func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	// Read the head once, under the buffer's own mutex. Every branch
+	// below used to read the field directly — a data race against the
+	// source goroutine's Buffer.Write, and re-read often enough that two
+	// branches of one call could see different heads.
+	head := s.Buffer.HeadOffset()
+
 	// Create buffered signal channel for this listener
 	ch := make(chan struct{}, 1)
+	if atomic.LoadInt32(&s.closed) == 1 {
+		// The stream is already closed: Close() has walked the listener
+		// map and will never do so again, so registering here would leave
+		// a subscriber parked on a channel nobody ever closes or signals.
+		// Hand back a closed channel so the reader sees EOF immediately,
+		// which is what every caller does with a closed signal.
+		close(ch)
+		return head, ch
+	}
 	s.listeners[id] = ch
 
 	// Freshness gate: if the producer has been silent for >2s, the bytes
@@ -788,36 +814,56 @@ func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
 	// normal between-frame jitter but small enough that pauses between
 	// songs / brief flaps don't replay.
 	if !s.LastDataReceived.IsZero() && time.Since(s.LastDataReceived) > 2*time.Second {
-		return s.Buffer.Head, ch
+		return head, ch
 	}
 
 	// Start at current head minus burst size for instant playback
 	// This gives the listener immediate audio data instead of waiting for new data
-	start := s.Buffer.Head - int64(burstSize)
+	start := head - int64(burstSize)
 	if start < 0 {
 		start = 0
+	}
+
+	// A caller asking for no burst wants the LIVE EDGE (WebRTC and WHEP
+	// viewers do this; they run their own page sync from there). The
+	// alignment below walks BACKWARDS to the oldest tracked page when it
+	// can't find one at or after `start`, which for start == Head is
+	// always — so a burst-free subscriber was handed the oldest audio in
+	// the buffer and stayed seconds behind live for the whole session.
+	if burstSize <= 0 {
+		return head, ch
 	}
 
 	// For Ogg/Opus, align to the oldest known page boundary within the valid buffer range
 	// This is crucial for proper Opus decoding - listeners MUST start at page boundaries
 	if s.IsOggStream {
-		validStart := s.Buffer.Head - s.Buffer.Size
+		validStart := head - s.Buffer.Size
 		if validStart < 0 {
 			validStart = 0
 		}
 
-		// If we have an OggHead persistent storage, we want to start reading
-		// from the Buffer AFTER the initial headers to avoid duplicates.
-		if s.OggHeaderOffset > start {
-			start = s.OggHeaderOffset
+		// The current Ogg stream's headers are a HARD FLOOR, not a
+		// preference. Everything before OggHeaderOffset belongs to a
+		// previous Ogg stream with a different serial — the AutoDJ starts
+		// a fresh one per track, and the old header pages stay in the
+		// circular buffer. The floor used to be applied here and then
+		// undone by the alignment below (`start = oldestValid` walks
+		// backwards), so a listener could be handed several previous
+		// tracks' header pairs before any audio. ffmpeg skips to the
+		// chain that has audio; browsers latch onto the first chain,
+		// find it empty and play nothing. Measured on a live mount: five
+		// orphan OpusHead/OpusTags pairs, granule 0, in the first 515
+		// bytes.
+		floor := validStart
+		if s.OggHeaderOffset > floor && s.OggHeaderOffset <= head {
+			floor = s.OggHeaderOffset
 		}
-
-		if start < validStart {
-			start = validStart
+		if start < floor {
+			start = floor
 		}
 
 		// Prefer the oldest tracked page boundary that is still >= start and
-		// within the valid buffer range — this maximises the burst delivered
+		// within the valid range — this maximises the burst delivered
 		// to the listener. Falling back to LastPageOffset (newest page) used
 		// to cap the burst at near-zero whenever PageOffsets didn't happen
 		// to cover far enough back, which manifested as "client underrun
@@ -825,7 +871,7 @@ func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
 		bestAlign := int64(-1)
 		oldestValid := int64(-1)
 		for _, po := range s.PageOffsets {
-			if po < validStart || po == 0 {
+			if po < floor || po == 0 {
 				continue
 			}
 			if oldestValid < 0 || po < oldestValid {
@@ -839,27 +885,24 @@ func (s *Stream) Subscribe(id string, burstSize int) (int64, chan struct{}) {
 		case bestAlign >= 0:
 			start = bestAlign
 		case oldestValid >= 0:
-			// Intended start is older than any tracked page — use the
-			// oldest we have, which is still newer than the buffer tail.
+			// Intended start is older than any tracked page at or after
+			// the floor — use the oldest such page.
 			start = oldestValid
-		case s.LastPageOffset >= validStart && s.LastPageOffset > 0:
+		case s.LastPageOffset >= floor && s.LastPageOffset > 0:
 			// Absolute last resort: at least align on the most recent page.
 			start = s.LastPageOffset
 		default:
 			// Nothing tracked yet — fall back to burst-based offset.
-			start = s.Buffer.Head - int64(burstSize)
-			if start < validStart {
-				start = validStart
-			}
-			if start < 0 {
-				start = 0
+			start = head - int64(burstSize)
+			if start < floor {
+				start = floor
 			}
 		}
 	}
 
 	// Ensure we don't go back further than the buffer allows
-	if s.Buffer.Head-start > s.Buffer.Size {
-		start = s.Buffer.Head - s.Buffer.Size
+	if head-start > s.Buffer.Size {
+		start = head - s.Buffer.Size
 	}
 
 	return start, ch
@@ -941,6 +984,25 @@ func (s *Stream) UpdateMetadata(name, desc, genre, url, bitrate, contentType str
 	return changed
 }
 
+// SetBitrateIfUnknown records a measured bitrate (kbps) when the source
+// never advertised one. Encoders like Traktor send no Ice-Bitrate or
+// Ice-Audio-Info header, which otherwise leaves the mount showing 0k.
+// A bitrate the source did declare is never overwritten.
+func (s *Stream) SetBitrateIfUnknown(kbps int) bool {
+	if kbps <= 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	// Anything that doesn't parse to a positive number ("", "N/A", "0",
+	// "0.0", "-1") counts as undeclared.
+	if declared, err := strconv.ParseFloat(strings.TrimSpace(s.Bitrate), 64); err == nil && declared > 0 {
+		return false
+	}
+	s.Bitrate = strconv.Itoa(kbps)
+	return true
+}
+
 // SetCurrentSong updates the current song info thread-safely.
 //
 // History.Add issues several SQLite/GORM queries; running them under
@@ -949,25 +1011,82 @@ func (s *Stream) UpdateMetadata(name, desc, genre, url, bitrate, contentType str
 // lock, release it, then write to history outside.
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
-	changed := s.CurrentSong != song
-	mount := s.MountName
-	artist := s.Name
-	if changed {
-		s.CurrentSong = song
+	if s.CurrentSong == song && (song != "" || s.playback.PlaybackID == "") {
+		s.mu.Unlock()
+		return
 	}
+	mc := s.playbackLocked(song, "", time.Now(), relay, false)
 	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+}
 
-	if changed && relay != nil {
-		if relay.History != nil {
-			relay.History.Add(mount, song)
-		}
-		relay.NotifyMetadataChange(MetadataChange{
-			Mount:     mount,
-			Title:     song,
-			Artist:    artist,
-			StartedAt: time.Now(),
-		})
+func (s *Stream) playbackLocked(title, id string, started time.Time, relay *Relay, newPlayback bool) MetadataChange {
+	revision := s.playback.Revision + 1
+	if relay != nil {
+		revision = relay.metadataRevision.Add(1)
 	}
+	if newPlayback || (title != "" && id == "") {
+		id = fmt.Sprintf("%s-%d-%d", s.MountName, time.Now().UnixNano(), revision)
+	}
+	if title == "" && id == "" {
+		id = ""
+		started = time.Time{}
+	}
+	mc := MetadataChange{owner: s, Visible: s.Visible, Mount: s.MountName, Title: title, Artist: s.Name, StartedAt: started, PlaybackID: id, Revision: revision}
+	s.CurrentSong = title
+	s.playback = mc
+	return mc
+}
+
+func (s *Stream) ActivatePlayback(token int64, title string, relay *Relay) (MetadataChange, bool) {
+	s.mu.Lock()
+	if token == 0 || token != s.sourceGeneration || !s.sourceClaimed {
+		s.mu.Unlock()
+		return MetadataChange{}, false
+	}
+	started := time.Now()
+	mc := s.playbackLocked(title, "", started, relay, true)
+	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+	return mc, true
+}
+
+func (s *Stream) PlaybackSnapshot() MetadataChange {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.playback
+}
+
+func (s *Stream) MirrorPlayback(input MetadataChange, relay *Relay) {
+	s.mu.Lock()
+	if s.playback.PlaybackID == input.PlaybackID && s.playback.Title == input.Title && s.playback.StartedAt.Equal(input.StartedAt) {
+		s.mu.Unlock()
+		return
+	}
+	mc := s.playbackLocked(input.Title, input.PlaybackID, input.StartedAt, relay, false)
+	s.mu.Unlock()
+	s.publishPlayback(mc, relay)
+}
+
+func (s *Stream) publishPlayback(mc MetadataChange, relay *Relay) {
+	if relay == nil {
+		return
+	}
+	if relay.History != nil && mc.Title != "" {
+		relay.History.Add(mc.Mount, mc.Title)
+	}
+	relay.NotifyMetadataChange(mc)
+}
+
+func (s *Stream) RecordProducerProgress() {
+	s.mu.Lock()
+	s.producerLastProgress = time.Now()
+	s.mu.Unlock()
+}
+func (s *Stream) ProducerLastProgress() time.Time {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.producerLastProgress
 }
 
 // GetCurrentSong returns the current song info thread-safely
@@ -981,6 +1100,7 @@ func (s *Stream) ConfigureAutoDJOutput(name, bitrate, contentType string, visibl
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.Name = name
+	s.producerIntent = "playing"
 	s.Bitrate = bitrate
 	s.ContentType = contentType
 	s.Visible = visible
@@ -1009,3 +1129,77 @@ func (s *Stream) GetStartedTime() time.Time {
 	defer s.mu.RUnlock()
 	return s.Started
 }
+
+// SetContentTypeForTest sets ContentType under the stream mutex. Tests
+// need this because ContentType is written by ingest paths that a unit
+// test doesn't run; production code sets it inline while already holding
+// the lock.
+func (s *Stream) SetContentTypeForTest(ct string) {
+	s.mu.Lock()
+	s.ContentType = ct
+	s.mu.Unlock()
+}
+
+// HLSMuxableAudio reports whether this stream's audio codec is one the
+// MPEG-TS muxer can actually declare in a PMT. The muxer knows exactly
+// two audio stream types — 0x03 (MP3) and 0x0F (ADTS AAC) — so anything
+// else would be emitted as raw bytes under an MP3 stream type and every
+// player would reject the segment.
+//
+// The check is an allow-list rather than "not Ogg" on purpose: a FLAC or
+// Vorbis mount is just as unmuxable as an Opus one, and an allow-list
+// fails closed when a new ingest format appears. An empty ContentType
+// counts as MP3, which is the default a new Stream carries and what an
+// Icecast SOURCE that omits the header is assumed to be sending.
+//
+// Callers use this to decide whether to offer HLS for a mount at all.
+// Serving an undecodable playlist is worse than serving none: a browser
+// reports it as MEDIA_ERR_SRC_NOT_SUPPORTED with no indication of why.
+func (s *Stream) HLSMuxableAudio() bool {
+	s.mu.RLock()
+	ct := strings.ToLower(s.ContentType)
+	s.mu.RUnlock()
+	if ct == "" {
+		return true
+	}
+	// audio/mpeg, audio/mp3, audio/mpeg3 — MP3 (stream type 0x03).
+	if strings.Contains(ct, "mpeg") || strings.Contains(ct, "mp3") {
+		return true
+	}
+	// audio/aac, audio/aacp, audio/mp4a-latm — ADTS AAC (0x0F).
+	if strings.Contains(ct, "aac") || strings.Contains(ct, "mp4a") {
+		return true
+	}
+	return false
+}
+
+// MarkProducerAlive refreshes the stream's liveness timestamp without
+// recording any bytes. It exists for producers that are running on
+// schedule but deliberately emitting nothing — the encoders' idle gate,
+// which skips encoding while a mount has no listeners.
+//
+// Health is derived from LastDataReceived, and Broadcast is the only
+// other thing that sets it. Without this call an idle AutoDJ mount looks
+// silent to the HealthMonitor: it flaps to "degraded" after 5 s and is
+// auto-removed once past the dead timeout, so the mount disappears from
+// the dashboard and 404s the first listener who tries to tune in. The
+// producer is genuinely alive in that state, so saying so is accurate
+// rather than a papered-over health check — a mount whose encoder has
+// actually stopped still goes stale, because nothing calls this.
+func (s *Stream) MarkProducerAlive() {
+	s.mu.Lock()
+	s.LastDataReceived = time.Now()
+	if s.producerIntent == "" {
+		s.producerLastProgress = s.LastDataReceived
+	}
+	s.mu.Unlock()
+}
+
+func (s *Stream) IsVisible() bool { s.mu.RLock(); defer s.mu.RUnlock(); return s.Visible }
+
+func (s *Stream) SetProducerIntent(intent string) {
+	s.mu.Lock()
+	s.producerIntent = intent
+	s.mu.Unlock()
+}
+func (s *Stream) ProducerIntent() string { s.mu.RLock(); defer s.mu.RUnlock(); return s.producerIntent }

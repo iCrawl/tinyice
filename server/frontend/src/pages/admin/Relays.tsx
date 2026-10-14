@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals'
-import { useEffect, useRef } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
+import { reportError, showToast } from '../../lib/toast'
 import { Toggle } from '../../components/Toggle'
 
 interface Relay {
@@ -11,82 +12,142 @@ interface Relay {
   active: boolean
 }
 
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  return `${h}h ${m}m`
-}
-
-type RelaysStore = ReturnType<typeof createRelaysStore>
-
 function createRelaysStore() {
   const relays = signal<Relay[]>([])
   const loading = signal(true)
   const showForm = signal(false)
+  const editingMount = signal<string | null>(null)
   const formUrl = signal('')
   const formMount = signal('')
   const formPassword = signal('')
   const formBurst = signal(65536)
+  const formError = signal('')
 
-  return { relays, loading, showForm, formUrl, formMount, formPassword, formBurst }
-}
-
-function useRelaysStore() {
-  const storeRef = useRef<RelaysStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createRelaysStore()
+  function resetForm() {
+    formUrl.value = ''
+    formMount.value = ''
+    formPassword.value = ''
+    formBurst.value = 65536
+    editingMount.value = null
+    formError.value = ''
   }
-  return storeRef.current
-}
 
-async function load(store: RelaysStore) {
-  store.loading.value = true
-  try {
-    store.relays.value = await api.get<Relay[]>('/api/relays')
-  } catch { /* empty */ }
-  store.loading.value = false
-}
+  function openAddForm() {
+    resetForm()
+    showForm.value = true
+  }
 
-async function addRelay(store: RelaysStore) {
-  await api.post('/api/relays', {
-    url: store.formUrl.value,
-    mount: store.formMount.value,
-    password: store.formPassword.value || undefined,
-    burst_size: store.formBurst.value,
-  })
-  store.showForm.value = false
-  store.formUrl.value = ''
-  store.formMount.value = ''
-  store.formPassword.value = ''
-  store.formBurst.value = 65536
-  await load(store)
-}
+  function openEditForm(r: Relay) {
+    resetForm()
+    editingMount.value = r.mount
+    formUrl.value = r.url
+    formMount.value = r.mount
+    formBurst.value = r.burst_size || 65536
+    showForm.value = true
+  }
 
-async function toggleRelay(store: RelaysStore, mount: string) {
-  await api.post('/api/relays/toggle', { mount })
-  await load(store)
-}
+  function formatUptime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    return `${h}h ${m}m`
+  }
 
-async function removeRelay(store: RelaysStore, mount: string) {
-  await api.del(`/api/relays?mount=${encodeURIComponent(mount)}`)
-  await load(store)
-}
+  async function load() {
+    loading.value = true
+    try {
+      relays.value = await api.get<Relay[]>('/api/relays')
+    } catch (e) {
+      reportError(e, 'Failed to load relays')
+    }
+    loading.value = false
+  }
 
-function statusColor(r: Relay): string {
-  if (r.active) return 'bg-live'
-  if (r.enabled) return 'bg-yellow-400'
-  return 'bg-text-tertiary'
+  async function saveRelay() {
+    formError.value = ''
+    try {
+      await api.post('/api/relays', {
+        url: formUrl.value,
+        mount: editingMount.value || formMount.value,
+        password: formPassword.value || undefined,
+        burst_size: formBurst.value,
+      })
+      showForm.value = false
+      resetForm()
+      load()
+    } catch (e) {
+      formError.value = (e as Error).message || 'Save failed'
+    }
+  }
+
+  async function toggleRelay(mount: string) {
+    try {
+      await api.post('/api/relays/toggle', { mount })
+    } catch (e) {
+      reportError(e, `Failed to toggle relay ${mount}`)
+    }
+    load()
+  }
+
+  async function removeRelay(mount: string) {
+    try {
+      await api.del(`/api/relays?mount=${encodeURIComponent(mount)}`)
+      showToast('success', `Relay ${mount} removed`)
+    } catch (e) {
+      reportError(e, `Failed to remove relay ${mount}`)
+    }
+    load()
+  }
+
+  function statusColor(r: Relay): string {
+    if (r.active) return 'bg-live'
+    if (r.enabled) return 'bg-yellow-400'
+    return 'bg-text-tertiary'
+  }
+
+  return {
+    relays,
+    loading,
+    showForm,
+    editingMount,
+    formUrl,
+    formMount,
+    formPassword,
+    formBurst,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveRelay,
+    toggleRelay,
+    removeRelay,
+    statusColor,
+  }
 }
 
 export function Relays() {
-  const store = useRelaysStore()
-  const { relays, loading, showForm, formUrl, formMount, formPassword, formBurst } = store
-
-  useEffect(() => {
-    void load(store)
-  }, [])
+  const {
+    relays,
+    loading,
+    showForm,
+    editingMount,
+    formUrl,
+    formMount,
+    formPassword,
+    formBurst,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveRelay,
+    toggleRelay,
+    removeRelay,
+    statusColor,
+  } = useMemo(createRelaysStore, [])
+  useEffect(() => { load() }, [])
 
   return (
     <div class="p-7">
@@ -94,7 +155,7 @@ export function Relays() {
       <div class="flex items-center justify-between mb-6">
         <h1 class="text-xl font-bold text-text-primary">Relays</h1>
         <button
-          onClick={() => { showForm.value = true }}
+          onClick={openAddForm}
           class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
         >
           ADD RELAY
@@ -121,9 +182,17 @@ export function Relays() {
                   </div>
                 </div>
                 <div class="flex items-center gap-3 ml-4">
-                  <Toggle checked={r.enabled} onChange={() => { void toggleRelay(store, r.mount) }} label="Enable relay" />
+                  <Toggle checked={r.enabled} onChange={() => toggleRelay(r.mount)} label="Enable relay" />
                   <button
-                    onClick={() => { void removeRelay(store, r.mount) }}
+                    onClick={() => openEditForm(r)}
+                    title="Edit relay"
+                    aria-label="Edit relay"
+                    class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
+                  >
+                    <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
+                  </button>
+                  <button
+                    onClick={() => removeRelay(r.mount)}
                     title="Remove relay"
                     class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                   >
@@ -136,11 +205,13 @@ export function Relays() {
         </div>
       )}
 
-      {/* Add Relay Modal */}
+      {/* Add / Edit Relay Modal */}
       {showForm.value && (
         <div class="fixed inset-0 z-50 flex items-center justify-center bg-black/60">
           <div class="bg-surface-overlay border border-border rounded-xl p-6 max-w-md w-full mx-4">
-            <h2 class="text-lg font-bold text-text-primary mb-4">Add Relay</h2>
+            <h2 class="text-lg font-bold text-text-primary mb-4">
+              {editingMount.value ? `Edit Relay ${editingMount.value}` : 'Add Relay'}
+            </h2>
             <div class="flex flex-col gap-3">
               <div>
                 <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">UPSTREAM URL</label>
@@ -152,18 +223,22 @@ export function Relays() {
                   class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
                 />
               </div>
+              {!editingMount.value && (
+                <div>
+                  <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">LOCAL MOUNT</label>
+                  <input
+                    type="text"
+                    value={formMount.value}
+                    onInput={(e) => { formMount.value = (e.target as HTMLInputElement).value }}
+                    placeholder="/relay"
+                    class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
+                  />
+                </div>
+              )}
               <div>
-                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">LOCAL MOUNT</label>
-                <input
-                  type="text"
-                  value={formMount.value}
-                  onInput={(e) => { formMount.value = (e.target as HTMLInputElement).value }}
-                  placeholder="/relay"
-                  class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
-                />
-              </div>
-              <div>
-                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">PASSWORD (OPTIONAL)</label>
+                <label class="font-mono text-[10px] tracking-[2px] text-text-tertiary mb-1 block">
+                  {editingMount.value ? 'PASSWORD (LEAVE BLANK TO KEEP)' : 'PASSWORD (OPTIONAL)'}
+                </label>
                 <input
                   type="password"
                   value={formPassword.value}
@@ -180,16 +255,19 @@ export function Relays() {
                   class="w-full bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-2.5 text-text-primary font-mono text-sm focus:border-accent outline-none"
                 />
               </div>
+              {formError.value && (
+                <div class="text-danger font-mono text-xs">{formError.value}</div>
+              )}
             </div>
             <div class="flex justify-end gap-2 mt-6">
               <button
-                onClick={() => { showForm.value = false }}
+                onClick={() => { showForm.value = false; resetForm() }}
                 class="border border-border text-text-secondary font-mono text-xs px-4 py-2.5 rounded-lg hover:border-border-hover"
               >
                 CANCEL
               </button>
               <button
-                onClick={() => { void addRelay(store) }}
+                onClick={saveRelay}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 SAVE

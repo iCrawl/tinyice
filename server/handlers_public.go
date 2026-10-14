@@ -39,6 +39,14 @@ func (s *Server) handlePlayer(w http.ResponseWriter, r *http.Request) {
 	// mount URL and the HLS playlist.
 	_, hasVideo := s.Relay.GetStream(mount + "/video")
 	pageData["hasVideo"] = hasVideo
+	// hasHLS tells the player whether an HLS playlist for this mount can
+	// exist at all. It cannot when the audio codec is outside what the
+	// MPEG-TS muxer can declare (Opus, FLAC, Vorbis) — which is every
+	// WebRTC publisher. Without this the player attached hls.js to a
+	// playlist the server refuses to build and the browser reported
+	// MEDIA_ERR_SRC_NOT_SUPPORTED; with it the player goes straight to
+	// WHEP, which carries Opus + H.264 natively.
+	pageData["hasHLS"] = stream.HLSMuxableAudio()
 	s.shell.Render(w, "player", snap.Name+" — "+s.Config.PageTitle, pageData)
 }
 
@@ -85,24 +93,8 @@ func (s *Server) handleEmbed(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleExplore(w http.ResponseWriter, r *http.Request) {
-	allStreams := s.Relay.Snapshot()
-	var streamList []map[string]interface{}
-	for _, st := range allStreams {
-		if st.Visible {
-			streamList = append(streamList, map[string]interface{}{
-				"mount":     st.MountName,
-				"title":     st.CurrentSong,
-				"artist":    st.Name,
-				"format":    st.ContentType,
-				"bitrate":   st.Bitrate,
-				"listeners": st.ListenersCount,
-				"live":      st.SourceIP != "",
-			})
-		}
-	}
-
 	pageData := s.BasePageData("")
-	pageData["streams"] = streamList
+	pageData["streams"] = s.visibleStreamList()
 	s.shell.Render(w, "explore", "Explore — "+s.Config.PageTitle, pageData)
 }
 

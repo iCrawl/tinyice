@@ -1,64 +1,56 @@
-import { useEffect, useRef } from 'preact/hooks'
+import { useMemo, useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { EqBars } from '@/components/EqBars'
 import { createSSE } from '@/lib/sse'
+import { createMetadataCallbacks } from '@/lib/metadata'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
-
-type EmbedStore = ReturnType<typeof createEmbedStore>
-
-function createEmbedStore(initialData: Partial<PlayerData>) {
-  const title = signal(initialData.title || '')
-  const artist = signal(initialData.artist || '')
+function createEmbedStore() {
+  const title = signal(data.title || '')
+  const artist = signal(data.artist || '')
   const playing = signal(false)
 
-  return { title, artist, playing }
-}
-
-function useEmbedStore(initialData: Partial<PlayerData>) {
-  const storeRef = useRef<EmbedStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createEmbedStore(initialData)
+  return {
+    title,
+    artist,
+    playing,
   }
-  return storeRef.current
 }
 
 export function Embed() {
-  const { title, artist, playing } = useEmbedStore(data)
+  const {
+    title,
+    artist,
+    playing,
+  } = useMemo(createEmbedStore, [])
   const audioRef = useRef<HTMLAudioElement>(null)
-  const mountPath = data.mount ? (data.mount.startsWith('/') ? data.mount : `/${data.mount}`) : null
 
   useEffect(() => {
-    const sse = createSSE('/events')
-
-    sse.on('metadata', (evt) => {
-      if (evt.mount === data.mount) {
-        title.value = evt.title
-        artist.value = evt.artist
-      }
+    const metadata = createMetadataCallbacks({
+      mount: data.mount,
+      initial: { title: title.value, artist: artist.value },
+      update(current) {
+        title.value = current.title
+        artist.value = current.artist
+      },
     })
-
-    sse.on('stream', (evt) => {
-      if (evt.mount === data.mount) {
-        title.value = evt.title
-        artist.value = evt.artist
-      }
-    })
+    const sse = createSSE('/events', metadata.onOpen)
+    sse.on('metadata', metadata.metadata)
+    sse.on('stream', metadata.stream)
 
     return () => sse.close()
   }, [])
 
   function togglePlay() {
     const audio = audioRef.current
-    if (!audio) return
+    if (!audio || !data.mount) return
     if (playing.value) {
       audio.pause()
       audio.src = ''
       playing.value = false
     } else {
-      if (!mountPath) return
-      audio.src = mountPath
+      audio.src = data.mount.startsWith('/') ? data.mount : `/${data.mount}`
       audio.play()
       playing.value = true
     }

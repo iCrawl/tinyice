@@ -2,10 +2,13 @@ package relay
 
 import (
 	"errors"
+	"fmt"
 	"sort"
 	"sync"
 	"time"
 )
+
+var ErrListenerCapacity = errors.New("mount listener capacity reached")
 
 type ListenerProtocol string
 
@@ -15,10 +18,15 @@ const (
 )
 
 type ListenerCommand struct {
+	MoveID      string
 	TargetMount string
 }
 
 type Listener struct {
+	pendingMount       string
+	moveID             string
+	moveStatus         string
+	moveError          string
 	mu                 sync.RWMutex
 	ID                 string
 	Protocol           ListenerProtocol
@@ -33,6 +41,10 @@ type Listener struct {
 }
 
 type ListenerSnapshot struct {
+	MoveID             string           `json:"move_id,omitempty"`
+	MoveStatus         string           `json:"move_status,omitempty"`
+	MoveError          string           `json:"move_error,omitempty"`
+	MoveDestination    string           `json:"move_destination,omitempty"`
 	ID                 string           `json:"id"`
 	Protocol           ListenerProtocol `json:"protocol"`
 	RequestedMount     string           `json:"requested_mount"`
@@ -49,7 +61,8 @@ func (l *Listener) snapshotAt(now time.Time) ListenerSnapshot {
 	defer l.mu.RUnlock()
 
 	out := ListenerSnapshot{
-		ID:              l.ID,
+		ID:     l.ID,
+		MoveID: l.moveID, MoveStatus: l.moveStatus, MoveError: l.moveError, MoveDestination: l.pendingMount,
 		Protocol:        l.Protocol,
 		RequestedMount:  l.RequestedMount,
 		CurrentMount:    l.CurrentMount,
@@ -89,36 +102,52 @@ func (l *Listener) SetRequestedMount(mount string) {
 }
 
 type ListenerRegistry struct {
-	mu        sync.RWMutex
-	listeners map[string]*Listener
-	byMount   map[string]map[string]*Listener
+	mu           sync.RWMutex
+	listeners    map[string]*Listener
+	byMount      map[string]map[string]*Listener
+	reservations map[string]map[string]struct{}
+	moveSequence uint64
 }
 
 func NewListenerRegistry() *ListenerRegistry {
 	return &ListenerRegistry{
-		listeners: make(map[string]*Listener),
-		byMount:   make(map[string]map[string]*Listener),
+		listeners:    make(map[string]*Listener),
+		reservations: make(map[string]map[string]struct{}),
+		byMount:      make(map[string]map[string]*Listener),
 	}
 }
 
-func (r *ListenerRegistry) Register(l *Listener) {
+func (r *ListenerRegistry) Register(l *Listener) { _ = r.Admit(l, 0) }
+func (r *ListenerRegistry) Admit(l *Listener, limit int) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
+	if _, exists := r.listeners[l.ID]; exists {
+		return errors.New("listener already registered")
+	}
 	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.CurrentMount == "" {
 		l.CurrentMount = l.RequestedMount
 	}
-	currentMount := l.CurrentMount
-	l.mu.Unlock()
-
-	r.listeners[l.ID] = l
-	if r.byMount[currentMount] == nil {
-		r.byMount[currentMount] = make(map[string]*Listener)
+	if limit > 0 && len(r.byMount[l.CurrentMount])+len(r.reservations[l.CurrentMount]) >= limit {
+		return ErrListenerCapacity
 	}
-	r.byMount[currentMount][l.ID] = l
+	r.listeners[l.ID] = l
+	if r.byMount[l.CurrentMount] == nil {
+		r.byMount[l.CurrentMount] = make(map[string]*Listener)
+	}
+	r.byMount[l.CurrentMount][l.ID] = l
+	return nil
 }
-
+func (r *ListenerRegistry) releaseReservationLocked(l *Listener) {
+	if l.pendingMount != "" {
+		delete(r.reservations[l.pendingMount], l.ID)
+		if len(r.reservations[l.pendingMount]) == 0 {
+			delete(r.reservations, l.pendingMount)
+		}
+		l.pendingMount = ""
+	}
+}
 func (r *ListenerRegistry) Unregister(id string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -128,6 +157,9 @@ func (r *ListenerRegistry) Unregister(id string) {
 		return
 	}
 	currentMount := l.CurrentMountName()
+	l.mu.Lock()
+	r.releaseReservationLocked(l)
+	l.mu.Unlock()
 	delete(r.listeners, id)
 	if mountListeners := r.byMount[currentMount]; mountListeners != nil {
 		delete(mountListeners, id)
@@ -176,70 +208,139 @@ func (r *ListenerRegistry) List() []ListenerSnapshot {
 	return out
 }
 
-func (r *ListenerRegistry) Move(id, target string, now time.Time) error {
+func (r *ListenerRegistry) ReserveMove(id, target string, limit int) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-
+	return r.reserveLocked(id, target, limit)
+}
+func (r *ListenerRegistry) reserveLocked(id, target string, limit int) (string, error) {
+	l, ok := r.listeners[id]
+	if !ok {
+		return "", errors.New("listener not found")
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.pendingMount != "" {
+		if l.pendingMount == target {
+			return l.moveID, nil
+		}
+		return "", errors.New("listener move already pending")
+	}
+	if target == l.CurrentMount {
+		return "", nil
+	}
+	if limit > 0 && len(r.byMount[target])+len(r.reservations[target]) >= limit {
+		return "", ErrListenerCapacity
+	}
+	r.moveSequence++
+	l.moveID = fmt.Sprintf("move-%d", r.moveSequence)
+	l.moveStatus = "pending"
+	l.moveError = ""
+	l.pendingMount = target
+	if r.reservations[target] == nil {
+		r.reservations[target] = make(map[string]struct{})
+	}
+	r.reservations[target][id] = struct{}{}
+	return l.moveID, nil
+}
+func (r *ListenerRegistry) CompleteMove(id, target string, now time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	l, ok := r.listeners[id]
 	if !ok {
 		return errors.New("listener not found")
 	}
-	currentMount := l.CurrentMountName()
-	if mountListeners := r.byMount[currentMount]; mountListeners != nil {
-		delete(mountListeners, id)
-		if len(mountListeners) == 0 {
-			delete(r.byMount, currentMount)
-		}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.CurrentMount == target && l.pendingMount == "" {
+		return nil
+	}
+	if l.pendingMount != target {
+		return errors.New("destination is not reserved")
+	}
+	delete(r.byMount[l.CurrentMount], id)
+	if len(r.byMount[l.CurrentMount]) == 0 {
+		delete(r.byMount, l.CurrentMount)
 	}
 	if r.byMount[target] == nil {
 		r.byMount[target] = make(map[string]*Listener)
 	}
-	l.mu.Lock()
+	r.byMount[target][id] = l
 	l.CurrentMount = target
 	l.LastStreamSwitchAt = now
-	l.mu.Unlock()
-	r.byMount[target][id] = l
+	l.moveStatus = "completed"
+	r.releaseReservationLocked(l)
 	return nil
 }
-
-func (r *ListenerRegistry) RequestMove(id, target string) error {
-	r.mu.RLock()
-	l, ok := r.listeners[id]
-	r.mu.RUnlock()
-	if !ok {
-		return errors.New("listener not found")
-	}
-	if l.MoveCh == nil {
-		return errors.New("listener move unsupported")
-	}
-
-	cmd := ListenerCommand{TargetMount: target}
-	select {
-	case l.MoveCh <- cmd:
-		return nil
-	default:
-	}
-
-	select {
-	case <-l.MoveCh:
-	default:
-	}
-
-	select {
-	case l.MoveCh <- cmd:
-		return nil
-	default:
-		return errors.New("listener move queue unavailable")
+func (r *ListenerRegistry) FailMove(id, reason string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if l := r.listeners[id]; l != nil {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		if l.pendingMount != "" {
+			l.moveStatus = "failed"
+			l.moveError = reason
+			r.releaseReservationLocked(l)
+		}
 	}
 }
-
+func (r *ListenerRegistry) Move(id, target string, now time.Time) error {
+	if _, err := r.ReserveMove(id, target, 0); err != nil {
+		return err
+	}
+	return r.CompleteMove(id, target, now)
+}
+func (r *ListenerRegistry) RequestMove(id, target string) error {
+	_, err := r.RequestMoveWithLimit(id, target, 0)
+	return err
+}
+func (r *ListenerRegistry) RequestMoveWithLimit(id, target string, limit int) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l := r.listeners[id]
+	if l == nil {
+		return "", errors.New("listener not found")
+	}
+	if l.Protocol == ListenerProtocolWebRTC || l.MoveCh == nil {
+		return "", errors.New("listener move unsupported")
+	}
+	l.mu.RLock()
+	pending := l.pendingMount != ""
+	l.mu.RUnlock()
+	if pending {
+		return "", errors.New("listener move already pending")
+	}
+	moveID, err := r.reserveLocked(id, target, limit)
+	if err != nil {
+		return "", err
+	}
+	select {
+	case l.MoveCh <- ListenerCommand{TargetMount: target, MoveID: moveID}:
+		return moveID, nil
+	default:
+		l.mu.Lock()
+		l.moveStatus = "failed"
+		l.moveError = "listener move queue unavailable"
+		r.releaseReservationLocked(l)
+		l.mu.Unlock()
+		return "", errors.New("listener move queue unavailable")
+	}
+}
 func (r *ListenerRegistry) Disconnect(id string) error {
-	r.mu.RLock()
-	l, ok := r.listeners[id]
-	r.mu.RUnlock()
-	if !ok {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	l := r.listeners[id]
+	if l == nil {
 		return errors.New("listener not found")
 	}
+	l.mu.Lock()
+	r.releaseReservationLocked(l)
+	if l.moveStatus == "pending" {
+		l.moveStatus = "failed"
+		l.moveError = "listener disconnected"
+	}
+	l.mu.Unlock()
 	if l.DisconnectCh != nil {
 		select {
 		case <-l.DisconnectCh:

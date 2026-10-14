@@ -1,4 +1,5 @@
-import type { StatsEvent, StreamEvent, AutoDJEvent, StreamInfo } from '../types'
+import type { StatsEvent, StreamEvent, AutoDJEvent, MetadataEvent } from '../types'
+import type { GeoCity } from '../components/LiveGeoMap'
 import { redirectToLogin } from './api'
 
 // EventSource doesn't surface HTTP status codes — onerror just fires
@@ -22,16 +23,19 @@ async function probeAuth(url: string) {
 }
 
 type SSEEventMap = {
+  metadata: MetadataEvent
   stats: StatsEvent
   stream: StreamEvent
   autodj: AutoDJEvent
-  streams: StreamInfo[]
-  metadata: { mount: string; title: string; artist: string }
+  // Emitted by /admin/events on every tick (server/handlers_api.go).
+  // It was missing here, so the dashboard and kiosk subscribers to it
+  // didn't typecheck.
+  geo: GeoCity[]
 }
 
 type SSECallback<K extends keyof SSEEventMap> = (data: SSEEventMap[K]) => void
 
-export function createSSE(url: string) {
+export function createSSE(url: string, onOpen?: () => void) {
   let source: EventSource | null = null
   const listeners = new Map<string, Set<Function>>()
   // attached tracks which SSE event types we've already called
@@ -63,7 +67,7 @@ export function createSSE(url: string) {
     if (closed) return
     source = new EventSource(url)
     attached = new Set()
-    source.onopen = () => { reconnectDelay = 1000 }
+    source.onopen = () => { reconnectDelay = 1000; onOpen?.() }
     source.onerror = () => {
       source?.close()
       source = null

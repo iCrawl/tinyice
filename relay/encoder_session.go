@@ -14,6 +14,7 @@ type PCMFrameWriter interface {
 }
 
 type MP3EncoderSession struct {
+	token      int64
 	stream     *Stream
 	relay      *Relay
 	stats      *int64
@@ -21,7 +22,10 @@ type MP3EncoderSession struct {
 	sampleRate int
 }
 
-func NewMP3EncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate int, stats *int64) (*MP3EncoderSession, error) {
+func NewMP3EncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate int, stats *int64, token int64) (*MP3EncoderSession, error) {
+	if !relay.HasSourceClaim(stream, token) {
+		return nil, ErrSourceOwnershipLost
+	}
 	if sampleRate <= 0 {
 		sampleRate = 44100
 	}
@@ -29,7 +33,7 @@ func NewMP3EncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate int,
 	if bitrate > 0 && bitrate != 128 {
 		applyShineBitrate(encoder, sampleRate, bitrate)
 	}
-	return &MP3EncoderSession{
+	return &MP3EncoderSession{token: token,
 		stream:     stream,
 		relay:      relay,
 		stats:      stats,
@@ -39,13 +43,22 @@ func NewMP3EncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate int,
 }
 
 func (s *MP3EncoderSession) WriteFrame(frame []int16) error {
-	writer := &streamWriter{stream: s.stream, relay: s.relay, stats: s.stats}
-	return s.encoder.Write(writer, frame)
+	if !s.relay.HasSourceClaim(s.stream, s.token) {
+		return ErrSourceOwnershipLost
+	}
+	writer := &streamWriter{token: s.token, stream: s.stream, relay: s.relay, stats: s.stats}
+	encoded, n := s.encoder.EncodeBufferInterleaved(frame)
+	if n == 0 {
+		return nil
+	}
+	_, err := writer.Write(encoded[:n])
+	return err
 }
 
 func (s *MP3EncoderSession) Close() error { return nil }
 
 type OpusEncoderSession struct {
+	token        int64
 	stream       *Stream
 	relay        *Relay
 	stats        *int64
@@ -55,7 +68,10 @@ type OpusEncoderSession struct {
 	granulePos   uint64
 }
 
-func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, channels int, stats *int64) (*OpusEncoderSession, error) {
+func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, channels int, stats *int64, token int64) (*OpusEncoderSession, error) {
+	if !relay.HasSourceClaim(stream, token) {
+		return nil, ErrSourceOwnershipLost
+	}
 	const encodeSampleRate = 48000
 	const frameMS = 20
 	const frameSize = encodeSampleRate * frameMS / 1000
@@ -75,7 +91,7 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 		enc.SetBitrate(bitrate * 1000)
 	}
 
-	writer := &streamWriter{stream: stream, relay: relay, stats: stats, capture: true}
+	writer := &streamWriter{token: token, stream: stream, relay: relay, stats: stats, capture: true}
 	pw := ogg.NewPacketWriter(writer, uint32(time.Now().UnixNano()))
 
 	head := ogg.OpusHead{
@@ -88,7 +104,10 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 		enc.Close()
 		return nil, err
 	}
-	pw.Flush()
+	if err := pw.Flush(); err != nil {
+		enc.Close()
+		return nil, err
+	}
 
 	tags := ogg.OpusTags{Vendor: "tinyice-opus"}
 	tagsPacket, _ := ogg.BuildOpusTagsPacket(tags)
@@ -96,12 +115,15 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 		enc.Close()
 		return nil, err
 	}
-	pw.Flush()
+	if err := pw.Flush(); err != nil {
+		enc.Close()
+		return nil, err
+	}
 
 	stream.StoreOggHead(writer.headerBuf.Bytes(), stream.Buffer.HeadOffset())
 	writer.capture = false
 
-	return &OpusEncoderSession{
+	return &OpusEncoderSession{token: token,
 		stream:       stream,
 		relay:        relay,
 		stats:        stats,
@@ -112,6 +134,9 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 }
 
 func (s *OpusEncoderSession) WriteFrame(frame []int16) error {
+	if !s.relay.HasSourceClaim(s.stream, s.token) {
+		return ErrSourceOwnershipLost
+	}
 	packet := make([]byte, 4000)
 	n, err := s.encoder.Encode(frame, s.frameSize, packet)
 	if err != nil {
@@ -122,8 +147,7 @@ func (s *OpusEncoderSession) WriteFrame(frame []int16) error {
 	if err := s.packetWriter.WritePacket(packet[:n], s.granulePos, false, false); err != nil {
 		return err
 	}
-	s.packetWriter.Flush()
-	return nil
+	return s.packetWriter.Flush()
 }
 
 func (s *OpusEncoderSession) Close() error {

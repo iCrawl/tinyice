@@ -147,8 +147,8 @@ func TestAPIMoveListenerQueuesHTTPMoveCommand(t *testing.T) {
 
 	s.apiMoveListener(rr, req)
 
-	if rr.Code != http.StatusOK {
-		t.Fatalf("expected 200, got %d: %s", rr.Code, rr.Body.String())
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("expected pending 202, got %d: %s", rr.Code, rr.Body.String())
 	}
 
 	select {
@@ -202,8 +202,8 @@ func TestAPIMoveListenerSwitchesHTTPPlaybackMount(t *testing.T) {
 	moveRR := httptest.NewRecorder()
 
 	s.apiMoveListener(moveRR, moveReq)
-	if moveRR.Code != http.StatusOK {
-		t.Fatalf("expected move 200, got %d: %s", moveRR.Code, moveRR.Body.String())
+	if moveRR.Code != http.StatusAccepted {
+		t.Fatalf("expected pending move 202, got %d: %s", moveRR.Code, moveRR.Body.String())
 	}
 
 	deadline = time.After(time.Second)

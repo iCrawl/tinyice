@@ -302,9 +302,11 @@ await pc.setRemoteDescription(answer)`,
                 label: 'TypeScript',
                 language: 'typescript',
                 code: `const source = new EventSource('/events')
-source.addEventListener('metadata', (e) => {
-  const { mount, title, artist } = JSON.parse(e.data)
-  console.log(\`Now playing on \${mount}: \${title} \u2014 \${artist}\`)
+// One 'stream' event per mount, twice a second: title is the current
+// song, artist is the stream name.
+source.addEventListener('stream', (e) => {
+  const { mount, title, artist, listeners } = JSON.parse(e.data)
+  console.log(\`Now playing on \${mount}: \${title} \u2014 \${artist} (\${listeners} listening)\`)
 })`,
               }]} />
             </section>
@@ -347,7 +349,6 @@ source.addEventListener('metadata', (e) => {
                 <a
                   href="/api/docs"
                   target="_blank"
-                  rel="noopener noreferrer"
                   class="group flex items-center gap-4 rounded-lg border border-accent/30 bg-accent/5 hover:bg-accent/10 p-5 transition-colors"
                 >
                   <div class="w-10 h-10 rounded-lg bg-accent/15 flex items-center justify-center flex-shrink-0">
@@ -372,7 +373,6 @@ source.addEventListener('metadata', (e) => {
                 <a
                   href="/api/openapi.yaml"
                   target="_blank"
-                  rel="noopener noreferrer"
                   class="group flex items-center gap-4 rounded-lg border border-border hover:border-accent/30 bg-surface-raised p-5 transition-colors"
                 >
                   <div class="w-10 h-10 rounded-lg bg-surface-overlay flex items-center justify-center flex-shrink-0">

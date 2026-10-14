@@ -1,8 +1,6 @@
+import { useMemo } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
-import { useRef } from 'preact/hooks'
 import { startRegistration } from '@simplewebauthn/browser'
-
-type SetupStore = ReturnType<typeof createSetupStore>
 
 function createSetupStore() {
   const step = signal(0)
@@ -12,8 +10,9 @@ function createSetupStore() {
   const confirmPassword = signal('')
   const error = signal('')
   const loading = signal(false)
-  const setupResult = signal<any>(null)
+  const setupResult = signal<{ default_source_pass: string; live_mount_pass: string } | null>(null)
   const passkeyRegistered = signal(false)
+
   const passwordsMatch = computed(() => password.value === confirmPassword.value)
 
   return {
@@ -30,14 +29,6 @@ function createSetupStore() {
   }
 }
 
-function useSetupStore() {
-  const storeRef = useRef<SetupStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createSetupStore()
-  }
-  return storeRef.current
-}
-
 export function Setup() {
   const {
     step,
@@ -50,8 +41,7 @@ export function Setup() {
     setupResult,
     passkeyRegistered,
     passwordsMatch,
-  } = useSetupStore()
-
+  } = useMemo(createSetupStore, [])
   async function verifyToken() {
     loading.value = true
     error.value = ''
@@ -159,94 +149,60 @@ export function Setup() {
         <div class="bg-surface-raised border border-border rounded-xl p-8">
           {/* Step 0: Token */}
           {step.value === 0 && (
-            <form
-              class="flex flex-col gap-4"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void verifyToken()
-              }}
-            >
+            <div class="flex flex-col gap-4">
               <h2 class="text-text-primary font-mono text-lg font-bold">Welcome to TinyIce</h2>
               <p class="text-text-secondary text-sm">Enter the setup token from your terminal to begin.</p>
-              <div class="flex flex-col gap-2">
-                <label htmlFor="setup-token" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  SETUP TOKEN
-                </label>
-                <input
-                  id="setup-token"
-                  type="text"
-                  value={token.value}
-                  onInput={(e) => token.value = (e.target as HTMLInputElement).value}
-                  placeholder="Setup Token"
-                  spellcheck={false}
-                  class={inputClass}
-                  autoFocus
-                />
-              </div>
-              <button type="submit" disabled={loading.value || !token.value} class={btnClass}>
-                {loading.value ? 'Verifying…' : 'Continue'}
+              <input
+                type="text"
+                value={token.value}
+                onInput={(e) => token.value = (e.target as HTMLInputElement).value}
+                placeholder="Setup Token"
+                aria-label="Setup token"
+                class={inputClass}
+                autoFocus
+              />
+              <button onClick={verifyToken} disabled={loading.value || !token.value} class={btnClass}>
+                {loading.value ? 'Verifying...' : 'Continue'}
               </button>
-            </form>
+            </div>
           )}
 
           {/* Step 1: Credentials */}
           {step.value === 1 && (
-            <form
-              class="flex flex-col gap-4"
-              onSubmit={(e) => {
-                e.preventDefault()
-                void completeSetup()
-              }}
-            >
+            <div class="flex flex-col gap-4">
               <h2 class="text-text-primary font-mono text-lg font-bold">Set Admin Credentials</h2>
               <p class="text-text-secondary text-sm">Choose your admin username and password.</p>
-              <div class="flex flex-col gap-2">
-                <label htmlFor="setup-username" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  USERNAME
-                </label>
-                <input
-                  id="setup-username"
-                  type="text"
-                  value={username.value}
-                  onInput={(e) => username.value = (e.target as HTMLInputElement).value}
-                  placeholder="Username"
-                  autocomplete="username"
-                  spellcheck={false}
-                  class={inputClass}
-                />
-              </div>
-              <div class="flex flex-col gap-2">
-                <label htmlFor="setup-password" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  PASSWORD
-                </label>
-                <input
-                  id="setup-password"
-                  type="password"
-                  value={password.value}
-                  onInput={(e) => password.value = (e.target as HTMLInputElement).value}
-                  placeholder="Password (min 8 characters)"
-                  autocomplete="new-password"
-                  class={inputClass}
-                />
-              </div>
-              <div class="flex flex-col gap-2">
-                <label htmlFor="setup-confirm-password" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  CONFIRM PASSWORD
-                </label>
-                <input
-                  id="setup-confirm-password"
-                  type="password"
-                  value={confirmPassword.value}
-                  onInput={(e) => confirmPassword.value = (e.target as HTMLInputElement).value}
-                  placeholder="Confirm Password"
-                  autocomplete="new-password"
-                  class={`${inputClass} ${confirmPassword.value && !passwordsMatch.value ? 'border-danger' : ''}`}
-                />
-              </div>
-              <button type="submit" disabled={loading.value || !username.value || !password.value || !passwordsMatch.value} class={btnClass}>
-                {loading.value ? 'Creating…' : 'Create Admin Account'}
+              <input
+                type="text"
+                value={username.value}
+                onInput={(e) => username.value = (e.target as HTMLInputElement).value}
+                placeholder="Username"
+                aria-label="Username"
+                autocomplete="username"
+                class={inputClass}
+              />
+              <input
+                type="password"
+                value={password.value}
+                onInput={(e) => password.value = (e.target as HTMLInputElement).value}
+                placeholder="Password (min 8 characters)"
+                aria-label="Password"
+                autocomplete="new-password"
+                class={inputClass}
+              />
+              <input
+                type="password"
+                value={confirmPassword.value}
+                onInput={(e) => confirmPassword.value = (e.target as HTMLInputElement).value}
+                placeholder="Confirm Password"
+                aria-label="Confirm password"
+                autocomplete="new-password"
+                class={`${inputClass} ${confirmPassword.value && !passwordsMatch.value ? 'border-danger' : ''}`}
+              />
+              <button onClick={completeSetup} disabled={loading.value || !username.value || !password.value || !passwordsMatch.value} class={btnClass}>
+                {loading.value ? 'Creating...' : 'Create Admin Account'}
               </button>
-            </form>
+            </div>
           )}
 
           {/* Step 2: Passkey (optional) */}
@@ -268,7 +224,7 @@ export function Setup() {
                 <>
                   <p class="text-text-secondary text-sm">Add a passkey for quick, passwordless login. You can skip this and add one later.</p>
                   <button onClick={registerPasskey} disabled={loading.value} class={btnSecondary}>
-                    {loading.value ? 'Registering…' : 'Register Passkey'}
+                    {loading.value ? 'Registering...' : 'Register Passkey'}
                   </button>
                 </>
               )}
@@ -284,7 +240,7 @@ export function Setup() {
           )}
 
           {error.value && (
-            <p class="text-danger text-sm mt-3 text-center" aria-live="polite">{error.value}</p>
+            <p class="text-danger text-sm mt-3 text-center">{error.value}</p>
           )}
 
           {/* Progress dots */}

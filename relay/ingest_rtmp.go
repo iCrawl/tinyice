@@ -246,15 +246,18 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 
 	h.mount = mount
 	h.stream = h.relay.GetOrCreateStream(mount)
-	h.sourceToken = h.stream.BeginSource(h.conn.RemoteAddr().String())
+	var claimed bool
+	h.sourceToken, claimed = h.stream.ClaimSource(h.conn.RemoteAddr().String())
+	if !claimed {
+		return fmt.Errorf("mount %s already has a live source", mount)
+	}
+	h.stream.SetSourceCloserIfCurrent(h.sourceToken, func() { _ = h.conn.Close() })
 	h.stream.mu.Lock()
 	h.stream.ContentType = "audio/mpeg" // default, may be updated on first audio data
 	h.stream.mu.Unlock()
 	h.started = time.Now()
 	if h.runtimeRegistry != nil {
-		rt := h.runtimeRegistry.GetOrCreate(mount)
-		rt.Stream = h.stream
-		h.runtimeRegistry.AttachSource(mount, SourceRTMP, "default")
+		h.runtimeRegistry.AttachClaim(h.stream, h.sourceToken, SourceRTMP, "default")
 	}
 
 	// Create a separate video stream with an 8 MB buffer up front, so we
@@ -263,7 +266,18 @@ func (h *rtmpHandler) OnPublish(_ *rtmp.StreamContext, timestamp uint32, cmd *rt
 	// untouched.
 	h.videoMount = mount + "/video"
 	h.videoStream = h.relay.GetOrCreateStreamSized(h.videoMount, 8*1024*1024)
-	h.videoSourceToken = h.videoStream.BeginSource(h.conn.RemoteAddr().String())
+	h.videoSourceToken, claimed = h.videoStream.ClaimSource(h.conn.RemoteAddr().String())
+	if !claimed {
+		h.stream.ReleaseSourceIfCurrent(h.sourceToken)
+		if h.runtimeRegistry != nil {
+			h.runtimeRegistry.DetachClaim(h.stream, h.sourceToken)
+		}
+		return fmt.Errorf("video mount already has a live source")
+	}
+	h.videoStream.SetSourceCloserIfCurrent(h.videoSourceToken, func() { _ = h.conn.Close() })
+	if h.runtimeRegistry != nil {
+		h.runtimeRegistry.AttachClaim(h.videoStream, h.videoSourceToken, SourceRTMP, "default")
+	}
 	h.videoStream.mu.Lock()
 	h.videoStream.ContentType = "video/h264"
 	h.videoStream.mu.Unlock()
@@ -282,7 +296,8 @@ func ptsFromFLVTimestamp(ms uint32) int64 {
 }
 
 // OnAudio handles incoming audio data from the RTMP stream.
-func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) error {
+func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) (err error) {
+	defer recoverIngestErr("rtmp", h.conn.RemoteAddr(), &err)
 	if h.stream == nil {
 		return nil
 	}
@@ -368,7 +383,9 @@ func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) error {
 	// Broadcast the raw audio data to the stream (for byte-level
 	// Icecast listeners) and publish a Frame to the hub (for HLS /
 	// other per-frame consumers). Audio has no B-frames so DTS == PTS.
-	h.stream.Broadcast(data, h.relay)
+	if !h.relay.PublishSource(h.stream, h.sourceToken, data) {
+		return ErrSourceOwnershipLost
+	}
 	if h.stream.Frames != nil {
 		frameData := make([]byte, len(data))
 		copy(frameData, data)
@@ -384,7 +401,8 @@ func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) error {
 }
 
 // OnVideo handles incoming video data from the RTMP stream.
-func (h *rtmpHandler) OnVideo(timestamp uint32, payload io.Reader) error {
+func (h *rtmpHandler) OnVideo(timestamp uint32, payload io.Reader) (err error) {
+	defer recoverIngestErr("rtmp", h.conn.RemoteAddr(), &err)
 	if h.videoStream == nil {
 		_, _ = io.ReadAll(payload)
 		return nil
@@ -456,7 +474,9 @@ func (h *rtmpHandler) OnVideo(timestamp uint32, payload io.Reader) error {
 				h.videoStream.Buffer.RecordKeyframe(h.videoStream.Buffer.HeadOffset())
 			}
 
-			h.videoStream.Broadcast(annexB, h.relay)
+			if !h.relay.PublishSource(h.videoStream, h.videoSourceToken, annexB) {
+				return ErrSourceOwnershipLost
+			}
 			// Feed the dashboard's video metrics sampler: resolution
 			// (parsed from the cached SPS, zero means "unchanged"),
 			// this frame's byte count, and whether it's a keyframe.
@@ -624,15 +644,18 @@ func (h *rtmpHandler) OnClose() {
 			"duration", time.Since(h.started),
 		)
 		if st, ok := h.relay.GetStream(h.mount); ok && st == h.stream && st.IsCurrentSource(h.sourceToken) {
-			h.relay.RemoveStream(h.mount)
+			h.relay.RemoveStreamIfCurrent(h.stream, h.sourceToken)
 			if h.runtimeRegistry != nil {
-				h.runtimeRegistry.Remove(h.mount)
+				h.runtimeRegistry.DetachClaim(h.stream, h.sourceToken)
 			}
 		}
 	}
 	if h.videoMount != "" {
 		if st, ok := h.relay.GetStream(h.videoMount); ok && st == h.videoStream && st.IsCurrentSource(h.videoSourceToken) {
-			h.relay.RemoveStream(h.videoMount)
+			h.relay.RemoveStreamIfCurrent(h.videoStream, h.videoSourceToken)
+			if h.runtimeRegistry != nil {
+				h.runtimeRegistry.DetachClaim(h.videoStream, h.videoSourceToken)
+			}
 		}
 	}
 }

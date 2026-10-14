@@ -1,37 +1,31 @@
+import { useMemo } from 'preact/hooks'
 import { signal } from '@preact/signals'
-import { useRef } from 'preact/hooks'
+import type { TinyIceBase } from '@/types'
 import { PasskeyButton } from '@/components/PasskeyButton'
 import { OIDCButtons } from '@/components/OIDCButtons'
 
-interface LoginPageData {
-  passkeysEnabled?: boolean
-  oidcProviders?: Array<{ id: string; name: string; icon: string }>
-}
-
-const pageData = (window.__TINYICE__ ?? {}) as LoginPageData
-
-type LoginStore = ReturnType<typeof createLoginStore>
-
 function createLoginStore() {
-  const error = signal('')
-  const loading = signal(false)
-
-  return { error, loading }
+  return { error: signal(''), loading: signal(false) }
 }
 
-function useLoginStore() {
-  const storeRef = useRef<LoginStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createLoginStore()
-  }
-  return storeRef.current
+// A second `declare global` for window.__TINYICE__ conflicted with the one
+// in types.ts, so this file never typechecked; TinyIceBase now carries the
+// login fields.
+const pageData = (window.__TINYICE__ || {}) as Partial<TinyIceBase>
+
+// Auth redirects carry where the user was headed (/kiosk sends ?next=).
+// Only same-origin absolute paths are followed; the server applies the
+// same rule to its own redirect.
+function nextPath(): string {
+  const raw = new URLSearchParams(window.location.search).get('next') || ''
+  if (!raw.startsWith('/') || raw.startsWith('//') || raw.startsWith('/\\')) return '/admin'
+  return raw
 }
 
 export function Login() {
-  const { error, loading } = useLoginStore()
-  const hasPasskeys = !!pageData.passkeysEnabled && typeof PublicKeyCredential !== 'undefined'
-  const oidcProviders = pageData.oidcProviders ?? []
-  const hasOIDC = oidcProviders.length > 0
+  const { error, loading } = useMemo(createLoginStore, [])
+  const hasPasskeys = pageData.passkeysEnabled && typeof PublicKeyCredential !== 'undefined'
+  const hasOIDC = pageData.oidcProviders && pageData.oidcProviders.length > 0
   const hasAlternateAuth = hasPasskeys || hasOIDC
 
   async function handleSubmit(e: Event) {
@@ -41,6 +35,7 @@ export function Login() {
 
     const form = e.target as HTMLFormElement
     const formData = new FormData(form)
+    formData.set('next', nextPath())
 
     try {
       const res = await fetch('/login', {
@@ -50,7 +45,7 @@ export function Login() {
       })
 
       if (res.ok || res.redirected) {
-        window.location.href = '/admin'
+        window.location.href = nextPath()
       } else {
         try {
           const data = await res.json()
@@ -84,7 +79,7 @@ export function Login() {
             {hasPasskeys && <PasskeyButton />}
 
             {/* OIDC provider buttons */}
-            {hasOIDC && <OIDCButtons providers={oidcProviders} />}
+            {hasOIDC && <OIDCButtons providers={pageData.oidcProviders!} />}
 
             {/* Divider */}
             {hasAlternateAuth && (
@@ -97,46 +92,35 @@ export function Login() {
 
             {/* Username/Password form */}
             <form onSubmit={handleSubmit} class="flex flex-col gap-4">
-              <div class="flex flex-col gap-2">
-                <label htmlFor="login-username" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  USERNAME
-                </label>
-                <input
-                  id="login-username"
-                  type="text"
-                  name="username"
-                  placeholder="Username"
-                  required
-                  autocomplete="username"
-                  spellcheck={false}
-                  class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-3 text-text-primary font-mono text-sm placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 transition-colors"
-                />
-              </div>
-              <div class="flex flex-col gap-2">
-                <label htmlFor="login-password" class="font-mono text-[10px] tracking-[2px] text-text-tertiary">
-                  PASSWORD
-                </label>
-                <input
-                  id="login-password"
-                  type="password"
-                  name="password"
-                  placeholder="Password"
-                  required
-                  autocomplete="current-password"
-                  class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-3 text-text-primary font-mono text-sm placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 transition-colors"
-                />
-              </div>
+              <input
+                type="text"
+                name="username"
+                aria-label="Username"
+                placeholder="Username"
+                required
+                autocomplete="username"
+                class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-3 text-text-primary font-mono text-sm placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 transition-colors"
+              />
+              <input
+                type="password"
+                name="password"
+                aria-label="Password"
+                placeholder="Password"
+                required
+                autocomplete="current-password"
+                class="bg-[rgba(255,255,255,0.03)] border border-border rounded-lg px-4 py-3 text-text-primary font-mono text-sm placeholder:text-text-tertiary focus:outline-none focus:border-accent/40 transition-colors"
+              />
               <button
                 type="submit"
                 disabled={loading.value}
                 class="bg-accent text-surface-base font-mono font-bold tracking-[1px] rounded-lg py-3 w-full text-sm hover:bg-accent/90 transition-colors disabled:opacity-50"
               >
-                {loading.value ? 'SIGNING IN…' : 'SIGN IN'}
+                {loading.value ? 'SIGNING IN...' : 'SIGN IN'}
               </button>
             </form>
 
             {error.value && (
-              <p class="text-danger text-sm text-center" aria-live="polite">{error.value}</p>
+              <p role="alert" class="text-danger text-sm text-center">{error.value}</p>
             )}
 
             {/* Request Access hint */}

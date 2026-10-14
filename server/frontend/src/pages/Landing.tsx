@@ -1,52 +1,72 @@
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { marked } from 'marked'
+import DOMPurify from 'dompurify'
 import { Nav } from '@/components/Nav'
 import { StreamCard } from '@/components/StreamCard'
+import { STREAM_TTL_MS } from '@/lib/liveStreams'
 import { createSSE } from '@/lib/sse'
 import type { LandingData, StreamInfo } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
-const streams = signal<StreamInfo[]>(data.streams ?? [])
-
-marked.setOptions({ breaks: true, gfm: true })
-
-function escapeHtml(input: string): string {
-  return input
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-    .replace(/'/g, '&#39;')
+function createLandingStore() {
+  return { streams: signal<StreamInfo[]>(data.streams ?? []), lastSeen: new Map<string, number>() }
 }
 
-function playerPath(mount: string): string {
-  return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
+// Configure marked for safe rendering
+marked.setOptions({ breaks: true, gfm: true })
+
+// Any admin can edit the landing markdown via Settings → Branding. Without
+// sanitisation, marked happily renders <script> / <img onerror=…> straight
+// into every visitor's DOM — admin-to-visitor XSS. Run every render through
+// DOMPurify before handing it to dangerouslySetInnerHTML.
+function renderSafeMarkdown(md: string): string {
+  const raw = marked.parse(md) as string
+  return DOMPurify.sanitize(raw, { USE_PROFILES: { html: true } })
 }
 
 export function Landing() {
+  const { streams, lastSeen } = useMemo(createLandingStore, [])
   useEffect(() => {
     const sse = createSSE('/events')
 
-    sse.on('streams', (updated) => {
-      streams.value = updated
-    })
 
     sse.on('stream', (evt) => {
+      lastSeen.set(evt.mount, Date.now())
       streams.value = streams.value.map((s) =>
         s.mount === evt.mount
-          ? { ...s, title: evt.title, artist: evt.artist, listeners: evt.listeners, live: true }
+          ? {
+              ...s,
+              title: evt.title,
+              artist: evt.artist,
+              listeners: evt.listeners,
+              // Bitrate can arrive after connect (measured for sources that
+              // declare none), so keep the last positive value from the event.
+              bitrate: Number(evt.bitrate) > 0 ? Number(evt.bitrate) : s.bitrate,
+              // The event says whether a source is connected; this used
+              // to hardcode true, so a mount that existed without a
+              // source showed as on air.
+              live: evt.live ?? true,
+            }
           : s
       )
     })
+    // A mount stops sending `stream` events when its source goes away;
+    // without this it stayed marked live on the page indefinitely.
+    const sweep = setInterval(() => {
+      const now = Date.now()
+      streams.value = streams.value.map((s) => {
+        const seen = lastSeen.get(s.mount)
+        if (seen === undefined) return s
+        return now - seen < STREAM_TTL_MS ? s : { ...s, live: false, listeners: 0 }
+      })
+    }, 2000)
 
-    sse.on('metadata', (evt) => {
-      streams.value = streams.value.map((s) =>
-        s.mount === evt.mount ? { ...s, title: evt.title, artist: evt.artist } : s
-      )
-    })
 
-    return () => sse.close()
+    return () => {
+      clearInterval(sweep)
+      sse.close()
+    }
   }, [])
 
   const liveStreams = streams.value.filter((s) => s.live)
@@ -57,10 +77,11 @@ export function Landing() {
   const customSubtitle = data.pageSubtitle && data.pageSubtitle !== 'Live Streaming Server powered by Go' ? data.pageSubtitle : ''
   const landingMarkdown = data.branding?.landingMarkdown || ''
   const isCustomized = !!(customTitle || customSubtitle || landingMarkdown)
-  const renderedMarkdown = landingMarkdown ? marked.parse(escapeHtml(landingMarkdown)) as string : ''
 
   return (
-    <div class="min-h-screen bg-surface-base relative overflow-hidden">
+    <div
+      class="min-h-screen bg-surface-base relative overflow-hidden"
+    >
       {/* Dot grid texture */}
       <div
         class="fixed inset-0 pointer-events-none z-0"
@@ -70,16 +91,16 @@ export function Landing() {
         }}
       />
 
-      {/* Ambient accent glow */}
+      {/* Ambient glow */}
       <div
         class="fixed top-0 right-0 w-[800px] h-[800px] pointer-events-none z-0"
         style={{
-          background: 'radial-gradient(ellipse at 80% 20%, rgba(var(--color-accent-rgb), 0.06) 0%, transparent 70%)',
+          background: 'radial-gradient(ellipse at 80% 20%, rgba(255,102,0,0.06) 0%, transparent 70%)',
         }}
       />
 
       {/* Nav */}
-      <Nav branding={data.branding} pageTitle={data.pageTitle} />
+      <Nav branding={data.branding ?? { logoUrl: null, accentColor: '#ff6600' }} pageTitle={data.pageTitle} />
 
       {/* Hero */}
       <main class="relative z-10 pt-14">
@@ -113,7 +134,7 @@ export function Landing() {
               {landingMarkdown ? (
                 <div
                   class="max-w-lg markdown-content"
-                  dangerouslySetInnerHTML={{ __html: renderedMarkdown }}
+                  dangerouslySetInnerHTML={{ __html: renderSafeMarkdown(landingMarkdown) }}
                 />
               ) : (
                 <p class="text-text-tertiary text-base leading-relaxed max-w-md">
@@ -128,7 +149,7 @@ export function Landing() {
                   <a
                     href="/admin"
                     class="font-mono text-xs tracking-widest font-bold px-6 py-3 rounded bg-accent text-surface-base hover:bg-accent/90 transition-colors"
-                    style={{ boxShadow: '0 0 20px rgba(var(--color-accent-rgb), 0.25)' }}
+                    style={{ boxShadow: '0 0 20px rgba(255,102,0,0.25)' }}
                   >
                     GET STARTED
                   </a>
@@ -187,7 +208,7 @@ export function Landing() {
                       key={stream.mount}
                       stream={stream}
                       onPlay={() => {
-                        window.location.href = playerPath(stream.mount)
+                        window.location.href = `/player/${stream.mount.replace(/^\//, '')}`
                       }}
                     />
                   ))}

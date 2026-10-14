@@ -52,8 +52,8 @@ func TestStoppedTranscoderStopsMirroringInputCurrentSong(t *testing.T) {
 	if !ok {
 		t.Fatal("expected transcoder output stream")
 	}
-	if got := out.GetCurrentSong(); got != "Artist - Title" {
-		t.Fatalf("expected output metadata to stop changing after transcoder stop, got %q", got)
+	if got := out.GetCurrentSong(); got != "" {
+		t.Fatalf("expected stopped output metadata to clear, got %q", got)
 	}
 }
 

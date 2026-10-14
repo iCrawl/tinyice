@@ -1,6 +1,8 @@
 # Restore Listener Management, Caps, And Burst Visibility
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -12,14 +14,14 @@ Restore live listener management, per-mount listener caps, and per-mount burst v
 
 ## Acceptance criteria
 
-- [ ] Admin/API surfaces list active HTTP and WebRTC playback listeners with protocol, current mount, requested mount, remote address, user agent, connection time, and selectable IDs.
-- [ ] Operators can disconnect individual listeners.
-- [ ] Operators can move supported HTTP listeners between mounts, and unsupported WebRTC moves return a clear conflict or unsupported response.
-- [ ] Per-mount listener caps are enforced in addition to global listener limits.
-- [ ] Per-mount listener caps persist through stream create/update flows.
-- [ ] Stream APIs and admin UI expose configured `burst_size` and effective burst size.
-- [ ] The integrated branch uses upstream's larger default listener burst when no per-mount override is configured.
-- [ ] Listener registry hooks do not remove upstream listener write deadlines, stream fanout fixes, or HLS/WHEP viewer counting.
+- [x] Admin/API surfaces list active HTTP and WebRTC playback listeners with protocol, current mount, requested mount, remote address, user agent, connection time, and selectable IDs.
+- [x] Operators can disconnect individual listeners.
+- [x] Operators can move supported HTTP listeners between mounts, and unsupported WebRTC moves return a clear conflict or unsupported response.
+- [x] Per-mount listener caps are enforced in addition to global listener limits.
+- [x] Per-mount listener caps persist through stream create/update flows.
+- [x] Stream APIs and admin UI expose configured `burst_size` and effective burst size.
+- [x] The integrated branch uses upstream's larger default listener burst when no per-mount override is configured.
+- [x] Listener registry hooks do not remove upstream listener write deadlines, stream fanout fixes, or HLS/WHEP viewer counting.
 
 ## Blocked by
 

@@ -1,6 +1,7 @@
 import { signal } from '@preact/signals'
 import { useEffect } from 'preact/hooks'
 import { createSSE } from '../../lib/sse'
+import { LiveStreamTracker } from '../../lib/liveStreams'
 import { StatCard } from '../../components/StatCard'
 import { ListenerHistoryChart } from '../../components/ListenerHistoryChart'
 import { TrafficTotalsCard } from '../../components/TrafficTotalsCard'
@@ -14,8 +15,6 @@ const stats = signal<StatsEvent>({
   bandwidth: 0,
   bandwidth_in: 0,
   bandwidth_out: 0,
-  bytes_in: 0,
-  bytes_out: 0,
   uptime: 0,
   goroutines: 0,
   memory: 0,
@@ -23,6 +22,7 @@ const stats = signal<StatsEvent>({
 })
 
 const streams = signal<StreamEvent[]>([])
+const tracker = new LiveStreamTracker<StreamEvent>()
 const connected = signal(false)
 const timeRange = signal<'1H' | '24H' | '7D' | '30D' | '90D' | '1Y' | 'ALL'>('1H')
 
@@ -54,16 +54,10 @@ function formatLabel(ct: string): string {
   return lower.toUpperCase()
 }
 
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`
-  if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
-  if (bytes < 1073741824) return `${(bytes / 1048576).toFixed(1)} MB`
-  return `${(bytes / 1073741824).toFixed(1)} GB`
-}
-
-function formatHealthPercent(health: number): string {
-  if (!Number.isFinite(health)) return '0'
-  return Math.max(0, Math.min(100, health)).toFixed(2)
+function formatBandwidth(bytesPerSec: number): string {
+  if (bytesPerSec < 1024) return `${bytesPerSec} B/s`
+  if (bytesPerSec < 1048576) return `${(bytesPerSec / 1024).toFixed(1)} KB/s`
+  return `${(bytesPerSec / 1048576).toFixed(1)} MB/s`
 }
 
 export function Dashboard() {
@@ -76,13 +70,16 @@ export function Dashboard() {
     })
 
     const offStream = sse.on('stream', (data: StreamEvent) => {
-      streams.value = [
-        ...streams.value.filter((s) => s.mount !== data.mount),
-        data,
-      ].sort((a, b) => a.mount.localeCompare(b.mount))
+      streams.value = tracker.upsert(streams.value, data)
     })
+    // Mounts that stop sending events have gone away; without this sweep
+    // a disconnected source stayed on the dashboard until a reload.
+    const sweep = setInterval(() => {
+      streams.value = tracker.prune(streams.value)
+    }, 2000)
 
     return () => {
+      clearInterval(sweep)
       offStats()
       offStream()
       sse.close()
@@ -130,14 +127,14 @@ export function Dashboard() {
           subtitle="active / total"
         />
         <StatCard
-          label="Inbound Total"
-          value={formatBytes(stats.value.bytes_in || 0)}
-          subtitle="received since start"
+          label="Inbound"
+          value={formatBandwidth(stats.value.bandwidth_in || 0)}
+          subtitle="from sources"
         />
         <StatCard
-          label="Outbound Total"
-          value={formatBytes(stats.value.bytes_out || 0)}
-          subtitle="sent since start"
+          label="Outbound"
+          value={formatBandwidth(stats.value.bandwidth_out || stats.value.bandwidth || 0)}
+          subtitle="to listeners"
         />
         <StatCard
           label="Uptime"
@@ -180,7 +177,7 @@ export function Dashboard() {
       </div>
 
       {/* Streams table */}
-      <div class="admin-table-shell bg-surface-raised">
+      <div class="rounded-lg border border-border bg-surface-raised overflow-hidden">
         <div class="px-4 py-3 border-b border-border">
           <span class="font-mono text-[10px] tracking-widest uppercase text-text-tertiary">
             Active Streams
@@ -191,23 +188,22 @@ export function Dashboard() {
             No streams connected
           </div>
         ) : (
-          <div class="admin-table-scroll">
-            <table class="w-full min-w-[700px]">
-              <thead>
-                <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
-                  <th class="px-4 py-2 font-normal">Status</th>
-                  <th class="px-4 py-2 font-normal">Mount</th>
-                  <th class="px-4 py-2 font-normal">Format</th>
-                  <th class="px-4 py-2 font-normal">Listeners</th>
-                  <th class="px-4 py-2 font-normal">Health</th>
-                </tr>
-              </thead>
-              <tbody>
-                {streams.value.map((stream) => (
-                  <tr
-                    key={stream.mount}
-                    class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
-                  >
+          <table class="w-full">
+            <thead>
+              <tr class="text-left text-text-tertiary font-mono text-[10px] tracking-wider uppercase border-b border-border">
+                <th class="px-4 py-2 font-normal">Status</th>
+                <th class="px-4 py-2 font-normal">Mount</th>
+                <th class="px-4 py-2 font-normal">Format</th>
+                <th class="px-4 py-2 font-normal">Listeners</th>
+                <th class="px-4 py-2 font-normal">Health</th>
+              </tr>
+            </thead>
+            <tbody>
+              {streams.value.map((stream) => (
+                <tr
+                  key={stream.mount}
+                  class="border-b border-border last:border-b-0 hover:bg-surface-hover transition-colors"
+                >
                   {/* Status dot */}
                   <td class="px-4 py-3">
                     <span
@@ -295,15 +291,14 @@ export function Dashboard() {
                         />
                       </div>
                       <span class="font-mono text-[10px] text-text-tertiary">
-                        {formatHealthPercent(stream.health)}%
+                        {stream.health}%
                       </span>
                     </div>
                   </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+                </tr>
+              ))}
+            </tbody>
+          </table>
         )}
       </div>
 

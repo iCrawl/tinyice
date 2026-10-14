@@ -1,0 +1,32 @@
+Definition of done
+The integration branch starts at upstream 9bc4cad. It preserves upstream security and transport behavior and the retained fork features. It implements bounded transition silence, visible cancellable recovery, listener cap persistence and atomic admission, truthful move and fallback state, playback identity and replay, immutable ownership snapshots, and corrected operator interfaces. The compiled application passes focused behavior checks and operator smoke checks.
+
+Pinned inputs
+Fork d313d7e06e168f87f1afed1c381ec4c2712b4cc6.
+Upstream 9bc4cad13dd36cdda27ef0869a52e66479b65d33.
+Common base d847446576001d07c65323b51d6c4e4198c1a144.
+Baseline and failure evidence lives in /tmp/tinyice-upstream-audit.
+Integration worktree is /home/t3code/git/tinyice-worktrees/upstream-integration.
+
+Workflow
+1. Compare two concrete lifecycle designs and independently judge the synthesis.
+2. Port Go features onto upstream in coherent units. One worker owns the coupled source, AutoDJ, registry, and metadata contracts. Keep all upstream tests and adapt fork tests to final behavior.
+3. Port the operator UI onto the accepted backend contract in a separate worktree. Keep upstream Studio, AutoDJ, mount editing, browser video, and player transport fixes.
+4. Verify targeted security, source replacement, persistent encoder content, gaps, pause, shutdown, metadata replay, cap persistence, move completion, fallback accounting, and ownership snapshot behavior.
+5. Build assets and the binary. Drive actual operator pages and APIs against a temporary configuration and audio fixtures.
+6. Independently review correctness and maintainability. Fix accepted findings in fresh isolated workers and repeat only affected checks.
+7. Update canonical PRD/issues and integration guidance. Keep the decision trail with the reviewed branch.
+8. Commit and hand back a concrete reviewable result. Publishing follows the invoked workflow's authorization and checks.
+
+Throughput checkpoint
+Blocking first steps are the final lifecycle design and a buildable Go contract.
+Independent frontend and verification work starts after the shared contract is committed.
+Each writer owns a separate worktree. The coordinator does not write a worker's tree while it is active.
+One owner handles the first Go integration because source claims, persistent output, recovery, metadata, and listener accounting share contracts.
+
+Review rubric
+1. Preserve upstream security, decoder, transport, packaging, and UI contract fixes.
+2. Give source ownership, playback, recovery, and metadata publication one authoritative owner each.
+3. Prevent writes before source claim and cleanup of successor generations.
+4. Provide truthful operator state and compatibility for existing external metadata consumers.
+5. Keep the integration small enough to understand and prove with real behavior tests.

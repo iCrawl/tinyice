@@ -82,7 +82,7 @@ func TestHandleSourceRegistersAndRemovesIcecastRuntime(t *testing.T) {
 
 	assertEventually(t, func() bool {
 		rt, ok := s.RuntimeRegistry.Get("/live")
-		return ok && rt.Source == relay.SourceIcecast && rt.Stream == s.Relay.GetOrCreateStream("/live")
+		return ok && rt.Source == relay.SourceIcecast
 	})
 
 	if err := rec.CloseClient(); err != nil {
@@ -95,8 +95,8 @@ func TestHandleSourceRegistersAndRemovesIcecastRuntime(t *testing.T) {
 		t.Fatal("source handler did not exit after client close")
 	}
 
-	if _, ok := s.RuntimeRegistry.Get("/live"); ok {
-		t.Fatal("expected runtime to be removed when source disconnects")
+	if rt, ok := s.RuntimeRegistry.Get("/live"); !ok || rt.Source != relay.SourceUnknown {
+		t.Fatal("expected source facts to detach when source disconnects")
 	}
 }
 
@@ -122,7 +122,7 @@ func TestHandleSourceRejectsConcurrentSourceAndKeepsCurrentStream(t *testing.T) 
 
 	assertEventually(t, func() bool {
 		st, ok := s.Relay.GetStream("/live")
-		return ok && st.Snapshot().SourceIP == "127.0.0.1:9101"
+		return ok && st.Snapshot().SourceIP == "127.0.0.1"
 	})
 
 	req2 := httptest.NewRequest(http.MethodPut, "/live", nil)
@@ -139,7 +139,7 @@ func TestHandleSourceRejectsConcurrentSourceAndKeepsCurrentStream(t *testing.T) 
 	if !ok {
 		t.Fatal("expected current stream to remain after duplicate source rejection")
 	}
-	if got := st.Snapshot().SourceIP; got != "127.0.0.1:9101" {
+	if got := st.Snapshot().SourceIP; got != "127.0.0.1" {
 		t.Fatalf("expected original source to remain current, got %q", got)
 	}
 	if _, ok := s.RuntimeRegistry.Get("/live"); !ok {

@@ -19,6 +19,9 @@ import (
 )
 
 type TranscoderInstance struct {
+	output *Stream
+	token  int64
+	done   chan struct{}
 	Config *config.TranscoderConfig
 	cancel context.CancelFunc
 	active bool
@@ -31,9 +34,10 @@ type TranscoderInstance struct {
 }
 
 type TranscoderManager struct {
-	instances map[string]*TranscoderInstance // key is OutputMount
-	mu        sync.RWMutex
-	relay     *Relay
+	runtimeRegistry *RuntimeRegistry
+	instances       map[string]*TranscoderInstance // key is OutputMount
+	mu              sync.RWMutex
+	relay           *Relay
 
 	// hub holds shared decoders keyed by input mount. The first
 	// transcoder for an input opens the decoder; subsequent ones
@@ -49,6 +53,8 @@ func NewTranscoderManager(r *Relay) *TranscoderManager {
 		hub:       NewDecoderHub(r),
 	}
 }
+
+func (tm *TranscoderManager) SetRuntimeRegistry(rr *RuntimeRegistry) { tm.runtimeRegistry = rr }
 
 func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	tm.mu.Lock()
@@ -67,8 +73,34 @@ func (tm *TranscoderManager) StartTranscoder(cfg *config.TranscoderConfig) {
 	}
 	tm.instances[cfg.OutputMount] = inst
 
-	go tm.runMetadataMirror(ctx, inst)
-	go tm.runTranscoder(ctx, inst)
+	output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+	token, claimed := output.ClaimSource("transcode-" + inst.Config.Name)
+	if !claimed {
+		cancel()
+		inst.active = false
+		return
+	}
+	output.SetSourceCloserIfCurrent(token, cancel)
+	if tm.runtimeRegistry != nil {
+		tm.runtimeRegistry.AttachClaim(output, token, SourceTranscode, "default")
+	}
+	inst.output = output
+	inst.token = token
+	inst.done = make(chan struct{})
+	go func() {
+		defer close(inst.done)
+		mirrorDone := make(chan struct{})
+		go func() { defer close(mirrorDone); tm.runMetadataMirror(ctx, inst) }()
+		tm.runTranscoder(ctx, inst)
+		cancel()
+		<-mirrorDone
+		output.SetCurrentSong("", tm.relay)
+		if tm.runtimeRegistry != nil {
+			tm.runtimeRegistry.DetachClaim(output, token)
+		}
+		output.SetSourceCloserIfCurrent(token, nil)
+		output.ReleaseSourceIfCurrent(token)
+	}()
 }
 
 func (tm *TranscoderManager) StopTranscoder(outputMount string) {
@@ -91,10 +123,14 @@ func (tm *TranscoderManager) StopAll() {
 
 func (inst *TranscoderInstance) Stop() {
 	inst.mu.Lock()
-	defer inst.mu.Unlock()
-	if inst.cancel != nil {
-		inst.cancel()
-		inst.active = false
+	cancel, done := inst.cancel, inst.done
+	inst.active = false
+	inst.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	if done != nil {
+		<-done
 	}
 }
 
@@ -163,17 +199,6 @@ func (tm *TranscoderManager) safePerformTranscode(ctx context.Context, inst *Tra
 }
 
 func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *TranscoderInstance) {
-	// Per-invocation child context. Cancelled when this function
-	// returns so any goroutine we spawn (mirrorTranscodeMetadata
-	// most notably) exits along with the encode loop instead of
-	// leaking until the parent transcoder is torn down.
-	//
-	// Production goroutine dump showed >1000 mirrorTranscodeMetadata
-	// goroutines accumulated because each source disconnect /
-	// reconnect cycle spawned a fresh one tied to the outer ctx
-	// (which only cancels on Stop, not on encode-loop return).
-	// With ~600 reconnect cycles × N transcoders, the leak filled
-	// the goroutine table and pushed RSS from ~44 MB to >800 MB.
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
@@ -207,7 +232,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 		input.mu.RUnlock()
 	}
 
-	output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
+	output := inst.output
 	// Resolve visibility BEFORE taking output.mu. Holding a stream's
 	// mutex while taking relay.mu is an ABBA setup against
 	// Relay.Snapshot / RemoveStream (which take relay.mu first, then a
@@ -237,10 +262,6 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 	// level state is a no-op; the field clears are cheap.
 	output.BeginSession()
 
-	if input != nil {
-		go mirrorTranscodeMetadata(runCtx, input, output)
-	}
-
 	// pcmReader is an io.Reader producing S16LE stereo PCM at
 	// decoderRate. Wrap with a tiny shim so anything downstream that
 	// expects a PCMDecoder (NewLinearResampler, etc.) gets a
@@ -262,7 +283,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 		if sr != decoder.SampleRate() {
 			pcm = NewLinearResampler(decoder, decoder.SampleRate(), sr)
 		}
-		EncodeMP3(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, sr)
+		EncodeMP3(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, sr, inst.token)
 	} else if inst.Config.Format == "opus" {
 		output.mu.Lock()
 		output.ContentType = "audio/ogg"
@@ -279,7 +300,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 				"to", 48000,
 			)
 		}
-		EncodeOpus(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false,
+		EncodeOpus(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, inst.token,
 			OpusEncoderSettings{
 				Application: inst.Config.OpusApplication,
 				VBR:         inst.Config.OpusVBR,
@@ -324,11 +345,17 @@ var shineBitRates = [16][4]int64{
 
 // applyShineBitrate reaches into a shine.Encoder and overrides the bitrate
 // (and its derived BitrateIndex / WholeSlotsPerFrame / FracSlotsPerFrame /
-// Slot_lag fields) so the encoded output actually respects the operator's
+// SlotLag fields) so the encoded output actually respects the operator's
 // bitrate choice. Returns false if the combination isn't supported by the
 // MPEG bitrate table for this sample rate.
+//
+// shine-mp3 has no bitrate parameter on NewEncoder (still hard-coded to
+// 128 as of v0.2.0), which is why this pokes the struct. The field names
+// are an unstable surface: v0.2.0 renamed Slot_lag to SlotLag and changed
+// CheckConfig's signature. The bitrate assertion in the transcode tests is
+// what catches the next rename.
 func applyShineBitrate(enc *shine.Encoder, sampleRate, bitrate int) bool {
-	if shine.CheckConfig(sampleRate, bitrate) == -1 {
+	if _, err := shine.CheckConfig(sampleRate, bitrate); err != nil {
 		return false
 	}
 	version := int(enc.Mpeg.Version)
@@ -352,7 +379,7 @@ func applyShineBitrate(enc *shine.Encoder, sampleRate, bitrate int) bool {
 		(float64(enc.Mpeg.Bitrate) * 1000.0 / float64(enc.Mpeg.BitsPerSlot))
 	enc.Mpeg.WholeSlotsPerFrame = int64(avg)
 	enc.Mpeg.FracSlotsPerFrame = avg - float64(enc.Mpeg.WholeSlotsPerFrame)
-	enc.Mpeg.Slot_lag = -enc.Mpeg.FracSlotsPerFrame
+	enc.Mpeg.SlotLag = -enc.Mpeg.FracSlotsPerFrame
 	if enc.Mpeg.FracSlotsPerFrame == 0 {
 		enc.Mpeg.Padding = 0
 	}
@@ -369,32 +396,54 @@ func resolveOpusFrameSizeMS(ms int) int {
 }
 
 func (tm *TranscoderManager) runMetadataMirror(ctx context.Context, inst *TranscoderInstance) {
-	ticker := time.NewTicker(50 * time.Millisecond)
+	events := tm.relay.SubscribeMetadata()
+	defer tm.relay.UnsubscribeMetadata(events)
+	reconcile := func() {
+		input, ok := tm.relay.GetStream(inst.Config.InputMount)
+		if !ok {
+			inst.output.SetCurrentSong("", tm.relay)
+			return
+		}
+		mc := input.PlaybackSnapshot()
+		if mc.Revision == 0 && input.GetCurrentSong() != "" {
+			mc.Title = input.GetCurrentSong()
+		}
+		inst.output.MirrorPlayback(mc, tm.relay)
+		input.mu.RLock()
+		genre, url, desc, pub, vis := input.Genre, input.URL, input.Description, input.Public, input.Visible
+		input.mu.RUnlock()
+		if explicitVis, explicit := inst.Config.ResolveVisibility(); explicit {
+			vis = explicitVis
+		}
+		inst.output.mu.Lock()
+		inst.output.Genre = genre
+		inst.output.URL = url
+		inst.output.Description = desc
+		inst.output.Public = pub
+		inst.output.Visible = vis
+		inst.output.mu.Unlock()
+	}
+	reconcile()
+	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-
-	lastMirrored := ""
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case mc := <-events:
+			if mc.Mount == inst.Config.InputMount {
+				reconcile()
+			}
 		case <-ticker.C:
-			input, ok := tm.relay.GetStream(inst.Config.InputMount)
-			if !ok {
-				continue
-			}
-			currentSong := input.GetCurrentSong()
-			if currentSong == "" || currentSong == lastMirrored {
-				continue
-			}
-
-			output := tm.relay.GetOrCreateStream(inst.Config.OutputMount)
-			output.SetCurrentSong(currentSong, tm.relay)
-			lastMirrored = currentSong
+			reconcile()
 		}
 	}
 }
 
-func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, sampleRate int) {
+func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, sampleRate int, token int64) {
+	if !relay.HasSourceClaim(output, token) {
+		return
+	}
 	if sampleRate <= 0 {
 		sampleRate = 44100 // Fallback
 	}
@@ -420,7 +469,7 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	// Reuse a single streamWriter across iterations — recreating it on
 	// every frame churned 38 allocations/sec per transcoder for no
 	// benefit; the struct holds no per-call state.
-	writer := &streamWriter{stream: output, relay: relay, stats: stats}
+	writer := &streamWriter{token: token, stream: output, relay: relay, stats: stats}
 
 	for {
 		select {
@@ -432,29 +481,59 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 				return
 			}
 
+			// Account for this frame before anything can skip ahead.
+			// Pacing is driven by how much audio we have CONSUMED, not
+			// by how much we encoded, so the counter has to advance on
+			// idle frames too — otherwise `expected` falls permanently
+			// behind `elapsed` and pacing never re-engages for the rest
+			// of the track once a listener arrives.
+			if pace {
+				totalSamples += int64(n / 4) // 2 channels, 2 bytes per sample
+			}
+
 			// Idle gate — when the output mount has no listeners, skip
 			// the encode + broadcast. Decoder still drains so the
 			// upstream input buffer doesn't overrun us; encoder side
 			// CPU is the dominant cost so this is the lever. The
 			// encoder's bit-reservoir state may produce one suboptimal
 			// frame on the next listener join, which is inaudible.
+			//
+			// This skips the encode ONLY. It must never skip the pacing
+			// sleep below: on a file-backed source (AutoDJ) the sleep is
+			// the only thing tying playback to real time, and a bare
+			// `continue` here made an idle mount decode its whole
+			// playlist as fast as the CPU allowed. Measured on r4dio
+			// 2026-09-30: two idle AutoDJ mounts burned 207% CPU, ~90%
+			// of it inside go-mp3, with only 27 goroutines alive.
 			if output.ListenersCount() == 0 {
-				continue
-			}
+				// Producer is alive and on schedule, just not emitting.
+				// Keep the mount out of the HealthMonitor's dead-stream
+				// sweep; see Stream.MarkProducerAlive.
+				output.MarkProducerAlive()
+			} else {
+				// Convert PCM bytes to int16 for Shine
+				for i := 0; i < n/2; i++ {
+					samples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
+				}
 
-			// Convert PCM bytes to int16 for Shine
-			for i := 0; i < n/2; i++ {
-				samples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
-			}
-
-			err = encoder.Write(writer, samples[:n/2])
-			if err != nil {
-				return
+				// Feed the frame to the encoder directly rather than through
+				// shine's Encoder.Write: as of v0.2.0 that slices each chunk
+				// as data[i:i+samplesPerPass] while stepping by
+				// samplesPerPass*channels, so for stereo it encodes only the
+				// first half of every frame (zero-padded) and drops the rest,
+				// which is the distortion reported in #63. pcmBuf is exactly
+				// one frame (1152 stereo samples), which is what
+				// EncodeBufferInterleaved expects.
+				frame, written := encoder.EncodeBufferInterleaved(samples[:n/2])
+				if written > 0 {
+					if _, err := writer.Write(frame[:written]); err != nil {
+						return
+					}
+				}
 			}
 
 			if pace {
-				totalSamples += int64(n / 4) // 2 channels, 2 bytes per sample
-				elapsed := time.Since(startTime)
+				elapsed := activeElapsed(startTime, decoder)
 				expected := time.Duration(totalSamples) * time.Second / time.Duration(sampleRate)
 				if expected > elapsed {
 					time.Sleep(expected - elapsed)
@@ -464,7 +543,10 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	}
 }
 
-func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, settings ...OpusEncoderSettings) {
+func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, token int64, settings ...OpusEncoderSettings) {
+	if !relay.HasSourceClaim(output, token) {
+		return
+	}
 	// 48kHz is the canonical Opus sample rate.
 	const sampleRate = 48000
 	const channels = 2
@@ -493,7 +575,7 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 	}
 
 	// Ogg encapsulation
-	writer := &streamWriter{stream: output, relay: relay, stats: stats, capture: true}
+	writer := &streamWriter{token: token, stream: output, relay: relay, stats: stats, capture: true}
 	serial := uint32(time.Now().UnixNano())
 	pw := ogg.NewPacketWriter(writer, serial)
 
@@ -538,32 +620,34 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 				return
 			}
 
-			// Idle gate — see EncodeMP3 for rationale. Saves the bulk
-			// of the per-frame work when no one's listening on the
-			// output mount.
+			// Frame accounting first — see EncodeMP3 for why this must
+			// not sit behind the idle gate.
+			sentCount++
+
+			// Idle gate — see EncodeMP3 for rationale, including why it
+			// guards the encode only and never the pacing sleep.
 			if output.ListenersCount() == 0 {
-				continue
-			}
+				output.MarkProducerAlive()
+			} else {
+				for i := 0; i < len(pcmSamples); i++ {
+					pcmSamples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
+				}
 
-			for i := 0; i < len(pcmSamples); i++ {
-				pcmSamples[i] = int16(pcmBuf[i*2]) | int16(pcmBuf[i*2+1])<<8
-			}
+				en, eerr := enc.Encode(pcmSamples, frameSize, opusPacket)
+				if eerr != nil {
+					logger.L.Errorf("Opus encode error: %v", eerr)
+					return
+				}
 
-			en, eerr := enc.Encode(pcmSamples, frameSize, opusPacket)
-			if eerr != nil {
-				logger.L.Errorf("Opus encode error: %v", eerr)
-				return
+				granulePos += uint64(frameSize)
+				if err := pw.WritePacket(opusPacket[:en], granulePos, false, false); err != nil {
+					return
+				}
+				pw.Flush()
 			}
-
-			granulePos += uint64(frameSize)
-			if err := pw.WritePacket(opusPacket[:en], granulePos, false, false); err != nil {
-				return
-			}
-			pw.Flush()
 
 			if pace {
-				sentCount++
-				elapsed := time.Since(startTime)
+				elapsed := activeElapsed(startTime, decoder)
 				expected := time.Duration(sentCount*int64(frameMS)) * time.Millisecond
 				if expected > elapsed {
 					time.Sleep(expected - elapsed)
@@ -573,7 +657,32 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 	}
 }
 
+// pauseAware is implemented by readers that can block for a while by
+// design (the AutoDJ's pauseGate). The encoders pace output against
+// wall-clock time since the track started; without subtracting the time
+// spent paused they would think they were behind schedule on resume and
+// flush the rest of the file into the ring buffer at full speed.
+type pauseAware interface {
+	PausedTotal() time.Duration
+}
+
+// activeElapsed is wall-clock time since start, minus any time the reader
+// reports having spent paused.
+func activeElapsed(start time.Time, r io.Reader) time.Duration {
+	elapsed := time.Since(start)
+	if pa, ok := r.(pauseAware); ok {
+		if paused := pa.PausedTotal(); paused > 0 {
+			elapsed -= paused
+		}
+	}
+	if elapsed < 0 {
+		return 0
+	}
+	return elapsed
+}
+
 type streamWriter struct {
+	token     int64
 	stream    *Stream
 	relay     *Relay
 	stats     *int64
@@ -582,10 +691,12 @@ type streamWriter struct {
 }
 
 func (w *streamWriter) Write(p []byte) (n int, err error) {
+	if !w.relay.PublishSource(w.stream, w.token, p) {
+		return 0, ErrSourceOwnershipLost
+	}
 	if w.capture {
 		w.headerBuf.Write(p)
 	}
-	w.stream.Broadcast(p, w.relay)
 	if w.stats != nil {
 		atomic.AddInt64(w.stats, int64(len(p)))
 	}
@@ -624,58 +735,12 @@ type TranscoderStats struct {
 	Uptime          string `json:"uptime"`
 }
 
-
 // mirrorTranscodeMetadata keeps the transcoded output stream's display
 // metadata (current song, genre, URL, description, public/visible flags)
 // in sync with the input stream while the transcode runs. Without this,
 // listeners on /<mount>-128 never see StreamTitle updates from the
 // upstream encoder, and the public Icecast directory listing shows
 // generic info on the transcoded sibling.
-func mirrorTranscodeMetadata(ctx context.Context, input, output *Stream) {
-	// 5 s cadence is plenty for metadata that changes per-track
-	// (i.e. every few minutes). 2 s was poll-noise — with N
-	// transcoders sharing one input that's N RLock acquisitions per
-	// poll, and the latency benefit of catching a song change two
-	// seconds earlier vs five is invisible to the listener.
-	ticker := time.NewTicker(5 * time.Second)
-	defer ticker.Stop()
-	var lastSong, lastGenre, lastURL, lastDesc string
-	var lastPublic, lastVisible bool
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			input.mu.RLock()
-			song := input.CurrentSong
-			genre := input.Genre
-			url := input.URL
-			desc := input.Description
-			pub := input.Public
-			vis := input.Visible
-			input.mu.RUnlock()
-
-			if song != lastSong {
-				output.mu.Lock()
-				output.CurrentSong = song
-				output.mu.Unlock()
-				lastSong = song
-			}
-			if genre != lastGenre || url != lastURL || desc != lastDesc || pub != lastPublic || vis != lastVisible {
-				output.mu.Lock()
-				output.Genre = genre
-				output.URL = url
-				output.Description = desc
-				output.Public = pub
-				output.Visible = vis
-				output.mu.Unlock()
-				lastGenre, lastURL, lastDesc, lastPublic, lastVisible = genre, url, desc, pub, vis
-			}
-		}
-	}
-}
-
-
 // EnsureAutoMP3Transcoders is called when a source connects on `inputMount`.
 // For each bitrate in the list it spawns a temporary mp3 transcoder named
 // `<inputMount>-mp3-<bitrate>` if no transcoder for that output is already

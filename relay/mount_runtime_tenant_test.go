@@ -11,12 +11,16 @@ func TestRuntimeRegistryAttachesAndDetachesTenantMounts(t *testing.T) {
 	rr := NewRuntimeRegistry(r)
 	rr.SetTenantManager(tm)
 
-	rr.AttachSource("/live", SourceIcecast, "tenant-a")
+	stream := r.GetOrCreateStream("/live")
+	token, _ := stream.ClaimSource("a")
+	rr.AttachClaim(stream, token, SourceIcecast, "tenant-a")
 	if got := tenant.StreamCount(); got != 1 {
 		t.Fatalf("expected tenant-a stream count 1, got %d", got)
 	}
 
-	rr.AttachSource("/live", SourceRelay, "tenant-b")
+	stream.ReleaseSourceIfCurrent(token)
+	token, _ = stream.ClaimSource("b")
+	rr.AttachClaim(stream, token, SourceRelay, "tenant-b")
 	if got := tenant.StreamCount(); got != 0 {
 		t.Fatalf("expected tenant-a stream count 0 after transfer, got %d", got)
 	}

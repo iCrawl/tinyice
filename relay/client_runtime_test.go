@@ -13,6 +13,7 @@ func TestRelayManagerRegistersRelayRuntimeOnPullConnect(t *testing.T) {
 	rr := NewRuntimeRegistry(r)
 	rm := NewRelayManager(r)
 	rm.SetRuntimeRegistry(rr)
+	rm.client = &http.Client{}
 
 	source := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "audio/mpeg")
@@ -33,7 +34,7 @@ func TestRelayManagerRegistersRelayRuntimeOnPullConnect(t *testing.T) {
 
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		if rt, ok := rr.Get("/relay"); ok && rt.Source == SourceRelay && rt.Stream == r.GetOrCreateStream("/relay") {
+		if rt, ok := rr.Get("/relay"); ok && rt.Source == SourceRelay {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)

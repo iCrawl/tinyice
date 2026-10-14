@@ -165,6 +165,7 @@ func (ss *SRTServer) IsRunning() bool {
 // broadcasting extracted audio to the appropriate TinyIce stream.
 func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	defer conn.Close()
+	defer recoverIngest("srt", conn.RemoteAddr())
 
 	remoteAddr := conn.RemoteAddr()
 	started := time.Now()
@@ -179,14 +180,16 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	mount := info.mount
 
 	stream := ss.relay.GetOrCreateStream(mount)
-	sourceToken := stream.BeginSource(remoteAddr.String())
+	sourceToken, claimed := stream.ClaimSource(remoteAddr.String())
+	if !claimed {
+		return
+	}
+	stream.SetSourceCloserIfCurrent(sourceToken, func() { _ = conn.Close() })
 	stream.mu.Lock()
 	stream.ContentType = "audio/mpeg" // default for MPEG-TS with MP3
 	stream.mu.Unlock()
 	if ss.runtimeRegistry != nil {
-		rt := ss.runtimeRegistry.GetOrCreate(mount)
-		rt.Stream = stream
-		ss.runtimeRegistry.AttachSource(mount, SourceSRT, "default")
+		ss.runtimeRegistry.AttachClaim(stream, sourceToken, SourceSRT, "default")
 	}
 
 	// Mirror the RTMP ingest: spin up a dedicated /video sub-mount with
@@ -204,7 +207,7 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 
 	demuxer := NewTSDemuxer()
 	demuxer.OnAudio(func(data []byte, pts int64) {
-		stream.Broadcast(data, ss.relay)
+		ss.relay.PublishSource(stream, sourceToken, data)
 	})
 	// Previously the demuxer's OnVideo callback was never registered, so
 	// SRT video packets were parsed, tagged with keyframe status and
@@ -213,7 +216,15 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	demuxer.OnVideo(func(data []byte, pts int64, isKeyframe bool) {
 		if videoStream == nil {
 			videoStream = ss.relay.GetOrCreateStreamSized(videoMount, 8*1024*1024)
-			videoSourceToken = videoStream.BeginSource(remoteAddr.String())
+			videoSourceToken, claimed = videoStream.ClaimSource(remoteAddr.String())
+			if !claimed {
+				videoStream = nil
+				return
+			}
+			videoStream.SetSourceCloserIfCurrent(videoSourceToken, func() { _ = conn.Close() })
+			if ss.runtimeRegistry != nil {
+				ss.runtimeRegistry.AttachClaim(videoStream, videoSourceToken, SourceSRT, "default")
+			}
 			videoStream.mu.Lock()
 			videoStream.ContentType = "video/h264"
 			videoStream.mu.Unlock()
@@ -221,7 +232,7 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 		if isKeyframe {
 			videoStream.Buffer.RecordKeyframe(videoStream.Buffer.HeadOffset())
 		}
-		videoStream.Broadcast(data, ss.relay)
+		ss.relay.PublishSource(videoStream, videoSourceToken, data)
 	})
 
 	// Per-read deadline. A wedged peer can keep the SRT connection
@@ -260,14 +271,17 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 	// the RTMP path — prevents a delayed OnClose from killing a successor
 	// publisher's mount.
 	if st, ok := ss.relay.GetStream(mount); ok && st == stream && st.IsCurrentSource(sourceToken) {
-		ss.relay.RemoveStream(mount)
+		ss.relay.RemoveStreamIfCurrent(stream, sourceToken)
 		if ss.runtimeRegistry != nil {
-			ss.runtimeRegistry.Remove(mount)
+			ss.runtimeRegistry.DetachClaim(stream, sourceToken)
 		}
 	}
 	if videoStream != nil {
 		if st, ok := ss.relay.GetStream(videoMount); ok && st == videoStream && st.IsCurrentSource(videoSourceToken) {
-			ss.relay.RemoveStream(videoMount)
+			ss.relay.RemoveStreamIfCurrent(videoStream, videoSourceToken)
+			if ss.runtimeRegistry != nil {
+				ss.runtimeRegistry.DetachClaim(videoStream, videoSourceToken)
+			}
 		}
 	}
 }

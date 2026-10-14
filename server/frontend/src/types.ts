@@ -9,6 +9,10 @@ export interface TinyIceBase {
     accentColor: string
     landingMarkdown: string
   }
+  // BasePageData injects these on every page; they were missing here, so
+  // Login.tsx had to redeclare window.__TINYICE__ with a conflicting type.
+  passkeysEnabled?: boolean
+  oidcProviders?: { id: string; name: string; icon: string }[] | null
 }
 
 export interface PlayerData extends TinyIceBase {
@@ -19,6 +23,14 @@ export interface PlayerData extends TinyIceBase {
   bitrate: number
   listeners: number
   hasWebRTC: boolean
+  // hasVideo is true when the mount has a companion /video sub-mount —
+  // the player then swaps its <audio> for a <video> bound to the HLS
+  // playlist so the user sees picture + audio together.
+  hasVideo?: boolean
+  // hasHLS is false when the mount's audio codec cannot be muxed into
+  // MPEG-TS (Opus / FLAC / Vorbis — every WebRTC publisher). The player
+  // uses WHEP for those instead of attaching hls.js to a 404.
+  hasHLS?: boolean
 }
 
 export interface AdminData extends TinyIceBase {
@@ -37,25 +49,129 @@ export interface StreamInfo {
   format: string
   bitrate: number
   listeners: number
-  burst_size: number
-  effective_burst_size: number
-  max_listeners: number
   live: boolean
-  status: string
-  status_reason: string
-  history: DiagnosticHistoryEntry[]
+  has_video?: boolean
 }
 
-export interface ListenerInfo {
-  id: string
-  protocol: 'http' | 'webrtc'
-  requested_mount: string
-  current_mount: string
-  remote_addr: string
-  user_agent: string
-  connected_at: number
-  duration_seconds: number
-  last_stream_switch_at: number
+// SSE Events
+export interface StatsEvent {
+  listeners: number
+  streams: number
+  bandwidth: number
+  bandwidth_in: number
+  bandwidth_out: number
+  uptime: number
+  goroutines: number
+  memory: number
+  gc: number
+}
+
+export interface StreamEvent {
+  mount: string
+  title: string
+  artist: string
+  started_at?: string
+  playback_id?: string
+  revision?: number
+  format: string
+  bitrate: number | string
+  listeners: number
+  viewers?: number
+  health: number
+  /** Whether a source is currently connected. Absent on /admin/events. */
+  live?: boolean
+  has_video?: boolean
+  is_transcoded?: boolean
+  // For transcoded outputs: the source mount + its format/bitrate
+  // so the dashboard can render "<src-format> → <out-format>".
+  source_mount?: string
+  source_type?: string
+  source_bitrate?: string
+  video_width?: number
+  video_height?: number
+  video_fps?: number
+  video_gop?: number
+  video_kbps?: number
+}
+
+// AutoDJState mirrors relay.StreamerState.
+export const AUTODJ_STOPPED = 0
+export const AUTODJ_PLAYING = 1
+export const AUTODJ_PAUSED = 2
+
+export type AutoDJState = 'playing' | 'paused' | 'stopped'
+
+export function autoDJState(raw: number | undefined): AutoDJState {
+  switch (raw) {
+    case AUTODJ_PLAYING:
+      return 'playing'
+    case AUTODJ_PAUSED:
+      return 'paused'
+    default:
+      return 'stopped'
+  }
+}
+
+// AutoDJEvent is the payload of the SSE `autodj` event. It mirrors
+// streamerEventInfo in server/handlers_api.go field for field — this type
+// previously described a shape the server never sent (a `currentTrack`
+// object and a string state), so every consumer read undefined and threw.
+export interface AutoDJEvent {
+  name: string
+  mount: string
+  /** 0 = stopped, 1 = playing, 2 = paused — use autoDJState() to map. */
+  state: number
+  song: string
+  start_time: number
+  /** Seconds elapsed in the current track; 0 unless playing. */
+  position: number
+  /** Track length in seconds, or 0 when the input format doesn't expose one. */
+  duration: number
+  /** Playlist id of the track actually playing; -1 for queue / command tracks. */
+  current_id: number
+  playlist_pos: number
+  playlist_len: number
+  shuffle: boolean
+  loop: boolean
+  queue: PlaylistItem[] | null
+  /**
+   * Bumps on every playlist mutation. The event feed no longer carries
+   * the playlist array itself (it was ~99% of /admin/events traffic on a
+   * large AutoDJ); refetch /api/autodj/{mount}/playlist when this
+   * changes.
+   */
+  playlist_version: number
+}
+
+// API types
+
+// PlaylistItem mirrors relay.PlaylistItem. `id` is -1 for queue entries,
+// which have no stable playlist identity.
+export interface PlaylistItem {
+  id: number
+  path: string
+  title: string
+}
+
+// FileInfo mirrors the fileEntry struct in apiGetFiles. It is snake_case
+// on the wire; the camelCase version this used to declare meant `isDir`
+// read undefined, so directories rendered as tracks and clicking one did
+// nothing. There is no per-file artist/duration/bitrate — the endpoint
+// only stats names and reads the title tag.
+export interface FileInfo {
+  name: string
+  title: string
+  is_dir: boolean
+  /** Path relative to the AutoDJ music directory. */
+  path: string
+  abs_path: string
+  is_pls: boolean
+}
+
+declare global {
+  interface Window {
+    __TINYICE__: TinyIceBase | PlayerData | AdminData | LandingData
+  }
 }
 
 export interface DiagnosticHistoryEntry {
@@ -68,74 +184,68 @@ export interface DiagnosticHistoryEntry {
   details?: Record<string, string>
 }
 
-// SSE Events
-export interface StatsEvent {
-  listeners: number
-  streams: number
-  bandwidth: number
-  bandwidth_in: number
-  bandwidth_out: number
-  bytes_in: number
-  bytes_out: number
-  uptime: number
-  goroutines: number
-  memory: number
-  gc: number
-}
-
-export interface StreamEvent {
+export interface AdminStream {
   mount: string
-  title: string
-  artist: string
-  format: string
-  bitrate: number
+  source_ip: string
+  source_kind?: string
+  source_label?: string
+  content_type: string
   listeners: number
+  viewers?: number
+  burst_size: number
+  effective_burst_size: number
+  max_listeners: number
+  effective_max_listeners: number
+  enabled: boolean
+  visible: boolean
   health: number
-  is_transcoded?: boolean
-  // For transcoded outputs: the source mount + its format/bitrate
-  // so the dashboard can render "<src-format> → <out-format>".
-  source_mount?: string
-  source_type?: string
-  source_bitrate?: string
+  bitrate: string
+  current_song: string
+  name: string
+  status: string
+  status_class: string
+  status_reason: string
+  last_error?: string
+  history?: DiagnosticHistoryEntry[]
+  recovery?: { phase: string; attempt: number; next_retry?: string; last_error: string }
+  producer_last_progress?: string
+  availability_last_progress?: string
+  has_video?: boolean
   video_width?: number
   video_height?: number
   video_fps?: number
   video_gop?: number
   video_kbps?: number
-  status: string
-  status_reason: string
 }
 
-export interface AutoDJEvent {
-  mount: string
-  state: 'playing' | 'paused' | 'stopped'
-  currentTrack: { title: string; artist: string; file: string }
-  position: number
-  duration: number
-  queue: string[]
-}
-
-// API types
-export interface PlaylistItem {
+export interface ListenerInfo {
   id: string
-  file: string
+  protocol: 'http' | 'webrtc'
+  requested_mount: string
+  current_mount: string
+  remote_addr: string
+  user_agent: string
+  connected_at: number
+  duration_seconds: number
+  last_stream_switch_at: number
+  move_id?: string
+  move_status?: 'pending' | 'completed' | 'failed'
+  move_destination?: string
+  move_error?: string
+}
+
+export interface ListenerMove {
+  id: string
+  status: 'pending'
+  listener_id: string
+  destination: string
+}
+
+export interface MetadataEvent {
+  mount: string
   title: string
   artist: string
-  duration: number
-}
-
-export interface FileInfo {
-  name: string
-  path: string
-  isDir: boolean
-  title?: string
-  artist?: string
-  duration?: number
-  bitrate?: number
-}
-
-declare global {
-  interface Window {
-    __TINYICE__: TinyIceBase | PlayerData | AdminData | LandingData
-  }
+  started_at: string
+  playback_id: string
+  revision: number
 }

@@ -35,13 +35,10 @@ func TestRTMPPublishRegistersAndRemovesRuntime(t *testing.T) {
 	if rt.Source != SourceRTMP {
 		t.Fatalf("expected RTMP source, got %q", rt.Source)
 	}
-	if rt.Stream != r.GetOrCreateStream("/live") {
-		t.Fatal("expected runtime to reference RTMP audio stream")
-	}
 
 	h.OnClose()
 
-	if _, ok := rr.Get("/live"); ok {
-		t.Fatal("expected RTMP runtime to be removed on close")
+	if rt, ok := rr.Get("/live"); !ok || rt.Source != SourceUnknown {
+		t.Fatal("expected RTMP source ownership to detach on close")
 	}
 }

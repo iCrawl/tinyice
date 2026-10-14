@@ -71,7 +71,7 @@ func NewHealthMonitor(r *Relay) *HealthMonitor {
 }
 
 func (hm *HealthMonitor) WithAutoRemove(timeout time.Duration) *HealthMonitor {
-	hm.autoRemoveDead = true
+	hm.autoRemoveDead = timeout > 0
 	hm.deadTimeout = timeout
 	return hm
 }
@@ -115,7 +115,15 @@ func (hm *HealthMonitor) check() {
 		}
 
 		stream.mu.RLock()
+		if stream.producerIntent == "paused" || stream.producerIntent == "stopped" || stream.producerIntent == "ended" {
+			stream.mu.RUnlock()
+			delete(hm.lastStatus, ss.MountName)
+			continue
+		}
 		lastData := stream.LastDataReceived
+		if stream.SourceIP == autoDJSourceLabel {
+			lastData = stream.producerLastProgress
+		}
 		started := stream.Started
 		stream.mu.RUnlock()
 

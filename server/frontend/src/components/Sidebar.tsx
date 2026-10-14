@@ -11,7 +11,7 @@ const NAV_ITEMS: SidebarItem[] = [
   { id: 'streams', label: 'Streams', href: '/admin/streams',
     icon: '<path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"/><circle cx="12" cy="12" r="3"/>' },
   { id: 'listeners', label: 'Listeners', href: '/admin/listeners',
-    icon: '<path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 11h-6"/><path d="M20 8l3 3-3 3"/>' },
+    icon: '<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/>' },
   { id: 'autodj', label: 'AutoDJ', href: '/admin/autodj',
     icon: '<circle cx="12" cy="12" r="10"/><polygon points="10,8 16,12 10,16"/>' },
   { id: 'golive', label: 'Go Live', href: '/admin/golive',
@@ -56,6 +56,7 @@ export function Sidebar({ activePath }: SidebarProps) {
       <a
         key={item.id}
         href={item.href}
+        aria-current={active ? 'page' : undefined}
         class={`
           flex flex-col items-center gap-0.5 px-1 py-2 rounded-lg w-full
           transition-colors text-center group

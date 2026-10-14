@@ -1,58 +1,58 @@
-import { useEffect, useRef } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Nav } from '@/components/Nav'
 import { StreamCard } from '@/components/StreamCard'
+import { STREAM_TTL_MS } from '@/lib/liveStreams'
 import { createSSE } from '@/lib/sse'
 import type { LandingData, StreamInfo } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
-
-type ExploreStore = ReturnType<typeof createExploreStore>
-
-function createExploreStore(initialData: Partial<LandingData>) {
-  const streams = signal<StreamInfo[]>(initialData.streams ?? [])
-  const search = signal('')
-
-  return { streams, search }
-}
-
-function useExploreStore(initialData: Partial<LandingData>) {
-  const storeRef = useRef<ExploreStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createExploreStore(initialData)
-  }
-  return storeRef.current
-}
-
-function playerPath(mount: string): string {
-  return mount.startsWith('/') ? `/player${mount}` : `/player/${mount}`
+function createExploreStore() {
+  return { streams: signal<StreamInfo[]>(data.streams ?? []), lastSeen: new Map<string, number>(), search: signal('') }
 }
 
 export function Explore() {
-  const { streams, search } = useExploreStore(data)
-
+  const { streams, lastSeen, search } = useMemo(createExploreStore, [])
   useEffect(() => {
     const sse = createSSE('/events')
 
-    sse.on('streams', (updated) => {
-      streams.value = updated
-    })
 
     sse.on('stream', (evt) => {
+      lastSeen.set(evt.mount, Date.now())
       streams.value = streams.value.map((s) =>
         s.mount === evt.mount
-          ? { ...s, title: evt.title, artist: evt.artist, listeners: evt.listeners, live: true }
+          ? {
+              ...s,
+              title: evt.title,
+              artist: evt.artist,
+              listeners: evt.listeners,
+              // Bitrate can arrive after connect (measured for sources that
+              // declare none), so keep the last positive value from the event.
+              bitrate: Number(evt.bitrate) > 0 ? Number(evt.bitrate) : s.bitrate,
+              // The event says whether a source is connected; this used
+              // to hardcode true, so a mount that existed without a
+              // source showed as on air.
+              live: evt.live ?? true,
+            }
           : s
       )
     })
+    // A mount stops sending `stream` events when its source goes away;
+    // without this it stayed marked live on the page indefinitely.
+    const sweep = setInterval(() => {
+      const now = Date.now()
+      streams.value = streams.value.map((s) => {
+        const seen = lastSeen.get(s.mount)
+        if (seen === undefined) return s
+        return now - seen < STREAM_TTL_MS ? s : { ...s, live: false, listeners: 0 }
+      })
+    }, 2000)
 
-    sse.on('metadata', (evt) => {
-      streams.value = streams.value.map((s) =>
-        s.mount === evt.mount ? { ...s, title: evt.title, artist: evt.artist } : s
-      )
-    })
 
-    return () => sse.close()
+    return () => {
+      clearInterval(sweep)
+      sse.close()
+    }
   }, [])
 
   const q = search.value.toLowerCase()
@@ -67,13 +67,12 @@ export function Explore() {
 
   return (
     <div class="min-h-screen bg-surface-base">
-      <Nav branding={data.branding} pageTitle={data.pageTitle} />
+      <Nav branding={data.branding ?? { logoUrl: null, accentColor: '#ff6600' }} pageTitle={data.pageTitle} />
 
       <main class="relative z-10 pt-14">
         <div class="mx-auto max-w-7xl px-4 py-10">
           {/* Search */}
           <div class="relative mb-8">
-            <label htmlFor="stream-search" class="sr-only">Search streams</label>
             <svg
               class="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-text-tertiary"
               viewBox="0 0 24 24"
@@ -87,8 +86,8 @@ export function Explore() {
               <line x1="21" y1="21" x2="16.65" y2="16.65" />
             </svg>
             <input
-              id="stream-search"
               type="text"
+              aria-label="Search streams"
               placeholder="Search streams..."
               value={search.value}
               onInput={(e) => {
@@ -106,7 +105,7 @@ export function Explore() {
                   key={stream.mount}
                   stream={stream}
                   onPlay={() => {
-                    window.location.href = playerPath(stream.mount)
+                    window.location.href = `/player/${stream.mount.replace(/^\//, '')}`
                   }}
                 />
               ))}

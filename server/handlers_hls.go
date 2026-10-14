@@ -2,9 +2,10 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
+	"image/jpeg"
 	"io"
-	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -31,6 +32,20 @@ func (s *Server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
 	hls := s.getHLSOutput(mount)
 	if hls == nil {
 		hls = s.RegisterHLS(mount)
+	} else if !hls.HasVideo() {
+		// The video sub-mount can appear seconds after the audio one:
+		// an RTMP publisher only creates it on its first video tag, and
+		// a browser's H.264 encoder took 13 s to produce its first
+		// frame in testing. A viewer who hit the playlist inside that
+		// window pinned this output to audio-only for the rest of the
+		// source session, because RegisterHLS samples the sub-mount
+		// once. Swap in an A/V output as soon as the video shows up;
+		// HasVideo() is then true, so this runs at most once per source.
+		if _, hasVideo := s.Relay.GetStream(mount + "/video"); hasVideo {
+			logger.L.Infow("HLS: video sub-mount appeared, re-registering as A/V", "mount", mount)
+			s.UnregisterHLS(mount)
+			hls = s.RegisterHLS(mount)
+		}
 	}
 	if hls == nil {
 		http.NotFound(w, r)
@@ -42,13 +57,10 @@ func (s *Server) handleHLSPlaylist(w http.ResponseWriter, r *http.Request) {
 	// each viewer keeps refreshing the same IP entry inside the
 	// 30 s viewer-TTL window.
 	if stream, ok := s.Relay.GetStream(mount); ok {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if host == "" {
-			host = r.RemoteAddr
-		}
-		stream.RecordViewer(host, time.Now())
+		stream.RecordViewer(s.clientIP(r), time.Now())
 	}
 
+	s.touchHLS(mount)
 	playlist := hls.Playlist()
 
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
@@ -93,6 +105,7 @@ func (s *Server) handleHLSSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	s.touchHLS(mount)
 	segment := hls.Ring().Get(seq)
 	if segment == nil {
 		http.NotFound(w, r)
@@ -146,18 +159,18 @@ func (s *Server) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	answer, err := s.WebRTCM.HandleWHEPOffer(mount, string(body))
+	answer, err := s.WebRTCM.HandleWHEPOffer(mount, string(body), relay.ListenerSnapshot{RemoteAddr: r.RemoteAddr, UserAgent: r.UserAgent()})
 	if err != nil {
 		logger.L.Warnw("WHEP: offer rejected", "mount", mount, "err", err.Error())
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, relay.ErrListenerCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	if stream, ok := s.Relay.GetStream(mount); ok {
-		host, _, _ := net.SplitHostPort(r.RemoteAddr)
-		if host == "" {
-			host = r.RemoteAddr
-		}
-		stream.RecordViewer(host, time.Now())
+		stream.RecordViewer(s.clientIP(r), time.Now())
 	}
 	w.Header().Set("Content-Type", "application/sdp")
 	w.Header().Set("Location", r.URL.Path)
@@ -283,8 +296,19 @@ func (s *Server) handlePoster(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "bad poster", http.StatusBadRequest)
 			return
 		}
-		// Minimal JPEG sniff: SOI marker FF D8 FF.
-		if !(data[0] == 0xFF && data[1] == 0xD8 && data[2] == 0xFF) {
+		// Posters are frames the video player captures, so only a mount
+		// with a /video sibling has anything legitimate to upload. This
+		// endpoint is anonymous by design (viewers upload), which makes
+		// "any client can set any mount's poster" inherent; restricting
+		// it to video mounts and to bytes that decode as a JPEG of sane
+		// size at least keeps audio stations un-defaceable and rules out
+		// arbitrary blobs.
+		if _, hasVideo := s.Relay.GetStream(mount + "/video"); !hasVideo {
+			http.Error(w, "mount has no video", http.StatusNotFound)
+			return
+		}
+		cfg, err := jpeg.DecodeConfig(bytes.NewReader(data))
+		if err != nil || cfg.Width < 16 || cfg.Height < 16 || cfg.Width > 4096 || cfg.Height > 4096 {
 			http.Error(w, "not a JPEG", http.StatusUnsupportedMediaType)
 			return
 		}
@@ -298,6 +322,24 @@ func (s *Server) handlePoster(w http.ResponseWriter, r *http.Request) {
 }
 
 // getHLSOutput finds the HLS output for a given mount.
+// touchHLS records that a client asked for this mount's playlist or a
+// segment, so the janitor can tell a watched output from an abandoned
+// one.
+func (s *Server) touchHLS(mount string) {
+	s.hlsMu.Lock()
+	if s.hlsLastAccess == nil {
+		s.hlsLastAccess = make(map[string]time.Time)
+	}
+	s.hlsLastAccess[mount] = time.Now()
+	s.hlsMu.Unlock()
+}
+
+func (s *Server) hlsAccessTime(mount string) time.Time {
+	s.hlsMu.RLock()
+	defer s.hlsMu.RUnlock()
+	return s.hlsLastAccess[mount]
+}
+
 func (s *Server) getHLSOutput(mount string) *relay.HLSOutput {
 	s.hlsMu.RLock()
 	defer s.hlsMu.RUnlock()
@@ -330,6 +372,20 @@ func (s *Server) RegisterHLS(mount string) *relay.HLSOutput {
 		return nil
 	}
 
+	// Refuse mounts whose audio the MPEG-TS muxer cannot declare. Before
+	// this check an Ogg/Opus mount (every WebRTC publisher, and any
+	// Icecast source sending Opus) got segments carrying raw Ogg pages
+	// under stream type 0x03, which ffprobe reads as "mp3float: Header
+	// missing" and Chrome reports as MEDIA_ERR_SRC_NOT_SUPPORTED /
+	// DEMUXER_ERROR_COULD_NOT_PARSE. Returning nil makes the playlist a
+	// clean 404 so the player falls back to WHEP, which carries Opus and
+	// H.264 natively with no transcode.
+	if !stream.HLSMuxableAudio() {
+		logger.L.Debugw("HLS: declining output, audio codec is not MPEG-TS muxable",
+			"mount", mount, "content_type", stream.Snapshot().ContentType)
+		return nil
+	}
+
 	config := relay.DefaultHLSConfig()
 	hls := relay.NewHLSOutput(mount, config).WithRelay(s.Relay)
 
@@ -357,10 +413,10 @@ func (s *Server) RegisterHLS(mount string) *relay.HLSOutput {
 	}
 	hls.Start(s.hlsCtx, tracks)
 	s.hlsOutputs[mount] = hls
-	s.hlsMu.Unlock()
 	if s.RuntimeRegistry != nil {
 		s.RuntimeRegistry.AttachOutput(mount, relay.OutputHLS)
 	}
+	s.hlsMu.Unlock()
 
 	logger.L.Infow("HLS: Registered output", "mount", mount, "has_video", len(tracks) > 1)
 	return hls
@@ -372,9 +428,10 @@ func (s *Server) UnregisterHLS(mount string) {
 	if hls, ok := s.hlsOutputs[mount]; ok {
 		hls.Stop()
 		delete(s.hlsOutputs, mount)
+		delete(s.hlsLastAccess, mount)
+		if s.RuntimeRegistry != nil {
+			s.RuntimeRegistry.DetachOutput(mount, relay.OutputHLS)
+		}
 	}
 	s.hlsMu.Unlock()
-	if s.RuntimeRegistry != nil {
-		s.RuntimeRegistry.DetachOutput(mount, relay.OutputHLS)
-	}
 }

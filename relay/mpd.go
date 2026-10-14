@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/DatanoiseTV/tinyice/logger"
@@ -25,6 +26,10 @@ type MPDServer struct {
 	Port     string
 	Password string
 	streamer *Streamer
+
+	// mu guards listener, which Start/Stop swap as an AutoDJ is
+	// disabled and re-enabled (ResumeStreamer).
+	mu       sync.Mutex
 	listener net.Listener
 }
 
@@ -61,7 +66,16 @@ func NewMPDServer(port, password string, s *Streamer) *MPDServer {
 	}
 }
 
+// Start binds the MPD port and serves connections until Stop. Calling it
+// on an already-listening server is a no-op rather than an error, so a
+// re-enable path can call it unconditionally.
 func (m *MPDServer) Start() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.listener != nil {
+		return nil
+	}
+
 	addr := m.Port
 	if !strings.Contains(addr, ":") {
 		addr = ":" + addr
@@ -88,13 +102,20 @@ func (m *MPDServer) Start() error {
 
 func (m *MPDServer) Stop() {
 	logger.L.Debugf("MPD: Stopping server on port %s", m.Port)
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	if m.listener != nil {
 		m.listener.Close()
+		m.listener = nil
 	}
 }
 
 func (m *MPDServer) handleConnection(conn net.Conn) {
 	defer conn.Close()
+	// This goroutine is spawned from the accept loop, not by net/http, so
+	// nothing recovers a panic here: one malformed command would end the
+	// whole server. Contain it to the connection.
+	defer recoverIngest("mpd", conn.RemoteAddr())
 	writer := bufio.NewWriter(conn)
 	// Use a sized buffered reader and readMPDLine so a client that streams
 	// megabytes without a newline can't grow our buffer until we OOM.
@@ -113,15 +134,46 @@ func (m *MPDServer) handleConnection(conn net.Conn) {
 	commandListOK := false
 	var commandListBuffer []string
 
-	for {
-		line, err := readMPDLine(reader, maxMPDLineLen)
-		if err != nil {
-			if err != io.EOF {
-				logger.L.Errorf("MPD: Connection error: %v", err)
-			} else {
-				logger.L.Debug("MPD: Connection closed by client")
+	// One goroutine owns the socket reads and hands lines over a channel,
+	// so the command loop and the `idle` wait can both select on client
+	// input. With synchronous reads, `idle` parked the connection for up
+	// to 30 s during which the client's `noidle` sat unread — every
+	// keypress in ncmpcpp/cantata froze — and when it was finally read
+	// it was answered "unknown command", desynchronising every reply
+	// after it. The goroutine exits when the connection closes (deferred
+	// above), which unblocks its read.
+	lines := make(chan string)
+	readErr := make(chan error, 1)
+	go func() {
+		defer close(lines)
+		for {
+			l, err := readMPDLine(reader, maxMPDLineLen)
+			if err != nil {
+				readErr <- err
+				return
 			}
-			return
+			lines <- l
+		}
+	}()
+	// pushback carries a command the client sent while we were idle
+	// (anything other than noidle), to be executed as the next command.
+	pushback := ""
+
+	for {
+		var line string
+		if pushback != "" {
+			line, pushback = pushback, ""
+		} else {
+			l, ok := <-lines
+			if !ok {
+				if err := <-readErr; err != io.EOF {
+					logger.L.Errorf("MPD: Connection error: %v", err)
+				} else {
+					logger.L.Debug("MPD: Connection closed by client")
+				}
+				return
+			}
+			line = l
 		}
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -145,6 +197,20 @@ func (m *MPDServer) handleConnection(conn net.Conn) {
 		}
 
 		switch cmd {
+		case "idle":
+			if commandList {
+				resp.ACK(5, 0, "idle", "idle not allowed in a command list")
+				writer.Flush()
+				continue
+			}
+			pushback = m.runIdle(args, lines, resp)
+			writer.Flush()
+			continue
+		case "noidle":
+			// Not idle: MPD answers a bare noidle with OK.
+			resp.OK()
+			writer.Flush()
+			continue
 		case "command_list_begin":
 			commandList = true
 			commandListOK = false
@@ -171,7 +237,7 @@ func (m *MPDServer) handleConnection(conn net.Conn) {
 				if len(parts) > 1 {
 					bargs = parts[1]
 				}
-				if !m.dispatchCommand(bcmd, bargs, resp) {
+				if !m.dispatchCommand(bcmd, bargs, resp, &authenticated) {
 					// On error, the ACK is already sent by dispatchCommand or it should be!
 					// Actually we need to send the correct [error@list_pos]
 					// Let's refine ACK to be more generic
@@ -206,14 +272,19 @@ func (m *MPDServer) handleConnection(conn net.Conn) {
 			continue
 		}
 
-		if m.dispatchCommand(cmd, args, resp) {
+		if m.dispatchCommand(cmd, args, resp, &authenticated) {
 			resp.OK()
 		}
 		writer.Flush()
 	}
 }
 
-func (m *MPDServer) dispatchCommand(cmd, args string, resp *MPDResponse) bool {
+// dispatchCommand runs one command. authenticated is the connection's
+// auth flag: the `password` command sets it, which the previous refactor
+// lost — the flag was a local in handleConnection that this function could
+// never reach, so with mpd_password set every command after a correct
+// `password` was still answered "permission denied".
+func (m *MPDServer) dispatchCommand(cmd, args string, resp *MPDResponse, authenticated *bool) bool {
 	switch cmd {
 	case "password":
 		// Constant-time compare — without this the comparison short-
@@ -221,7 +292,9 @@ func (m *MPDServer) dispatchCommand(cmd, args string, resp *MPDResponse) bool {
 		// of m.Password to an attacker probing one byte at a time.
 		// MPD passwords are short and plaintext (protocol-level) but
 		// timing leaks are still fixable.
-		if subtle.ConstantTimeCompare([]byte(args), []byte(m.Password)) == 1 {
+		// libmpdclient quotes string arguments: `password "secret"`.
+		if subtle.ConstantTimeCompare([]byte(strings.Trim(args, "\"")), []byte(m.Password)) == 1 {
+			*authenticated = true
 			return true
 		}
 		resp.ACK(3, 0, "password", "incorrect password")
@@ -242,9 +315,6 @@ func (m *MPDServer) dispatchCommand(cmd, args string, resp *MPDResponse) bool {
 		// Not implemented
 	case "ping":
 		// OK
-	case "idle":
-		m.handleIdle(resp)
-		return true
 	case "update":
 		m.streamer.ScanMusicDir()
 		resp.Field("updating_db", 1)
@@ -334,12 +404,45 @@ func (m *MPDServer) dispatchCommand(cmd, args string, resp *MPDResponse) bool {
 	return true
 }
 
-func (m *MPDServer) handleIdle(resp *MPDResponse) {
-	// Wait for events or timeout
-	select {
-	case <-m.streamer.idleCh:
-		resp.Field("changed", "playlist")
-	case <-time.After(30 * time.Second):
+// runIdle implements `idle [subsystems...]`: block until a subsystem
+// changes or the client sends `noidle`. Any other command sent while
+// idle also ends the idle (MPD tolerates this) and is returned so the
+// caller executes it next. Reports the subsystem the event named, not
+// always "playlist". Returns "" when nothing needs to be replayed.
+func (m *MPDServer) runIdle(args string, lines <-chan string, resp *MPDResponse) string {
+	wanted := strings.Fields(strings.ToLower(args))
+	interested := func(sub string) bool {
+		if len(wanted) == 0 {
+			return true
+		}
+		for _, w := range wanted {
+			if w == sub {
+				return true
+			}
+		}
+		return false
+	}
+	for {
+		select {
+		case sub := <-m.streamer.idleCh:
+			if !interested(sub) {
+				continue
+			}
+			resp.Field("changed", sub)
+			resp.OK()
+			return ""
+		case l, ok := <-lines:
+			if !ok {
+				return ""
+			}
+			l = strings.TrimSpace(l)
+			if strings.EqualFold(l, "noidle") || l == "" {
+				resp.OK()
+				return ""
+			}
+			resp.OK()
+			return l
+		}
 	}
 }
 
@@ -391,7 +494,9 @@ func (m *MPDServer) handleAlbumArt(args string, resp *MPDResponse) {
 		fmt.Sscanf(parts[1], "%d", &offset)
 	}
 
-	if offset >= len(fakeArt) {
+	// Sscanf happily parses a negative offset; a lower bound is needed
+	// or fakeArt[-1:] panics and takes the process with it.
+	if offset < 0 || offset >= len(fakeArt) {
 		resp.ACK(50, 0, "albumart", "No album art is available at this offset")
 		return
 	}
@@ -465,10 +570,16 @@ func (m *MPDServer) handleStatus(resp *MPDResponse) {
 }
 
 func (m *MPDServer) handleCurrentSong(resp *MPDResponse) {
+	// Snapshot, release, then write. writeSongInfo takes the same RLock;
+	// calling it while still holding one is a recursive RLock on a
+	// sync.RWMutex, which deadlocks the moment a writer (the playback
+	// loop on every track change) queues between the two acquisitions —
+	// and the writer it blocks IS the AutoDJ, so the mount goes silent.
 	m.streamer.mu.RLock()
-	defer m.streamer.mu.RUnlock()
-	if m.streamer.CurrentPlayingPos >= 0 {
-		m.writeSongInfo(resp, m.streamer.CurrentFile, m.streamer.CurrentPlayingPos, m.streamer.CurrentPlayingID)
+	file, pos, id := m.streamer.CurrentFile, m.streamer.CurrentPlayingPos, m.streamer.CurrentPlayingID
+	m.streamer.mu.RUnlock()
+	if pos >= 0 {
+		m.writeSongInfo(resp, file, pos, id)
 	}
 }
 
@@ -538,26 +649,40 @@ func (m *MPDServer) handlePlaylistId(args string, resp *MPDResponse) {
 		return
 	}
 
+	// Same recursive-RLock hazard as handleCurrentSong: find the entry
+	// under the lock, release, then write.
+	found, idx, rel := false, 0, ""
 	m.streamer.mu.RLock()
-	if id > 0 {
-		for i, ps := range m.streamer.Playlist {
-			if ps.ID == id {
-				rel, _ := filepath.Rel(m.streamer.MusicDir, ps.Path)
-				m.writeSongInfo(resp, rel, i, ps.ID)
-				break
-			}
+	for i, ps := range m.streamer.Playlist {
+		if ps.ID == id {
+			rel, _ = filepath.Rel(m.streamer.MusicDir, ps.Path)
+			found, idx = true, i
+			break
 		}
 	}
 	m.streamer.mu.RUnlock()
+	if found {
+		m.writeSongInfo(resp, rel, idx, id)
+	}
 }
 
 func (m *MPDServer) handleLsInfo(args string, resp *MPDResponse) {
+	// Read the music dir under the lock, then release it: os.ReadDir on a
+	// network-mounted library can block for seconds, and holding the
+	// streamer's RWMutex across it stalls the playback loop (which needs
+	// the write lock to advance a track) for exactly that long.
 	m.streamer.mu.RLock()
-	defer m.streamer.mu.RUnlock()
+	musicDir := m.streamer.MusicDir
+	m.streamer.mu.RUnlock()
 
-	dir := m.streamer.MusicDir
+	dir := musicDir
 	if args != "" {
-		dir = filepath.Join(m.streamer.MusicDir, strings.Trim(args, "\""))
+		confined, err := ConfineToDir(musicDir, strings.Trim(args, "\""))
+		if err != nil {
+			resp.ACK(50, 0, "lsinfo", "no such directory")
+			return
+		}
+		dir = confined
 	}
 
 	entries, _ := os.ReadDir(dir)
@@ -572,15 +697,27 @@ func (m *MPDServer) handleLsInfo(args string, resp *MPDResponse) {
 
 func (m *MPDServer) handleAdd(args string, resp *MPDResponse) {
 	path := strings.Trim(args, "\"")
-	full := filepath.Join(m.streamer.MusicDir, path)
+	full, err := ConfineToDir(m.streamer.MusicDir, path)
+	if err != nil {
+		resp.ACK(50, 0, "add", "no such song")
+		return
+	}
 	m.streamer.AddToPlaylist(full)
 }
 
 func (m *MPDServer) handleAddId(args string, resp *MPDResponse) {
 	path := strings.Trim(args, "\"")
-	full := filepath.Join(m.streamer.MusicDir, path)
+	full, err := ConfineToDir(m.streamer.MusicDir, path)
+	if err != nil {
+		resp.ACK(50, 0, "addid", "no such song")
+		return
+	}
 	m.streamer.AddToPlaylist(full)
-	resp.Field("Id", len(m.streamer.GetPlaylist()))
+	// Report the entry's stable ID, which is what the client will hand
+	// back to deleteid/moveid — not the playlist length.
+	if pl := m.streamer.GetPlaylistInfo(); len(pl) > 0 {
+		resp.Field("Id", pl[len(pl)-1].ID)
+	}
 }
 
 func (m *MPDServer) handleDelete(args string, resp *MPDResponse) {
@@ -594,8 +731,13 @@ func (m *MPDServer) handleDelete(args string, resp *MPDResponse) {
 func (m *MPDServer) handleDeleteId(args string, resp *MPDResponse) {
 	id := -1
 	fmt.Sscanf(args, "%d", &id)
-	if id > 0 {
-		m.streamer.RemoveFromPlaylist(id - 1)
+	if id <= 0 {
+		resp.ACK(2, 0, "deleteid", "bad song id")
+		return
+	}
+	// By ID, not id-1: the two only coincide until the first removal.
+	if !m.streamer.RemoveFromPlaylistByID(id) {
+		resp.ACK(50, 0, "deleteid", "no such song")
 	}
 }
 
@@ -608,9 +750,12 @@ func (m *MPDServer) handleMove(args string, resp *MPDResponse) {
 func (m *MPDServer) handleMoveId(args string, resp *MPDResponse) {
 	var fromId, to int
 	fmt.Sscanf(args, "%d %d", &fromId, &to)
-	if fromId > 0 {
-		m.streamer.MovePlaylistItem(fromId-1, to)
+	idx := m.streamer.IndexOfPlaylistID(fromId)
+	if idx < 0 {
+		resp.ACK(50, 0, "moveid", "no such song")
+		return
 	}
+	m.streamer.MovePlaylistItem(idx, to)
 }
 
 func (m *MPDServer) handleListPlaylists(resp *MPDResponse) {
@@ -637,6 +782,13 @@ func (m *MPDServer) handleSave(args string, resp *MPDResponse) {
 
 func (m *MPDServer) handleRm(args string, resp *MPDResponse) {
 	name := strings.Trim(args, "\"")
+	// The name comes off the wire and was joined into a path unchecked:
+	// `rm "../../somewhere/file"` deleted somewhere/file.pls anywhere on
+	// disk. A playlist name is a bare filename.
+	if name == "" || name != filepath.Base(name) || strings.HasPrefix(name, ".") {
+		resp.ACK(2, 0, "rm", "invalid playlist name")
+		return
+	}
 	os.Remove(filepath.Join("playlists", name+".pls"))
 }
 

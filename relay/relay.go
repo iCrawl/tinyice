@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -28,24 +29,29 @@ import (
 //	relay := NewRelay(true, historyManager)
 //	stream := relay.GetOrCreateStream("/live")
 //	stats := relay.Snapshot()
-//
+
 // MetadataChange is emitted when a stream's current song changes.
 type MetadataChange struct {
-	Mount     string    `json:"mount"`
-	Title     string    `json:"title"`
-	Artist    string    `json:"artist"`
-	StartedAt time.Time `json:"started_at"`
+	owner      *Stream
+	Visible    bool      `json:"-"`
+	PlaybackID string    `json:"playback_id"`
+	Revision   uint64    `json:"revision"`
+	Mount      string    `json:"mount"`
+	Title      string    `json:"title"`
+	Artist     string    `json:"artist"`
+	StartedAt  time.Time `json:"started_at"`
 }
 
 type Relay struct {
-	Streams     map[string]*Stream // Active streams by mount point
-	mu          sync.RWMutex       // Mutex protecting the streams map
-	LowLatency  bool               // Whether to optimize for low latency
-	BytesIn     int64              // Global bytes received counter
-	BytesOut    int64              // Global bytes sent counter
-	History     *HistoryManager    // Optional history manager for statistics
-	Listeners   *ListenerRegistry  // Operator-facing playback listener registry
-	Diagnostics *DiagnosticsStore  // Mount-scoped status and recent diagnostic history
+	metadataRevision atomic.Uint64
+	Streams          map[string]*Stream // Active streams by mount point
+	mu               sync.RWMutex       // Mutex protecting the streams map
+	LowLatency       bool               // Whether to optimize for low latency
+	BytesIn          int64              // Global bytes received counter
+	BytesOut         int64              // Global bytes sent counter
+	History          *HistoryManager    // Optional history manager for statistics
+	Listeners        *ListenerRegistry  // Operator-facing playback listener registry
+	Diagnostics      *DiagnosticsStore  // Mount-scoped status and recent diagnostic history
 
 	metaSubs   []chan MetadataChange
 	lastMeta   map[string]MetadataChange
@@ -135,21 +141,55 @@ func (r *Relay) GetOrCreateStreamSized(mount string, bufferSize int) *Stream {
 }
 
 // RemoveStream deletes a stream (e.g., when source disconnects)
+var ErrSourceOwnershipLost = errors.New("source ownership was revoked")
+
+func (r *Relay) HasSourceClaim(stream *Stream, token int64) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.Streams[stream.MountName] == stream && stream.IsCurrentSource(token)
+}
+func (r *Relay) PublishSource(stream *Stream, token int64, data []byte) bool {
+	if token == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.Streams[stream.MountName] != stream {
+		return false
+	}
+	return stream.broadcast(data, r, token)
+}
+
 func (r *Relay) RemoveStream(mount string) {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if s, ok := r.Streams[mount]; ok {
-		s.Close()
-		delete(r.Streams, mount)
+	stream := r.Streams[mount]
+	delete(r.Streams, mount)
+	r.mu.Unlock()
+	if stream != nil {
+		stream.KickSource()
+		stream.Close()
+		stream.SetCurrentSong("", r)
 	}
+}
+
+func (r *Relay) RemoveStreamIfCurrent(stream *Stream, token int64) bool {
+	r.mu.Lock()
+	if r.Streams[stream.MountName] != stream || !stream.IsCurrentSource(token) {
+		r.mu.Unlock()
+		return false
+	}
+	delete(r.Streams, stream.MountName)
+	r.mu.Unlock()
+	stream.Close()
+	stream.SetCurrentSong("", r)
+	return true
 }
 
 func (r *Relay) GetStreamVisibility(mount string) bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	if s, ok := r.Streams[mount]; ok {
-		return s.Visible
+		return s.IsVisible()
 	}
 	return false
 }
@@ -192,10 +232,19 @@ func (r *Relay) UnsubscribeMetadata(ch chan MetadataChange) {
 // NotifyMetadataChange fans out a metadata change and remembers the latest
 // metadata per mount so late SSE subscribers get the current track.
 func (r *Relay) NotifyMetadataChange(mc MetadataChange) {
+	if mc.owner != nil {
+		current, exists := r.GetStream(mc.Mount)
+		if (exists && current != mc.owner) || (!exists && mc.Title != "") {
+			return
+		}
+	}
 	r.metaSubsMu.Lock()
 	defer r.metaSubsMu.Unlock()
 	if r.lastMeta == nil {
 		r.lastMeta = make(map[string]MetadataChange)
+	}
+	if old, ok := r.lastMeta[mc.Mount]; ok && mc.Revision != 0 && old.Revision >= mc.Revision {
+		return
 	}
 	r.lastMeta[mc.Mount] = mc
 	for _, ch := range r.metaSubs {

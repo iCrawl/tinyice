@@ -169,6 +169,12 @@ http://localhost:8080
 | `/webrtc/offer` | POST | `mount` (query), body: WebRTC SDP offer | Listener WebRTC stream |
 | `/webrtc/source-offer` | POST | `mount` (query), body: WebRTC SDP offer | Source WebRTC connection |
 
+`/webrtc/source-offer` is an ingest endpoint and requires credentials. Send
+either the mount's source password (HTTP Basic auth, or a `password` query
+parameter) or an authenticated admin session / API token that has access to
+the mount. Session callers must also send the `X-CSRF-Token` header — this is
+what the admin **Go Live** page does, so no source password is needed there.
+
 ## Server-Sent Events (SSE)
 
 ### `/admin/events` (Authenticated SSE)
@@ -217,12 +223,14 @@ Returns real-time server statistics every 500ms.
       "song": "Artist - Track",
       "start_time": 1700000000,
       "duration": 180.5,
+      "position": 42.5,
+      "current_id": 6,
       "playlist_pos": 5,
       "playlist_len": 100,
       "shuffle": false,
       "loop": true,
       "queue": [],
-      "playlist": []
+      "playlist_version": 17
     }
   ],
   "visible_mounts": {"/live": true},
@@ -235,6 +243,19 @@ Returns real-time server statistics every 500ms.
   "server_uptime": "24h0m0s"
 }
 ```
+
+`state` is `0` stopped, `1` playing, `2` paused. `position` is seconds
+elapsed in the current track (0 unless playing) and `duration` is `0` when
+the input format doesn't expose a track length up-front. `current_id` is
+the id of the track actually playing, `-1` when it came from the queue or
+an external song command. `queue` entries are
+`{"title": …, "path": …, "id": …}`. The event does not carry the playlist
+itself: `playlist_version` bumps on every playlist mutation, and clients
+fetch `/api/autodj/{mount}/playlist` when it changes (the array was
+removed from the event in 2.8.0 — it was ~99% of the feed's bytes).
+
+Note that `autodj` events are only emitted on the authenticated
+`/admin/events` feed, not on the public `/events` one.
 
 ### `/events` (Public SSE)
 

@@ -35,6 +35,8 @@ tags:
     description: Manage stream mount points
   - name: AutoDJ
     description: Automated DJ / streamer instances
+  - name: Listeners
+    description: Manage connected HTTP and WebRTC listeners
   - name: Playlist
     description: AutoDJ playlist management
   - name: Queue
@@ -315,6 +317,19 @@ paths:
                   type: string
                   description: Source password for this mount
                   example: secret123
+                enabled:
+                  type: boolean
+                visible:
+                  type: boolean
+                burst_size:
+                  type: integer
+                  minimum: 0
+                  maximum: 8388608
+                  description: Listener burst override in bytes. Zero uses the server default.
+                max_listeners:
+                  type: integer
+                  minimum: 0
+                  description: Additional mount listener cap. Zero uses the server limit.
       responses:
         "200":
           description: Mount created
@@ -330,9 +345,10 @@ paths:
       tags: [Streams]
       summary: Update an existing stream mount
       description: |
-        Edit the password, enabled state (DisabledMounts), or visibility
-        (VisibleMounts) of an existing mount. Omitted fields are left
-        unchanged. The mount path itself cannot be changed.
+        Edit the password, enabled state, visibility, listener cap, or burst size
+        of an existing mount. Configured AutoDJ mounts can be edited while stopped.
+        Omitted fields are unchanged. The mount path cannot be changed.
+        A nonempty password requires an existing global or user source password owner.
       security:
         - session: []
         - bearer: []
@@ -356,6 +372,15 @@ paths:
                 visible:
                   type: boolean
                   description: If true, the mount is listed publicly.
+                burst_size:
+                  type: integer
+                  minimum: 0
+                  maximum: 8388608
+                  description: Listener burst override in bytes. Zero uses the server default.
+                max_listeners:
+                  type: integer
+                  minimum: 0
+                  description: Additional mount listener cap. Zero uses the server limit.
       responses:
         "200":
           description: Mount updated
@@ -384,6 +409,136 @@ paths:
       responses:
         "200":
           description: Mount deleted
+
+  /api/streams/diagnostics:
+    get:
+      tags: [Streams]
+      summary: Read recent mount diagnostics
+      security:
+        - session: []
+        - bearer: []
+      parameters:
+        - name: mount
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+            maximum: 100
+      responses:
+        "200":
+          description: Diagnostic history, newest first
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DiagnosticEntry"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: No access to this mount
+        "503":
+          description: History disabled
+
+  /api/listeners:
+    get:
+      tags: [Listeners]
+      summary: List connected managed listeners
+      description: Returns HTTP and WebRTC listeners whose requested or current mount the user can access. HLS viewer metrics are separate.
+      security:
+        - session: []
+        - bearer: []
+      responses:
+        "200":
+          description: Connected listeners and their latest move state
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Listener"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/listeners/disconnect:
+    post:
+      tags: [Listeners]
+      summary: Disconnect a managed listener
+      security:
+        - session: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id]
+              properties:
+                id:
+                  type: string
+      responses:
+        "200":
+          description: Listener disconnected
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: No access to the listener's current mount
+        "404":
+          description: Listener not found
+
+  /api/listeners/move:
+    post:
+      tags: [Listeners]
+      summary: Request a listener move
+      description: |
+        Requires access to both current and destination mounts. HTTP moves reserve
+        destination capacity and return pending until the serving connection switches.
+        GET /api/listeners reports the move outcome. WebRTC returns 409 with
+        warning disconnect_required. An already-current destination returns 200.
+      security:
+        - session: []
+        - bearer: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [id, target_mount]
+              properties:
+                id:
+                  type: string
+                target_mount:
+                  type: string
+      responses:
+        "200":
+          description: Listener is already on the destination mount
+        "202":
+          description: Move pending
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ListenerMove"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          description: No access to the current or destination mount
+        "404":
+          description: Listener or destination mount not found
+        "409":
+          description: WebRTC requires disconnection, destination is disabled or full, or a move is already pending
 
   /api/streams/kick:
     post:
@@ -510,6 +665,8 @@ paths:
       responses:
         "200":
           description: Playing
+        "409":
+          description: Mount disabled
         "404":
           description: Streamer not found
 
@@ -1442,12 +1599,37 @@ paths:
         Server-Sent Events stream for real-time updates. No authentication required.
 
         **Event types:**
-        - `metadata` — Track title/artist changed: `{mount, title, artist}`
-        - `stream` — Stream status update: `{mount, format, bitrate, listeners, health}`
-        - `streams` — Full stream list refresh: `[{mount, title, artist, ...}]`
+        Named `metadata` events replay the latest visible playback state on connection,
+        then emit track changes and terminal clears. Each mount has a monotonic
+        `revision` and a `playback_id` for its current activation. Empty title and
+        playback_id clear an ended playback. Duplicate revisions are suppressed.
+        Named `stream` events include the same playback identity and stream metrics.
+        Unnamed data frames contain an array of visible stream snapshots.
+      x-event-schemas:
+        metadata:
+          $ref: "#/components/schemas/PlaybackMetadata"
+        stream:
+          $ref: "#/components/schemas/PublicStreamEvent"
       responses:
         "200":
           description: SSE event stream
+          content:
+            text/event-stream: {}
+
+  /events/metadata:
+    get:
+      tags: [Streaming]
+      summary: Metadata-Only Events
+      description: |
+        Public SSE endpoint that emits only named metadata events. Replays the latest
+        visible playback state, including terminal clears after source disappearance.
+        Emits later changes once per mount revision. No authentication is required.
+      x-event-schemas:
+        metadata:
+          $ref: "#/components/schemas/PlaybackMetadata"
+      responses:
+        "200":
+          description: Metadata SSE event stream
           content:
             text/event-stream: {}
 
@@ -1500,6 +1682,13 @@ paths:
         Exchange SDP to broadcast audio via WebRTC. The browser captures audio
         (e.g. via `getUserMedia`), creates an offer, and sends it here.
         The server responds with an SDP answer to complete the connection.
+
+        Authentication (one of):
+
+        * The mount's source password, sent as HTTP Basic auth or as a
+          `password` query parameter. Use this for scripted publishers.
+        * A logged-in admin session (or API token) with access to the mount.
+          Session callers must also send the `X-CSRF-Token` header.
       requestBody:
         required: true
         content:
@@ -1581,8 +1770,170 @@ components:
         mount:
           type: string
 
+    Recovery:
+      type: object
+      properties:
+        phase:
+          type: string
+          enum: ["", idle, recovering, backoff]
+        attempt:
+          type: integer
+        next_retry:
+          type: string
+          format: date-time
+        last_error:
+          type: string
+
+    DiagnosticEntry:
+      type: object
+      properties:
+        timestamp:
+          type: string
+          format: date-time
+        status:
+          type: string
+          enum: [paused, running, degraded, dead, recovering, stopped, error]
+        class:
+          type: string
+        reason:
+          type: string
+        error:
+          type: string
+        actor:
+          type: string
+        details:
+          type: object
+          additionalProperties:
+            type: string
+
+    MountDiagnostics:
+      type: object
+      properties:
+        producer_state:
+          type: string
+          description: Producer intent, reported independently of output availability.
+        availability_state:
+          type: string
+          enum: [available, silent]
+        recovery:
+          $ref: "#/components/schemas/Recovery"
+        producer_last_progress:
+          type: string
+          format: date-time
+        availability_last_progress:
+          type: string
+          format: date-time
+        status:
+          type: string
+        status_class:
+          type: string
+        status_reason:
+          type: string
+        last_error:
+          type: string
+        status_updated_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in seconds.
+        history:
+          type: array
+          items:
+            $ref: "#/components/schemas/DiagnosticEntry"
+
+    Listener:
+      type: object
+      properties:
+        id:
+          type: string
+        protocol:
+          type: string
+          enum: [http, webrtc]
+        requested_mount:
+          type: string
+        current_mount:
+          type: string
+        remote_addr:
+          type: string
+        user_agent:
+          type: string
+        connected_at:
+          type: integer
+          format: int64
+          description: Unix timestamp in seconds.
+        duration_seconds:
+          type: integer
+          format: int64
+        last_stream_switch_at:
+          type: integer
+          format: int64
+        move_id:
+          type: string
+        move_status:
+          type: string
+          enum: [pending, completed, failed]
+        move_error:
+          type: string
+        move_destination:
+          type: string
+
+    ListenerMove:
+      type: object
+      required: [status, id, listener_id, destination]
+      properties:
+        status:
+          type: string
+          enum: [pending]
+        id:
+          type: string
+        listener_id:
+          type: string
+        destination:
+          type: string
+
+    PlaybackMetadata:
+      type: object
+      required: [mount, title, artist, started_at, playback_id, revision]
+      properties:
+        mount:
+          type: string
+        title:
+          type: string
+        artist:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        playback_id:
+          type: string
+          description: Playback activation identity. Empty when playback is cleared.
+        revision:
+          type: integer
+          format: int64
+          minimum: 0
+          description: Monotonic revision per mount. Later revisions supersede earlier playback state.
+
+    PublicStreamEvent:
+      type: object
+      allOf:
+        - $ref: "#/components/schemas/PlaybackMetadata"
+      properties:
+        live:
+          type: boolean
+        format:
+          type: string
+        bitrate:
+          type: string
+        listeners:
+          type: integer
+        viewers:
+          type: integer
+        has_video:
+          type: boolean
+
     Stream:
       type: object
+      allOf:
+        - $ref: "#/components/schemas/MountDiagnostics"
       properties:
         mount:
           type: string
@@ -1600,6 +1951,17 @@ components:
           description: Effective listener burst size in bytes after applying defaults
         listeners:
           type: integer
+        max_listeners:
+          type: integer
+          description: Configured additional mount listener cap. Zero uses the server limit.
+        effective_max_listeners:
+          type: integer
+          description: Effective managed listener cap after combining server and mount limits. Zero is unlimited.
+        source_kind:
+          type: string
+          enum: [icecast, autodj, relay, webrtc, rtmp, srt, transcode]
+        source_label:
+          type: string
         source_ip:
           type: string
           description: IP of connected source, empty if offline
@@ -1624,6 +1986,8 @@ components:
 
     AutoDJ:
       type: object
+      allOf:
+        - $ref: "#/components/schemas/MountDiagnostics"
       properties:
         name:
           type: string
@@ -1820,9 +2184,6 @@ components:
         directory_listing:
           type: boolean
           description: Register with stream directories
-        auto_update:
-          type: boolean
-          description: Automatically check for updates
 
     Stats:
       type: object

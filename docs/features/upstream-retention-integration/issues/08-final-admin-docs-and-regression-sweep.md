@@ -1,6 +1,8 @@
 # Final Admin, Docs, And Regression Sweep
 
-Status: ready-for-agent
+Status: needs-triage
+
+Implementation: complete. Awaiting maintainer review. See [verification](../verification.md).
 
 ## Parent
 
@@ -12,13 +14,13 @@ Complete the integration sweep across admin UI, documentation, and regression te
 
 ## Acceptance criteria
 
-- [ ] Admin UI exposes upstream webhooks, dashboard map/history/traffic, kiosk, player/video stats, and retained fork diagnostics/listener/stream controls without route loss.
-- [ ] Docs treat stale upstream-rebase plans as historical and update active guidance for AutoDJ Gap Filler, Retained Dead Streams, Mount Ownership Registry, Metadata-Only Events, burst defaults, and updater removal.
-- [ ] README and architecture docs no longer claim in-process self-update support.
-- [ ] Generated frontend assets are rebuilt after source changes.
-- [ ] Focused regression tests cover retained fork behavior and the main upstream behavior that fork code touches.
-- [ ] Go and frontend checks for the integrated branch pass or document pre-existing failures.
-- [ ] The retention audit and PRD remain accurate after implementation.
+- [x] Admin UI exposes upstream webhooks, dashboard map/history/traffic, kiosk, player/video stats, and retained fork diagnostics/listener/stream controls without route loss.
+- [x] Docs treat stale upstream-rebase plans as historical and update active guidance for AutoDJ Gap Filler, Retained Dead Streams, Mount Ownership Registry, Metadata-Only Events, burst defaults, and updater removal.
+- [x] README and architecture docs no longer claim in-process self-update support.
+- [x] Generated frontend assets are rebuilt after source changes.
+- [x] Focused regression tests cover retained fork behavior and the main upstream behavior that fork code touches.
+- [x] Go and frontend checks for the integrated branch pass or document pre-existing failures.
+- [x] The retention audit and PRD remain accurate after implementation.
 
 ## Blocked by
 

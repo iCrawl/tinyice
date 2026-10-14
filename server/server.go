@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +23,9 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+//go:embed all:templates
+var templateFS embed.FS
+
 //go:embed all:assets
 var assetFS embed.FS
 
@@ -33,7 +37,6 @@ var assetFS embed.FS
 //
 // Key responsibilities:
 //   - HTTP request routing and handling
-//   - Web interface rendering (embedded frontend, assets)
 //   - WebSocket connections for real-time updates
 //   - Source client authentication and authorization
 //   - Listener connection management
@@ -52,7 +55,6 @@ var assetFS embed.FS
 type Server struct {
 	Config          *config.Config           // Application configuration
 	Relay           *relay.Relay             // Core relay/streaming engine
-	RuntimeRegistry *relay.RuntimeRegistry   // Audio-first mount lifecycle registry
 	RelayM          *relay.RelayManager      // Relay stream management
 	TranscoderM     *relay.TranscoderManager // Transcoding management
 	HealthM         *relay.HealthMonitor     // Stream health monitoring
@@ -62,12 +64,14 @@ type Server struct {
 	SRT             *relay.SRTServer         // SRT ingest server (optional)
 	TenantM         *relay.TenantManager     // Multi-tenant management
 	mpdServer       *relay.MPDServer         // MPD protocol server (optional)
-	shell           *ShellRenderer           // New Preact frontend renderer
-	Version         string                   // TinyIce version
-	Commit          string                   // Git commit hash
-	httpServers     []*http.Server           // Active HTTP servers
-	startTime       time.Time                // Server start time
+	tmpl            *template.Template
+	shell           *ShellRenderer // New Preact frontend renderer
+	Version         string         // TinyIce version
+	Commit          string         // Git commit hash
+	httpServers     []*http.Server // Active HTTP servers
+	startTime       time.Time      // Server start time
 	AuthLog         *zap.SugaredLogger
+	RuntimeRegistry *relay.RuntimeRegistry
 
 	sessions   map[string]*session
 	sessionsMu sync.RWMutex
@@ -80,10 +84,11 @@ type Server struct {
 	scanAttempts   map[string]*scanAttempt
 	scanAttemptsMu sync.Mutex
 
-	hlsOutputs map[string]*relay.HLSOutput
-	hlsMu      sync.RWMutex
-	hlsCtx     context.Context
-	hlsCancel  context.CancelFunc
+	hlsOutputs    map[string]*relay.HLSOutput
+	hlsLastAccess map[string]time.Time // last playlist/segment request per mount
+	hlsMu         sync.RWMutex
+	hlsCtx        context.Context
+	hlsCancel     context.CancelFunc
 
 	// Per-mount poster JPEG, captured client-side and uploaded once per
 	// session. Kept in memory only — restart drops them and the next
@@ -115,6 +120,12 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
+	tmpl := template.New("base")
+	tmpl, err := tmpl.ParseFS(templateFS, "templates/*.html")
+	if err != nil {
+		logger.L.Fatalf("Error loading embedded templates: %v", err)
+	}
+
 	hm, err := relay.NewHistoryManager("history.db")
 	if err != nil {
 		logger.L.Fatalf("Failed to initialize history manager: %v", err)
@@ -150,9 +161,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		AttestationPreference: protocol.PreferNoAttestation,
 	})
 
-	// Keep dead streams visible by default so operators can inspect
-	// diagnostics and decide whether removal should be manual.
-	healthM := relay.NewHealthMonitor(r)
+	healthM := relay.NewHealthMonitor(r).WithAutoRemove(0)
 	hlsCtx, hlsCancel := context.WithCancel(context.Background())
 	srv := &Server{
 		Config:           cfg,
@@ -166,6 +175,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		RTMP:             relay.NewRTMPServer(r, cfg),
 		SRT:              relay.NewSRTServer(r, cfg),
 		TenantM:          relay.NewTenantManager(),
+		tmpl:             tmpl,
 		shell:            NewShellRenderer(),
 		Version:          version,
 		Commit:           commit,
@@ -175,6 +185,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		authAttempts:     make(map[string]*authAttempt),
 		scanAttempts:     make(map[string]*scanAttempt),
 		hlsOutputs:       make(map[string]*relay.HLSOutput),
+		hlsLastAccess:    make(map[string]time.Time),
 		hlsCtx:           hlsCtx,
 		hlsCancel:        hlsCancel,
 		posters:          make(map[string][]byte),
@@ -195,7 +206,9 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 	srv.RuntimeRegistry.SetTenantManager(srv.TenantM)
 	srv.StreamerM.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.RelayM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.TranscoderM.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.WebRTCM.SetRuntimeRegistry(srv.RuntimeRegistry)
+	srv.WebRTCM.SetListenerLimit(srv.effectiveMountListenerLimit)
 	srv.RTMP.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.SRT.SetRuntimeRegistry(srv.RuntimeRegistry)
 	srv.deadStreamRecovery = srv.StreamerM.RecoverDeadSongCommandMount
@@ -216,6 +229,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 			"format":           info.Format,
 			"bitrate":          info.Bitrate,
 			"duration_seconds": info.DurationSeconds,
+			"playback_id":      info.PlaybackID, "revision": info.Revision, "started_at": info.StartedAt,
 		})
 	}
 
@@ -463,6 +477,10 @@ func (s *Server) setupRoutes() *http.ServeMux {
 	})
 
 	mux.HandleFunc("/api/autodj/files", s.apiGetFiles)
+	// Registered as an exact path so it wins over the "/api/autodj/"
+	// prefix router below, which addresses a mount and has no meaning
+	// here: the browser exists to pick a directory before a mount has one.
+	mux.HandleFunc("/api/autodj/browse", s.apiBrowseMediaDirs)
 	// Handle /api/autodj/{mount}/... paths (frontend uses path-based mount routing)
 	// The frontend sends mount names URL-encoded (e.g. %2Fdemo for /demo),
 	// so we use RawPath to preserve the encoding before splitting.
@@ -533,7 +551,12 @@ func (s *Server) setupRoutes() *http.ServeMux {
 		case "playlist/reorder":
 			s.apiReorderPlaylist(w, r)
 		case "playlist/playnext":
-			s.apiAddToQueue(w, r) // playnext adds to front of queue
+			// Front of queue — apiAddToQueue reads this flag because the
+			// caller's JSON body carries only the playlist entry id.
+			q := r.URL.Query()
+			q.Set("front", "true")
+			r.URL.RawQuery = q.Encode()
+			s.apiAddToQueue(w, r)
 		case "playlist/save":
 			s.handlePlayerSavePlaylist(w, r)
 		case "playlist/load":
@@ -860,6 +883,7 @@ func (s *Server) Start() error {
 		go s.directoryReportingTask()
 	}
 	go s.statsRecordingTask()
+	go s.hlsJanitorTask()
 	go s.HealthM.Start(context.Background())
 	go s.sessionReaperTask()
 	// Internal-only metrics + pprof port. See startMetricsServer for the

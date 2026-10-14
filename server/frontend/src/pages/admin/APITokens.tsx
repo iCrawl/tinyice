@@ -1,11 +1,40 @@
 import { signal } from '@preact/signals'
-import { useEffect, useRef } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
-
-type APITokensStore = ReturnType<typeof createAPITokensStore>
 
 function createAPITokensStore() {
   const copied = signal(false)
+
+  function fallbackCopy(text: string) {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
+  }
+
+  interface TokenInfo {
+    id: number
+    name: string
+    username: string
+    created_at: string
+    last_used_at: string
+    last_used_ip: string
+    expires_at: string
+    prefix: string
+  }
+
+  interface TokenCreateResponse {
+    id: number
+    token: string
+    name: string
+  }
+
   const tokens = signal<TokenInfo[]>([])
   const loading = signal(true)
   const showCreate = signal(false)
@@ -14,127 +43,115 @@ function createAPITokensStore() {
   const formName = signal('')
   const formExpiry = signal('never')
 
-  return { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry }
-}
-
-function useAPITokensStore() {
-  const storeRef = useRef<APITokensStore | null>(null)
-  if (storeRef.current == null) {
-    storeRef.current = createAPITokensStore()
+  function relativeTime(dateStr: string): string {
+    if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
+    const now = Date.now()
+    const then = new Date(dateStr).getTime()
+    const diff = now - then
+    if (diff < 0) {
+      const absDiff = -diff
+      const days = Math.floor(absDiff / 86400000)
+      if (days > 365) return `in ${Math.floor(days / 365)}y`
+      if (days > 30) return `in ${Math.floor(days / 30)}mo`
+      if (days > 0) return `in ${days}d`
+      const hours = Math.floor(absDiff / 3600000)
+      if (hours > 0) return `in ${hours}h`
+      const minutes = Math.floor(absDiff / 60000)
+      if (minutes > 0) return `in ${minutes}m`
+      return 'just now'
+    }
+    const seconds = Math.floor(diff / 1000)
+    if (seconds < 60) return 'just now'
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
+    const days = Math.floor(hours / 24)
+    if (days < 30) return `${days} day${days !== 1 ? 's' : ''} ago`
+    const months = Math.floor(days / 30)
+    if (months < 12) return `${months} month${months !== 1 ? 's' : ''} ago`
+    const years = Math.floor(months / 12)
+    return `${years} year${years !== 1 ? 's' : ''} ago`
   }
-  return storeRef.current
-}
 
-function fallbackCopy(store: APITokensStore, text: string) {
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
-  store.copied.value = true
-  setTimeout(() => { store.copied.value = false }, 2000)
-}
-
-interface TokenInfo {
-  id: number
-  name: string
-  username: string
-  created_at: string
-  last_used_at: string
-  last_used_ip: string
-  expires_at: string
-  prefix: string
-}
-
-interface TokenCreateResponse {
-  id: number
-  token: string
-  name: string
-}
-
-function relativeTime(dateStr: string): string {
-  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
-  const now = Date.now()
-  const then = new Date(dateStr).getTime()
-  const diff = now - then
-  if (diff < 0) {
-    const absDiff = -diff
-    const days = Math.floor(absDiff / 86400000)
-    if (days > 365) return `in ${Math.floor(days / 365)}y`
-    if (days > 30) return `in ${Math.floor(days / 30)}mo`
-    if (days > 0) return `in ${days}d`
-    const hours = Math.floor(absDiff / 3600000)
-    if (hours > 0) return `in ${hours}h`
-    const minutes = Math.floor(absDiff / 60000)
-    if (minutes > 0) return `in ${minutes}m`
-    return 'just now'
+  function formatDate(dateStr: string): string {
+    if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
+    return new Date(dateStr).toLocaleDateString()
   }
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} day${days !== 1 ? 's' : ''} ago`
-  const months = Math.floor(days / 30)
-  if (months < 12) return `${months} month${months !== 1 ? 's' : ''} ago`
-  const years = Math.floor(months / 12)
-  return `${years} year${years !== 1 ? 's' : ''} ago`
-}
 
-function formatDate(dateStr: string): string {
-  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
-  return new Date(dateStr).toLocaleDateString()
-}
-
-async function loadTokens(store: APITokensStore) {
-  store.loading.value = true
-  try {
-    store.tokens.value = await api.get<TokenInfo[]>('/api/tokens')
-  } catch { /* empty */ }
-  store.loading.value = false
-}
-
-async function createToken(store: APITokensStore) {
-  const name = store.formName.value.trim()
-  if (!name) return
-  let expires_at: string | undefined
-  if (store.formExpiry.value !== 'never') {
-    const now = new Date()
-    const days = parseInt(store.formExpiry.value, 10)
-    now.setDate(now.getDate() + days)
-    expires_at = now.toISOString()
+  async function loadTokens() {
+    loading.value = true
+    try {
+      tokens.value = await api.get<TokenInfo[]>('/api/tokens')
+    } catch { /* empty */ }
+    loading.value = false
   }
-  try {
-    const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
-    store.createdToken.value = result.token
-    store.createdName.value = result.name
-    store.showCreate.value = false
-    store.formName.value = ''
-    store.formExpiry.value = 'never'
-    await loadTokens(store)
-  } catch { /* empty */ }
-}
 
-async function deleteToken(store: APITokensStore, id: number, name: string) {
-  if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
-  try {
-    await api.del(`/api/tokens?id=${id}`)
-    await loadTokens(store)
-  } catch { /* empty */ }
+  async function createToken() {
+    const name = formName.value.trim()
+    if (!name) return
+    let expires_at: string | undefined
+    if (formExpiry.value !== 'never') {
+      const now = new Date()
+      const days = parseInt(formExpiry.value, 10)
+      now.setDate(now.getDate() + days)
+      expires_at = now.toISOString()
+    }
+    try {
+      const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
+      createdToken.value = result.token
+      createdName.value = result.name
+      showCreate.value = false
+      formName.value = ''
+      formExpiry.value = 'never'
+      loadTokens()
+    } catch { /* empty */ }
+  }
+
+  async function deleteToken(id: number, name: string) {
+    if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
+    try {
+      await api.del(`/api/tokens?id=${id}`)
+      loadTokens()
+    } catch { /* empty */ }
+  }
+
+  return {
+    copied,
+    tokens,
+    loading,
+    showCreate,
+    createdToken,
+    createdName,
+    formName,
+    formExpiry,
+    fallbackCopy,
+    relativeTime,
+    formatDate,
+    loadTokens,
+    createToken,
+    deleteToken,
+  }
 }
 
 export function APITokens() {
-  const store = useAPITokensStore()
-  const { copied, tokens, loading, showCreate, createdToken, createdName, formName, formExpiry } = store
-
-  useEffect(() => {
-    void loadTokens(store)
-  }, [])
+  const {
+    copied,
+    tokens,
+    loading,
+    showCreate,
+    createdToken,
+    createdName,
+    formName,
+    formExpiry,
+    fallbackCopy,
+    relativeTime,
+    formatDate,
+    loadTokens,
+    createToken,
+    deleteToken,
+  } = useMemo(createAPITokensStore, [])
+  useEffect(() => { loadTokens() }, [])
 
   return (
     <div class="p-7">
@@ -158,50 +175,48 @@ export function APITokens() {
       ) : tokens.value.length === 0 ? (
         <p class="text-text-tertiary text-sm text-center py-12">No API tokens created yet</p>
       ) : (
-        <div class="admin-table-shell">
-          <div class="admin-table-scroll">
-            <table class="w-full min-w-[980px]">
-              <thead>
-                <tr class="border-b border-border">
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Name</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Token</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Owner</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Created</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Last Used</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Expires</th>
-                  <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+        <div class="border border-border rounded-xl overflow-hidden">
+          <table class="w-full">
+            <thead>
+              <tr class="border-b border-border">
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Name</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Token</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Owner</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Created</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Last Used</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-left px-4 py-3">Expires</th>
+                <th class="font-mono text-[9px] tracking-[1px] text-text-tertiary uppercase text-right px-4 py-3">Actions</th>
+              </tr>
+            </thead>
+            <tbody>
+              {tokens.value.map((t) => (
+                <tr key={t.id} class="border-b border-[rgba(255,255,255,0.03)]">
+                  <td class="px-4 py-3.5 text-sm font-bold text-text-primary">{t.name}</td>
+                  <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{t.prefix}...</td>
+                  <td class="px-4 py-3.5 text-sm text-text-secondary">{t.username}</td>
+                  <td class="px-4 py-3.5 text-sm text-text-secondary">{relativeTime(t.created_at)}</td>
+                  <td class="px-4 py-3.5 text-sm text-text-secondary">
+                    {t.last_used_at && t.last_used_at !== '0001-01-01T00:00:00Z'
+                      ? <>{relativeTime(t.last_used_at)}{t.last_used_ip ? <span class="text-text-tertiary ml-1">({t.last_used_ip})</span> : null}</>
+                      : 'Never'}
+                  </td>
+                  <td class="px-4 py-3.5 text-sm text-text-secondary">{formatDate(t.expires_at)}</td>
+                  <td class="px-4 py-3.5 text-right">
+                    <button
+                      onClick={() => deleteToken(t.id, t.name)}
+                      class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
+                      title="Delete token"
+                    >
+                      <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                        <polyline points="3 6 5 6 21 6" />
+                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                      </svg>
+                    </button>
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {tokens.value.map((t) => (
-                  <tr key={t.id} class="border-b border-[rgba(255,255,255,0.03)]">
-                    <td class="px-4 py-3.5 text-sm font-bold text-text-primary">{t.name}</td>
-                    <td class="px-4 py-3.5 font-mono text-sm text-text-tertiary">{t.prefix}...</td>
-                    <td class="px-4 py-3.5 text-sm text-text-secondary">{t.username}</td>
-                    <td class="px-4 py-3.5 text-sm text-text-secondary">{relativeTime(t.created_at)}</td>
-                    <td class="px-4 py-3.5 text-sm text-text-secondary">
-                      {t.last_used_at && t.last_used_at !== '0001-01-01T00:00:00Z'
-                        ? <>{relativeTime(t.last_used_at)}{t.last_used_ip ? <span class="text-text-tertiary ml-1">({t.last_used_ip})</span> : null}</>
-                        : 'Never'}
-                    </td>
-                    <td class="px-4 py-3.5 text-sm text-text-secondary">{formatDate(t.expires_at)}</td>
-                    <td class="px-4 py-3.5 text-right">
-                      <button
-                        onClick={() => { void deleteToken(store, t.id, t.name) }}
-                        class="border border-border text-danger font-mono text-xs px-3 py-1.5 rounded-lg hover:border-danger/30"
-                        title="Delete token"
-                      >
-                        <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
-                          <polyline points="3 6 5 6 21 6" />
-                          <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
-                        </svg>
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+              ))}
+            </tbody>
+          </table>
         </div>
       )}
 
@@ -240,7 +255,7 @@ export function APITokens() {
                 CANCEL
               </button>
               <button
-                onClick={() => { void createToken(store) }}
+                onClick={createToken}
                 class="bg-accent text-surface-base font-mono font-bold text-xs tracking-[1px] px-4 py-2.5 rounded-lg"
               >
                 CREATE
@@ -275,10 +290,10 @@ export function APITokens() {
                       setTimeout(() => { copied.value = false }, 2000)
                     }).catch(() => {
                       // Fallback for non-secure contexts
-                      fallbackCopy(store, token)
+                      fallbackCopy(token)
                     })
                   } else {
-                    fallbackCopy(store, token)
+                    fallbackCopy(token)
                   }
                 }}
                 class={`border font-mono text-xs px-4 py-2.5 rounded-lg shrink-0 transition-colors ${
