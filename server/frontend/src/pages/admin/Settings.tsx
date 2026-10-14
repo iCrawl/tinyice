@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { Toggle } from '../../components/Toggle'
 
@@ -25,91 +25,118 @@ interface BrandingSettings {
   logo_path: string
 }
 
-const activeTab = signal<'server' | 'branding'>('server')
-const saving = signal(false)
+function createSettingsStore() {
+  const activeTab = signal<'server' | 'branding'>('server')
+  const saving = signal(false)
 
-// Server state
-const server = signal<ServerSettings>({
-  bind_host: '0.0.0.0',
-  port: 8000,
-  use_https: false,
-  max_listeners: 0,
-  hostname: '',
-  base_url: '',
-  location: '',
-  admin_email: '',
-  low_latency_mode: false,
-  directory_listing: false,
-  audit_enabled: false,
-})
+  // Server state
+  const server = signal<ServerSettings>({
+    bind_host: '0.0.0.0',
+    port: 8000,
+    use_https: false,
+    max_listeners: 0,
+    hostname: '',
+    base_url: '',
+    location: '',
+    admin_email: '',
+    low_latency_mode: false,
+    directory_listing: false,
+    audit_enabled: false,
+  })
 
-// Branding state
-const branding = signal<BrandingSettings>({
-  page_title: '',
-  page_subtitle: '',
-  accent_color: '#ff6600',
-  landing_markdown: '',
-  logo_path: '',
-})
+  // Branding state
+  const branding = signal<BrandingSettings>({
+    page_title: '',
+    page_subtitle: '',
+    accent_color: '#ff6600',
+    landing_markdown: '',
+    logo_path: '',
+  })
 
-const loading = signal(true)
+  const loading = signal(true)
 
-function formatUptime(seconds: number): string {
-  const d = Math.floor(seconds / 86400)
-  const h = Math.floor((seconds % 86400) / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  if (d > 0) return `${d}d ${h}h ${m}m`
-  if (h > 0) return `${h}h ${m}m`
-  return `${m}m`
-}
+  function formatUptime(seconds: number): string {
+    const d = Math.floor(seconds / 86400)
+    const h = Math.floor((seconds % 86400) / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    if (d > 0) return `${d}d ${h}h ${m}m`
+    if (h > 0) return `${h}h ${m}m`
+    return `${m}m`
+  }
 
-async function load() {
-  loading.value = true
-  try {
-    const [s, b] = await Promise.all([
-      api.get<ServerSettings>('/api/settings'),
-      api.get<BrandingSettings>('/api/branding'),
-    ])
-    server.value = s
-    branding.value = b
-  } catch { /* empty */ }
-  loading.value = false
-}
+  async function load() {
+    loading.value = true
+    try {
+      const [s, b] = await Promise.all([
+        api.get<ServerSettings>('/api/settings'),
+        api.get<BrandingSettings>('/api/branding'),
+      ])
+      server.value = s
+      branding.value = b
+    } catch { /* empty */ }
+    loading.value = false
+  }
 
-async function saveServer() {
-  saving.value = true
-  try {
-    await api.put('/api/settings', {
-      hostname: server.value.hostname,
-      base_url: server.value.base_url,
-      location: server.value.location,
-      admin_email: server.value.admin_email,
-      max_listeners: server.value.max_listeners,
-      low_latency_mode: server.value.low_latency_mode,
-      directory_listing: server.value.directory_listing,
-      audit_enabled: server.value.audit_enabled,
-    })
-  } catch { /* empty */ }
-  saving.value = false
-}
+  async function saveServer() {
+    saving.value = true
+    try {
+      await api.put('/api/settings', {
+        hostname: server.value.hostname,
+        base_url: server.value.base_url,
+        location: server.value.location,
+        admin_email: server.value.admin_email,
+        max_listeners: server.value.max_listeners,
+        low_latency_mode: server.value.low_latency_mode,
+        directory_listing: server.value.directory_listing,
+        audit_enabled: server.value.audit_enabled,
+      })
+    } catch { /* empty */ }
+    saving.value = false
+  }
 
-async function saveBranding() {
-  saving.value = true
-  try {
-    await api.put('/api/branding', branding.value)
-  } catch { /* empty */ }
-  saving.value = false
-}
+  async function saveBranding() {
+    saving.value = true
+    try {
+      await api.put('/api/branding', branding.value)
+    } catch { /* empty */ }
+    saving.value = false
+  }
 
-function updateServer<K extends keyof ServerSettings>(key: K, value: ServerSettings[K]) {
-  server.value = { ...server.value, [key]: value }
-}
+  function updateServer<K extends keyof ServerSettings>(key: K, value: ServerSettings[K]) {
+    server.value = { ...server.value, [key]: value }
+  }
 
-function updateBranding<K extends keyof BrandingSettings>(key: K, value: BrandingSettings[K]) {
-  branding.value = { ...branding.value, [key]: value }
+  function updateBranding<K extends keyof BrandingSettings>(key: K, value: BrandingSettings[K]) {
+    branding.value = { ...branding.value, [key]: value }
+  }
+
+  return {
+    activeTab,
+    saving,
+    server,
+    branding,
+    loading,
+    load,
+    saveServer,
+    saveBranding,
+    updateServer,
+    updateBranding,
+  }
 }
 
 export function Settings() {
+  const {
+    activeTab,
+    saving,
+    server,
+    branding,
+    loading,
+    load,
+    saveServer,
+    saveBranding,
+    updateServer,
+    updateBranding,
+  } = useMemo(createSettingsStore, [])
   useEffect(() => { load() }, [])
 
   return (

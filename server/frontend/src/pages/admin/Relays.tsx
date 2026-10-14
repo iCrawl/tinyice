@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { reportError, showToast } from '../../lib/toast'
 import { Toggle } from '../../components/Toggle'
@@ -12,100 +12,141 @@ interface Relay {
   active: boolean
 }
 
-const relays = signal<Relay[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const editingMount = signal<string | null>(null)
-const formUrl = signal('')
-const formMount = signal('')
-const formPassword = signal('')
-const formBurst = signal(65536)
-const formError = signal('')
+function createRelaysStore() {
+  const relays = signal<Relay[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const editingMount = signal<string | null>(null)
+  const formUrl = signal('')
+  const formMount = signal('')
+  const formPassword = signal('')
+  const formBurst = signal(65536)
+  const formError = signal('')
 
-function resetForm() {
-  formUrl.value = ''
-  formMount.value = ''
-  formPassword.value = ''
-  formBurst.value = 65536
-  editingMount.value = null
-  formError.value = ''
-}
-
-function openAddForm() {
-  resetForm()
-  showForm.value = true
-}
-
-function openEditForm(r: Relay) {
-  resetForm()
-  editingMount.value = r.mount
-  formUrl.value = r.url
-  formMount.value = r.mount
-  formBurst.value = r.burst_size || 65536
-  showForm.value = true
-}
-
-function formatUptime(seconds: number): string {
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  return `${h}h ${m}m`
-}
-
-async function load() {
-  loading.value = true
-  try {
-    relays.value = await api.get<Relay[]>('/api/relays')
-  } catch (e) {
-    reportError(e, 'Failed to load relays')
+  function resetForm() {
+    formUrl.value = ''
+    formMount.value = ''
+    formPassword.value = ''
+    formBurst.value = 65536
+    editingMount.value = null
+    formError.value = ''
   }
-  loading.value = false
-}
 
-async function saveRelay() {
-  formError.value = ''
-  try {
-    await api.post('/api/relays', {
-      url: formUrl.value,
-      mount: editingMount.value || formMount.value,
-      password: formPassword.value || undefined,
-      burst_size: formBurst.value,
-    })
-    showForm.value = false
+  function openAddForm() {
     resetForm()
+    showForm.value = true
+  }
+
+  function openEditForm(r: Relay) {
+    resetForm()
+    editingMount.value = r.mount
+    formUrl.value = r.url
+    formMount.value = r.mount
+    formBurst.value = r.burst_size || 65536
+    showForm.value = true
+  }
+
+  function formatUptime(seconds: number): string {
+    if (seconds < 60) return `${seconds}s`
+    if (seconds < 3600) return `${Math.floor(seconds / 60)}m`
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    return `${h}h ${m}m`
+  }
+
+  async function load() {
+    loading.value = true
+    try {
+      relays.value = await api.get<Relay[]>('/api/relays')
+    } catch (e) {
+      reportError(e, 'Failed to load relays')
+    }
+    loading.value = false
+  }
+
+  async function saveRelay() {
+    formError.value = ''
+    try {
+      await api.post('/api/relays', {
+        url: formUrl.value,
+        mount: editingMount.value || formMount.value,
+        password: formPassword.value || undefined,
+        burst_size: formBurst.value,
+      })
+      showForm.value = false
+      resetForm()
+      load()
+    } catch (e) {
+      formError.value = (e as Error).message || 'Save failed'
+    }
+  }
+
+  async function toggleRelay(mount: string) {
+    try {
+      await api.post('/api/relays/toggle', { mount })
+    } catch (e) {
+      reportError(e, `Failed to toggle relay ${mount}`)
+    }
     load()
-  } catch (e) {
-    formError.value = (e as Error).message || 'Save failed'
   }
-}
 
-async function toggleRelay(mount: string) {
-  try {
-    await api.post('/api/relays/toggle', { mount })
-  } catch (e) {
-    reportError(e, `Failed to toggle relay ${mount}`)
+  async function removeRelay(mount: string) {
+    try {
+      await api.del(`/api/relays?mount=${encodeURIComponent(mount)}`)
+      showToast('success', `Relay ${mount} removed`)
+    } catch (e) {
+      reportError(e, `Failed to remove relay ${mount}`)
+    }
+    load()
   }
-  load()
-}
 
-async function removeRelay(mount: string) {
-  try {
-    await api.del(`/api/relays?mount=${encodeURIComponent(mount)}`)
-    showToast('success', `Relay ${mount} removed`)
-  } catch (e) {
-    reportError(e, `Failed to remove relay ${mount}`)
+  function statusColor(r: Relay): string {
+    if (r.active) return 'bg-live'
+    if (r.enabled) return 'bg-yellow-400'
+    return 'bg-text-tertiary'
   }
-  load()
-}
 
-function statusColor(r: Relay): string {
-  if (r.active) return 'bg-live'
-  if (r.enabled) return 'bg-yellow-400'
-  return 'bg-text-tertiary'
+  return {
+    relays,
+    loading,
+    showForm,
+    editingMount,
+    formUrl,
+    formMount,
+    formPassword,
+    formBurst,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveRelay,
+    toggleRelay,
+    removeRelay,
+    statusColor,
+  }
 }
 
 export function Relays() {
+  const {
+    relays,
+    loading,
+    showForm,
+    editingMount,
+    formUrl,
+    formMount,
+    formPassword,
+    formBurst,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveRelay,
+    toggleRelay,
+    removeRelay,
+    statusColor,
+  } = useMemo(createRelaysStore, [])
   useEffect(() => { load() }, [])
 
   return (

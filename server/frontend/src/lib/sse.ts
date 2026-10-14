@@ -1,4 +1,4 @@
-import type { StatsEvent, StreamEvent, AutoDJEvent } from '../types'
+import type { StatsEvent, StreamEvent, AutoDJEvent, MetadataEvent } from '../types'
 import type { GeoCity } from '../components/LiveGeoMap'
 import { redirectToLogin } from './api'
 
@@ -23,6 +23,7 @@ async function probeAuth(url: string) {
 }
 
 type SSEEventMap = {
+  metadata: MetadataEvent
   stats: StatsEvent
   stream: StreamEvent
   autodj: AutoDJEvent
@@ -34,7 +35,7 @@ type SSEEventMap = {
 
 type SSECallback<K extends keyof SSEEventMap> = (data: SSEEventMap[K]) => void
 
-export function createSSE(url: string) {
+export function createSSE(url: string, onOpen?: () => void) {
   let source: EventSource | null = null
   const listeners = new Map<string, Set<Function>>()
   // attached tracks which SSE event types we've already called
@@ -66,7 +67,7 @@ export function createSSE(url: string) {
     if (closed) return
     source = new EventSource(url)
     attached = new Set()
-    source.onopen = () => { reconnectDelay = 1000 }
+    source.onopen = () => { reconnectDelay = 1000; onOpen?.() }
     source.onerror = () => {
       source?.close()
       source = null

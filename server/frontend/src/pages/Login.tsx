@@ -1,10 +1,12 @@
+import { useMemo } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import type { TinyIceBase } from '@/types'
 import { PasskeyButton } from '@/components/PasskeyButton'
 import { OIDCButtons } from '@/components/OIDCButtons'
 
-const error = signal('')
-const loading = signal(false)
+function createLoginStore() {
+  return { error: signal(''), loading: signal(false) }
+}
 
 // A second `declare global` for window.__TINYICE__ conflicted with the one
 // in types.ts, so this file never typechecked; TinyIceBase now carries the
@@ -21,6 +23,7 @@ function nextPath(): string {
 }
 
 export function Login() {
+  const { error, loading } = useMemo(createLoginStore, [])
   const hasPasskeys = pageData.passkeysEnabled && typeof PublicKeyCredential !== 'undefined'
   const hasOIDC = pageData.oidcProviders && pageData.oidcProviders.length > 0
   const hasAlternateAuth = hasPasskeys || hasOIDC
@@ -92,6 +95,7 @@ export function Login() {
               <input
                 type="text"
                 name="username"
+                aria-label="Username"
                 placeholder="Username"
                 required
                 autocomplete="username"
@@ -100,6 +104,7 @@ export function Login() {
               <input
                 type="password"
                 name="password"
+                aria-label="Password"
                 placeholder="Password"
                 required
                 autocomplete="current-password"
@@ -115,7 +120,7 @@ export function Login() {
             </form>
 
             {error.value && (
-              <p class="text-danger text-sm text-center">{error.value}</p>
+              <p role="alert" class="text-danger text-sm text-center">{error.value}</p>
             )}
 
             {/* Request Access hint */}

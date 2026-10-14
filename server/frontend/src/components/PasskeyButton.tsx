@@ -1,10 +1,22 @@
+import { useMemo } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { startAuthentication } from '@simplewebauthn/browser'
 
-const loading = signal(false)
-const error = signal('')
+function createPasskeyButtonStore() {
+  const loading = signal(false)
+  const error = signal('')
+
+  return {
+    loading,
+    error,
+  }
+}
 
 export function PasskeyButton() {
+  const {
+    loading,
+    error,
+  } = useMemo(createPasskeyButtonStore, [])
   async function handleLogin() {
     loading.value = true
     error.value = ''
@@ -29,11 +41,11 @@ export function PasskeyButton() {
 
       const result = await finishRes.json()
       window.location.href = result.redirect || '/admin'
-    } catch (e: any) {
-      if (e.name === 'NotAllowedError') {
+    } catch (e) {
+      if (e instanceof Error && e.name === 'NotAllowedError') {
         error.value = 'Passkey authentication was cancelled'
       } else {
-        error.value = e.message || 'Passkey login failed'
+        error.value = e instanceof Error ? e.message : 'Passkey login failed'
       }
     } finally {
       loading.value = false

@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { api } from '@/lib/api'
 import { createSSE } from '@/lib/sse'
@@ -89,415 +89,479 @@ function mapInstance(raw: AutoDJInstanceRaw): AutoDJInstance {
   }
 }
 
-const instances = signal<AutoDJInstance[]>([])
-const loading = signal(true)
-const loadError = signal('')
-const showForm = signal(false)
-const editingMount = signal<string | null>(null) // null = creating new, string = editing existing mount
-const formName = signal('')
-const formMount = signal('')
-const formMusicDir = signal('')
-const formFormat = signal('mp3')
-const formBitrate = signal(128)
-const formLoop = signal(true)
-const formVisible = signal(true)
-const formMPDEnabled = signal(false)
-const formMPDPort = signal('')
-const formInjectMetadata = signal(true)
-const formSongCommand = signal('')
-const formSongCommandTimeout = signal(5)
-const formOnPlayCommand = signal('')
-const formOnPlayCommandTimeout = signal(10)
-const saveError = signal('')
-const showBrowser = signal(false)
+function createAutoDJStore() {
+  const instances = signal<AutoDJInstance[]>([])
+  const loading = signal(true)
+  const loadError = signal('')
+  const showForm = signal(false)
+  const editingMount = signal<string | null>(null) // null = creating new, string = editing existing mount
+  const formName = signal('')
+  const formMount = signal('')
+  const formMusicDir = signal('')
+  const formFormat = signal('mp3')
+  const formBitrate = signal(128)
+  const formLoop = signal(true)
+  const formVisible = signal(true)
+  const formMPDEnabled = signal(false)
+  const formMPDPort = signal('')
+  const formInjectMetadata = signal(true)
+  const formSongCommand = signal('')
+  const formSongCommandTimeout = signal(5)
+  const formOnPlayCommand = signal('')
+  const formOnPlayCommandTimeout = signal(10)
+  const saveError = signal('')
+  const showBrowser = signal(false)
 
-function resetForm() {
-  saveError.value = ''
-  formName.value = ''
-  formMount.value = ''
-  formMusicDir.value = ''
-  formFormat.value = 'mp3'
-  formBitrate.value = 128
-  formLoop.value = true
-  formVisible.value = true
-  formMPDEnabled.value = false
-  formMPDPort.value = ''
-  formInjectMetadata.value = true
-  formSongCommand.value = ''
-  formSongCommandTimeout.value = 5
-  formOnPlayCommand.value = ''
-  formOnPlayCommandTimeout.value = 10
-  editingMount.value = null
-  showBrowser.value = false
-}
-
-function openEditForm(inst: AutoDJInstance) {
-  formName.value = inst.name
-  formMount.value = inst.mount
-  formMusicDir.value = inst.musicDir
-  formFormat.value = inst.format
-  formBitrate.value = inst.bitrate
-  formLoop.value = inst.loop
-  formVisible.value = inst.visible
-  formMPDEnabled.value = inst.mpdEnabled
-  formMPDPort.value = inst.mpdPort
-  formInjectMetadata.value = inst.injectMetadata
-  formSongCommand.value = inst.songCommand || ''
-  formSongCommandTimeout.value = inst.songCommandTimeout || 5
-  formOnPlayCommand.value = inst.onPlayCommand || ''
-  formOnPlayCommandTimeout.value = inst.onPlayCommandTimeout || 10
-  editingMount.value = inst.mount
-  showForm.value = true
-}
-
-async function saveAutoDJ() {
-  saveError.value = ''
-  const body = {
-    name: formName.value,
-    mount: formMount.value,
-    music_dir: formMusicDir.value,
-    format: formFormat.value,
-    bitrate: formBitrate.value,
-    loop: formLoop.value,
-    visible: formVisible.value,
-    mpd_enabled: formMPDEnabled.value,
-    mpd_port: formMPDPort.value,
-    inject_metadata: formInjectMetadata.value,
-    song_command: formSongCommand.value || undefined,
-    song_command_timeout: formSongCommandTimeout.value || undefined,
-    on_play_command: formOnPlayCommand.value || undefined,
-    on_play_command_timeout: formOnPlayCommandTimeout.value || undefined,
+  function resetForm() {
+    saveError.value = ''
+    formName.value = ''
+    formMount.value = ''
+    formMusicDir.value = ''
+    formFormat.value = 'mp3'
+    formBitrate.value = 128
+    formLoop.value = true
+    formVisible.value = true
+    formMPDEnabled.value = false
+    formMPDPort.value = ''
+    formInjectMetadata.value = true
+    formSongCommand.value = ''
+    formSongCommandTimeout.value = 5
+    formOnPlayCommand.value = ''
+    formOnPlayCommandTimeout.value = 10
+    editingMount.value = null
+    showBrowser.value = false
   }
-  try {
-    if (editingMount.value) {
-      // PUT updates in place — server keeps playlist/queue state and
-      // reverts cleanly if validation fails, instead of the previous
-      // delete-then-recreate which would lose the instance entirely
-      // on any 400.
-      await api.put(`/api/autodj?mount=${encodeURIComponent(editingMount.value)}`, body)
-    } else {
-      await api.post('/api/autodj', body)
+
+  function openEditForm(inst: AutoDJInstance) {
+    formName.value = inst.name
+    formMount.value = inst.mount
+    formMusicDir.value = inst.musicDir
+    formFormat.value = inst.format
+    formBitrate.value = inst.bitrate
+    formLoop.value = inst.loop
+    formVisible.value = inst.visible
+    formMPDEnabled.value = inst.mpdEnabled
+    formMPDPort.value = inst.mpdPort
+    formInjectMetadata.value = inst.injectMetadata
+    formSongCommand.value = inst.songCommand || ''
+    formSongCommandTimeout.value = inst.songCommandTimeout || 5
+    formOnPlayCommand.value = inst.onPlayCommand || ''
+    formOnPlayCommandTimeout.value = inst.onPlayCommandTimeout || 10
+    editingMount.value = inst.mount
+    showForm.value = true
+  }
+
+  async function saveAutoDJ() {
+    saveError.value = ''
+    const body = {
+      name: formName.value,
+      mount: formMount.value,
+      music_dir: formMusicDir.value,
+      format: formFormat.value,
+      bitrate: formBitrate.value,
+      loop: formLoop.value,
+      visible: formVisible.value,
+      mpd_enabled: formMPDEnabled.value,
+      mpd_port: formMPDPort.value,
+      inject_metadata: formInjectMetadata.value,
+      song_command: formSongCommand.value || undefined,
+      song_command_timeout: formSongCommandTimeout.value || undefined,
+      on_play_command: formOnPlayCommand.value || undefined,
+      on_play_command_timeout: formOnPlayCommandTimeout.value || undefined,
     }
-    showForm.value = false
-    resetForm()
+    try {
+      if (editingMount.value) {
+        // PUT updates in place — server keeps playlist/queue state and
+        // reverts cleanly if validation fails, instead of the previous
+        // delete-then-recreate which would lose the instance entirely
+        // on any 400.
+        await api.put(`/api/autodj?mount=${encodeURIComponent(editingMount.value)}`, body)
+      } else {
+        await api.post('/api/autodj', body)
+      }
+      showForm.value = false
+      resetForm()
+      loadAutoDJ()
+    } catch (e) {
+      saveError.value = (e as Error).message || 'Save failed'
+    }
+  }
+
+  // Deleting an AutoDJ drops its playlist and queue with it and there is no
+  // undo, so it goes through a confirmation step rather than firing on the
+  // first click of a small icon sitting next to the transport controls.
+  const confirmDelete = signal<string | null>(null)
+
+  async function deleteAutoDJ(mount: string) {
+    try {
+      await api.del(`/api/autodj?mount=${encodeURIComponent(mount)}`)
+      loadError.value = ''
+    } catch (e) {
+      loadError.value = (e as Error).message || `Could not delete ${mount}`
+    }
+    confirmDelete.value = null
     loadAutoDJ()
-  } catch (e) {
-    saveError.value = (e as Error).message || 'Save failed'
-  }
-}
-
-// Deleting an AutoDJ drops its playlist and queue with it and there is no
-// undo, so it goes through a confirmation step rather than firing on the
-// first click of a small icon sitting next to the transport controls.
-const confirmDelete = signal<string | null>(null)
-
-async function deleteAutoDJ(mount: string) {
-  try {
-    await api.del(`/api/autodj?mount=${encodeURIComponent(mount)}`)
-    loadError.value = ''
-  } catch (e) {
-    loadError.value = (e as Error).message || `Could not delete ${mount}`
-  }
-  confirmDelete.value = null
-  loadAutoDJ()
-}
-
-// loadAutoDJ refetches the instance list. The spinner is only shown for
-// the first load: the SSE feed ticks twice a second, and toggling
-// `loading` on every background refresh replaced the whole page with
-// "Loading..." several times a second.
-async function loadAutoDJ(showSpinner = false) {
-  if (showSpinner) loading.value = true
-  try {
-    const raw = await api.get<AutoDJInstanceRaw[]>('/api/autodj')
-    instances.value = raw.map(mapInstance)
-    loadError.value = ''
-  } catch (e) {
-    // Don't blank the page on a transient failure — keep the last known
-    // instances on screen and show a non-flashing banner instead.
-    loadError.value = (e as Error).message || 'Could not load AutoDJ instances'
-    if (showSpinner) instances.value = []
-  }
-  loading.value = false
-}
-
-// applyEvent folds one SSE `autodj` payload into the matching card. This
-// is how live state reaches the UI; the previous handler assigned fields
-// the server never sends (currentTrack/position on a raw event) and threw
-// on the first one, leaving the transport state stuck at the numeric
-// enum so every card rendered as stopped.
-function applyEvent(evt: AutoDJEvent) {
-  instances.value = instances.value.map((inst) =>
-    inst.mount === evt.mount
-      ? {
-          ...inst,
-          state: autoDJState(evt.state),
-          currentSong: evt.song || '',
-          position: evt.position || 0,
-          duration: evt.duration || 0,
-          playlistLen: evt.playlist_len ?? inst.playlistLen,
-          shuffle: evt.shuffle ?? inst.shuffle,
-          loop: evt.loop ?? inst.loop,
-          queue: (evt.queue ?? []).map((q) => q.title || q.path),
-        }
-      : inst
-  )
-}
-
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
-
-function InstanceCard({ inst }: { inst: AutoDJInstance }) {
-  const isPlaying = inst.state === 'playing'
-  const isStopped = inst.state === 'stopped'
-  // Duration is 0 whenever the decoder can't report a track length
-  // up-front, which is most non-MP3 input — show elapsed time only in
-  // that case rather than a bar that never moves.
-  const hasDuration = inst.duration > 0
-  const progress = hasDuration ? Math.min(100, (inst.position / inst.duration) * 100) : 0
-
-  const handleTransport = (action: string) => {
-    api.post(`/api/autodj/${encodeURIComponent(inst.mount)}/${action}`)
-      .then(() => loadAutoDJ())
-      .catch((e) => { loadError.value = (e as Error).message || 'Transport command failed' })
   }
 
-  return (
-    <div class="bg-surface-raised border border-border rounded-xl p-5 hover:border-border-hover transition-colors">
-      {/* Header: status + mount + format */}
-      <div class="flex items-center gap-3 mb-4">
-        <span
-          class={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
-            isPlaying ? 'bg-live' : 'bg-text-tertiary'
-          }`}
-          style={isPlaying ? { animation: 'pulse-glow 2s ease-in-out infinite' } : undefined}
-        />
-        <span class="font-mono font-bold text-text-primary text-sm">
-          {inst.mount}
-        </span>
-        <span class="font-mono text-[10px] text-text-tertiary tracking-wider uppercase">
-          {inst.format} {inst.bitrate}kbps
-        </span>
-        {inst.songCommand && (
-          <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title="Driven by an external song command">
-            CMD
+  // loadAutoDJ refetches the instance list. The spinner is only shown for
+  // the first load: the SSE feed ticks twice a second, and toggling
+  // `loading` on every background refresh replaced the whole page with
+  // "Loading..." several times a second.
+  async function loadAutoDJ(showSpinner = false) {
+    if (showSpinner) loading.value = true
+    try {
+      const raw = await api.get<AutoDJInstanceRaw[]>('/api/autodj')
+      instances.value = raw.map(mapInstance)
+      loadError.value = ''
+    } catch (e) {
+      // Don't blank the page on a transient failure — keep the last known
+      // instances on screen and show a non-flashing banner instead.
+      loadError.value = (e as Error).message || 'Could not load AutoDJ instances'
+      if (showSpinner) instances.value = []
+    }
+    loading.value = false
+  }
+
+  // applyEvent folds one SSE `autodj` payload into the matching card. This
+  // is how live state reaches the UI; the previous handler assigned fields
+  // the server never sends (currentTrack/position on a raw event) and threw
+  // on the first one, leaving the transport state stuck at the numeric
+  // enum so every card rendered as stopped.
+  function applyEvent(evt: AutoDJEvent) {
+    instances.value = instances.value.map((inst) =>
+      inst.mount === evt.mount
+        ? {
+            ...inst,
+            state: autoDJState(evt.state),
+            currentSong: evt.song || '',
+            position: evt.position || 0,
+            duration: evt.duration || 0,
+            playlistLen: evt.playlist_len ?? inst.playlistLen,
+            shuffle: evt.shuffle ?? inst.shuffle,
+            loop: evt.loop ?? inst.loop,
+            queue: (evt.queue ?? []).map((q) => q.title || q.path),
+          }
+        : inst
+    )
+  }
+
+  function formatTime(seconds: number): string {
+    const m = Math.floor(seconds / 60)
+    const s = Math.floor(seconds % 60)
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
+
+  function InstanceCard({ inst }: { inst: AutoDJInstance }) {
+    const isPlaying = inst.state === 'playing'
+    const isStopped = inst.state === 'stopped'
+    // Duration is 0 whenever the decoder can't report a track length
+    // up-front, which is most non-MP3 input — show elapsed time only in
+    // that case rather than a bar that never moves.
+    const hasDuration = inst.duration > 0
+    const progress = hasDuration ? Math.min(100, (inst.position / inst.duration) * 100) : 0
+
+    const handleTransport = (action: string) => {
+      api.post(`/api/autodj/${encodeURIComponent(inst.mount)}/${action}`)
+        .then(() => loadAutoDJ())
+        .catch((e) => { loadError.value = (e as Error).message || 'Transport command failed' })
+    }
+
+    return (
+      <div class="bg-surface-raised border border-border rounded-xl p-5 hover:border-border-hover transition-colors">
+        {/* Header: status + mount + format */}
+        <div class="flex items-center gap-3 mb-4">
+          <span
+            class={`w-2.5 h-2.5 rounded-full flex-shrink-0 ${
+              isPlaying ? 'bg-live' : 'bg-text-tertiary'
+            }`}
+            style={isPlaying ? { animation: 'pulse-glow 2s ease-in-out infinite' } : undefined}
+          />
+          <span class="font-mono font-bold text-text-primary text-sm">
+            {inst.mount}
           </span>
-        )}
-        {inst.mpdEnabled && inst.mpdPort && (
-          <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title={`MPD control port ${inst.mpdPort}`}>
-            MPD {inst.mpdPort}
+          <span class="font-mono text-[10px] text-text-tertiary tracking-wider uppercase">
+            {inst.format} {inst.bitrate}kbps
           </span>
-        )}
-        {!inst.visible && (
-          <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title="Not listed publicly; still streamable by URL">
-            UNLISTED
-          </span>
-        )}
-        <div class="ml-auto flex items-center gap-1.5">
-          <span class="text-2xl font-bold text-text-primary leading-none">{inst.playlistLen}</span>
-          <span class="text-[9px] font-mono text-text-tertiary uppercase tracking-wider">
-            tracks
-          </span>
+          {inst.songCommand && (
+            <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title="Driven by an external song command">
+              CMD
+            </span>
+          )}
+          {inst.mpdEnabled && inst.mpdPort && (
+            <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title={`MPD control port ${inst.mpdPort}`}>
+              MPD {inst.mpdPort}
+            </span>
+          )}
+          {!inst.visible && (
+            <span class="font-mono text-[10px] text-text-tertiary tracking-wider" title="Not listed publicly; still streamable by URL">
+              UNLISTED
+            </span>
+          )}
+          <div class="ml-auto flex items-center gap-1.5">
+            <span class="text-2xl font-bold text-text-primary leading-none">{inst.playlistLen}</span>
+            <span class="text-[9px] font-mono text-text-tertiary uppercase tracking-wider">
+              tracks
+            </span>
+          </div>
         </div>
-      </div>
 
-      {/* Now Playing or Stopped */}
-      {isStopped ? (
-        <div class="flex items-center justify-between py-4">
-          <div class="min-w-0">
-            <div class="text-sm text-text-tertiary">
-              Stopped &mdash; {inst.playlistLen} tracks
-              {inst.lastPlaylist ? ` from ${inst.lastPlaylist}` : ''}
-            </div>
-            {/* The music directory was fetched and dropped; when an
-                AutoDJ has no tracks it is almost always the answer. */}
-            {inst.musicDir && !inst.songCommand && (
-              <div class="font-mono text-[10px] text-text-tertiary truncate mt-0.5" title={inst.musicDir}>
-                {inst.musicDir}
+        {/* Now Playing or Stopped */}
+        {isStopped ? (
+          <div class="flex items-center justify-between py-4">
+            <div class="min-w-0">
+              <div class="text-sm text-text-tertiary">
+                Stopped &mdash; {inst.playlistLen} tracks
+                {inst.lastPlaylist ? ` from ${inst.lastPlaylist}` : ''}
               </div>
-            )}
-          </div>
-          <div class="flex items-center gap-2">
-            <button
-              onClick={() => handleTransport('play')}
-              class="w-10 h-10 rounded-full border border-border flex items-center justify-center text-text-tertiary hover:text-accent hover:border-accent transition-colors"
-              aria-label="Play"
-            >
-              <svg class="w-4 h-4 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M8 5v14l11-7z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => openEditForm(inst)}
-              class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
-              aria-label="Edit AutoDJ"
-              title="Edit AutoDJ"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => { confirmDelete.value = inst.mount }}
-              class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
-              aria-label="Delete AutoDJ"
-              title="Delete AutoDJ"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-              </svg>
-            </button>
-          </div>
-        </div>
-      ) : (
-        <>
-          {/* Track info */}
-          <div class="mb-3">
-            <div class="text-sm font-medium text-text-primary truncate">
-              {inst.currentSong || 'Unknown'}
+              {/* The music directory was fetched and dropped; when an
+                  AutoDJ has no tracks it is almost always the answer. */}
+              {inst.musicDir && !inst.songCommand && (
+                <div class="font-mono text-[10px] text-text-tertiary truncate mt-0.5" title={inst.musicDir}>
+                  {inst.musicDir}
+                </div>
+              )}
             </div>
-            <div class="text-xs text-text-tertiary truncate">
-              {inst.name}
-            </div>
-          </div>
-
-          {/* Progress bar */}
-          <div class="mb-4">
-            <div class="w-full h-1 bg-surface-overlay rounded-full overflow-hidden">
-              <div
-                class="h-full bg-accent rounded-full transition-[width] duration-1000 ease-linear"
-                style={{ width: `${progress}%` }}
-              />
-            </div>
-            <div class="flex justify-between mt-1">
-              <span class="font-mono text-[10px] text-text-tertiary">{formatTime(inst.position)}</span>
-              <span class="font-mono text-[10px] text-text-tertiary">
-                {hasDuration ? formatTime(inst.duration) : '--:--'}
-              </span>
-            </div>
-          </div>
-
-          {/* Transport controls */}
-          <div class="flex items-center gap-2">
-            <button
-              onClick={() => handleTransport('prev')}
-              class="w-8 h-8 rounded-full flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
-              aria-label="Previous"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => handleTransport(isPlaying ? 'pause' : 'play')}
-              class="w-10 h-10 rounded-full bg-accent flex items-center justify-center shadow-[0_0_16px_rgba(255,102,0,0.25)] hover:shadow-[0_0_24px_rgba(255,102,0,0.4)] transition-shadow"
-              aria-label={isPlaying ? 'Pause' : 'Play'}
-            >
-              {isPlaying ? (
-                <svg class="w-4 h-4 text-surface-base" viewBox="0 0 24 24" fill="currentColor">
-                  <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
-                </svg>
-              ) : (
-                <svg class="w-4 h-4 text-surface-base ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+            <div class="flex items-center gap-2">
+              <button
+                onClick={() => handleTransport('play')}
+                class="w-10 h-10 rounded-full border border-border flex items-center justify-center text-text-tertiary hover:text-accent hover:border-accent transition-colors"
+                aria-label="Play"
+              >
+                <svg class="w-4 h-4 ml-0.5" viewBox="0 0 24 24" fill="currentColor">
                   <path d="M8 5v14l11-7z" />
                 </svg>
-              )}
-            </button>
-            <button
-              onClick={() => handleTransport('next')}
-              class="w-8 h-8 rounded-full flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
-              aria-label="Next"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M6 18l8.5-6L6 6v12zm2-8.14L11.03 12 8 14.14V9.86zM16 6h2v12h-2z" />
-              </svg>
-            </button>
-            {/* Shuffle has always been in the model, the SSE event and the
-                API; the card just had no control for it. */}
-            <button
-              onClick={() => handleTransport('shuffle')}
-              class={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
-                inst.shuffle ? 'text-accent' : 'text-text-secondary hover:text-text-primary'
-              }`}
-              aria-label="Shuffle"
-              aria-pressed={inst.shuffle}
-              title={inst.shuffle ? 'Shuffle on' : 'Shuffle off'}
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z" />
-              </svg>
-            </button>
-
-            <div class="w-px h-6 bg-border mx-1" />
-
-            <a
-              href={`/admin/studio?mount=${encodeURIComponent(inst.mount)}`}
-              class="h-8 px-3 rounded-lg border border-border flex items-center gap-1.5 text-[11px] font-mono text-text-secondary hover:text-text-primary hover:border-border-hover transition-colors"
-            >
-              <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
-                <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
-              </svg>
-              Studio
-            </a>
-
-            <button
-              onClick={() => openEditForm(inst)}
-              class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
-              aria-label="Edit AutoDJ"
-              title="Edit AutoDJ"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
-              </svg>
-            </button>
-            <button
-              onClick={() => { confirmDelete.value = inst.mount }}
-              class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
-              aria-label="Delete AutoDJ"
-              title="Delete AutoDJ"
-            >
-              <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                <polyline points="3 6 5 6 21 6" />
-                <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
-              </svg>
-            </button>
-          </div>
-        </>
-      )}
-
-      {/* Queue preview strip */}
-      {!isStopped && inst.queue.length > 0 && (
-        <div class="mt-4 pt-3 border-t border-border">
-          <div class="flex items-center gap-2">
-            <span class="font-mono text-[9px] tracking-widest text-text-tertiary uppercase flex-shrink-0">
-              UP NEXT
-            </span>
-            <div class="flex items-center gap-1 min-w-0 overflow-hidden">
-              {inst.queue.slice(0, 3).map((track, i) => (
-                <div key={i} class="flex items-center gap-1 min-w-0">
-                  {i > 0 && (
-                    <svg class="w-3 h-3 text-text-tertiary flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
-                      <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
-                    </svg>
-                  )}
-                  <span class="text-[11px] text-text-tertiary truncate">{track}</span>
-                </div>
-              ))}
+              </button>
+              <button
+                onClick={() => openEditForm(inst)}
+                class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
+                aria-label="Edit AutoDJ"
+                title="Edit AutoDJ"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => { confirmDelete.value = inst.mount }}
+                class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
+                aria-label="Delete AutoDJ"
+                title="Delete AutoDJ"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                </svg>
+              </button>
             </div>
           </div>
-        </div>
-      )}
-    </div>
-  )
+        ) : (
+          <>
+            {/* Track info */}
+            <div class="mb-3">
+              <div class="text-sm font-medium text-text-primary truncate">
+                {inst.currentSong || 'Unknown'}
+              </div>
+              <div class="text-xs text-text-tertiary truncate">
+                {inst.name}
+              </div>
+            </div>
+
+            {/* Progress bar */}
+            <div class="mb-4">
+              <div class="w-full h-1 bg-surface-overlay rounded-full overflow-hidden">
+                <div
+                  class="h-full bg-accent rounded-full transition-[width] duration-1000 ease-linear"
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+              <div class="flex justify-between mt-1">
+                <span class="font-mono text-[10px] text-text-tertiary">{formatTime(inst.position)}</span>
+                <span class="font-mono text-[10px] text-text-tertiary">
+                  {hasDuration ? formatTime(inst.duration) : '--:--'}
+                </span>
+              </div>
+            </div>
+
+            {/* Transport controls */}
+            <div class="flex items-center gap-2">
+              <button
+                onClick={() => handleTransport('prev')}
+                class="w-8 h-8 rounded-full flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
+                aria-label="Previous"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 6h2v12H6zm3.5 6l8.5 6V6z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => handleTransport(isPlaying ? 'pause' : 'play')}
+                class="w-10 h-10 rounded-full bg-accent flex items-center justify-center shadow-[0_0_16px_rgba(255,102,0,0.25)] hover:shadow-[0_0_24px_rgba(255,102,0,0.4)] transition-shadow"
+                aria-label={isPlaying ? 'Pause' : 'Play'}
+              >
+                {isPlaying ? (
+                  <svg class="w-4 h-4 text-surface-base" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z" />
+                  </svg>
+                ) : (
+                  <svg class="w-4 h-4 text-surface-base ml-0.5" viewBox="0 0 24 24" fill="currentColor">
+                    <path d="M8 5v14l11-7z" />
+                  </svg>
+                )}
+              </button>
+              <button
+                onClick={() => handleTransport('next')}
+                class="w-8 h-8 rounded-full flex items-center justify-center text-text-secondary hover:text-text-primary transition-colors"
+                aria-label="Next"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M6 18l8.5-6L6 6v12zm2-8.14L11.03 12 8 14.14V9.86zM16 6h2v12h-2z" />
+                </svg>
+              </button>
+              {/* Shuffle has always been in the model, the SSE event and the
+                  API; the card just had no control for it. */}
+              <button
+                onClick={() => handleTransport('shuffle')}
+                class={`w-8 h-8 rounded-full flex items-center justify-center transition-colors ${
+                  inst.shuffle ? 'text-accent' : 'text-text-secondary hover:text-text-primary'
+                }`}
+                aria-label="Shuffle"
+                aria-pressed={inst.shuffle}
+                title={inst.shuffle ? 'Shuffle on' : 'Shuffle off'}
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M10.59 9.17L5.41 4 4 5.41l5.17 5.17 1.42-1.41zM14.5 4l2.04 2.04L4 18.59 5.41 20 17.96 7.46 20 9.5V4h-5.5zm.33 9.41l-1.41 1.41 3.13 3.13L14.5 20H20v-5.5l-2.04 2.04-3.13-3.13z" />
+                </svg>
+              </button>
+
+              <div class="w-px h-6 bg-border mx-1" />
+
+              <a
+                href={`/admin/studio?mount=${encodeURIComponent(inst.mount)}`}
+                class="h-8 px-3 rounded-lg border border-border flex items-center gap-1.5 text-[11px] font-mono text-text-secondary hover:text-text-primary hover:border-border-hover transition-colors"
+              >
+                <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="currentColor">
+                  <path d="M3 13h8V3H3v10zm0 8h8v-6H3v6zm10 0h8V11h-8v10zm0-18v6h8V3h-8z" />
+                </svg>
+                Studio
+              </a>
+
+              <button
+                onClick={() => openEditForm(inst)}
+                class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-text-secondary hover:text-accent hover:border-accent/30 transition-colors"
+                aria-label="Edit AutoDJ"
+                title="Edit AutoDJ"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" />
+                </svg>
+              </button>
+              <button
+                onClick={() => { confirmDelete.value = inst.mount }}
+                class="w-8 h-8 rounded-lg border border-border flex items-center justify-center text-danger hover:border-danger/30 transition-colors"
+                aria-label="Delete AutoDJ"
+                title="Delete AutoDJ"
+              >
+                <svg class="w-4 h-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" />
+                </svg>
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Queue preview strip */}
+        {!isStopped && inst.queue.length > 0 && (
+          <div class="mt-4 pt-3 border-t border-border">
+            <div class="flex items-center gap-2">
+              <span class="font-mono text-[9px] tracking-widest text-text-tertiary uppercase flex-shrink-0">
+                UP NEXT
+              </span>
+              <div class="flex items-center gap-1 min-w-0 overflow-hidden">
+                {inst.queue.slice(0, 3).map((track, i) => (
+                  <div key={i} class="flex items-center gap-1 min-w-0">
+                    {i > 0 && (
+                      <svg class="w-3 h-3 text-text-tertiary flex-shrink-0" viewBox="0 0 24 24" fill="currentColor">
+                        <path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z" />
+                      </svg>
+                    )}
+                    <span class="text-[11px] text-text-tertiary truncate">{track}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return {
+    instances,
+    loading,
+    loadError,
+    showForm,
+    editingMount,
+    formName,
+    formMount,
+    formMusicDir,
+    formFormat,
+    formBitrate,
+    formLoop,
+    formVisible,
+    formMPDEnabled,
+    formMPDPort,
+    formInjectMetadata,
+    formSongCommand,
+    formSongCommandTimeout,
+    formOnPlayCommand,
+    formOnPlayCommandTimeout,
+    saveError,
+    showBrowser,
+    confirmDelete,
+    resetForm,
+    saveAutoDJ,
+    deleteAutoDJ,
+    loadAutoDJ,
+    applyEvent,
+    InstanceCard,
+  }
 }
 
 export function AutoDJ() {
+  const store = useMemo(createAutoDJStore, [])
+  const {
+    instances,
+    loading,
+    loadError,
+    showForm,
+    editingMount,
+    formName,
+    formMount,
+    formMusicDir,
+    formFormat,
+    formBitrate,
+    formLoop,
+    formVisible,
+    formMPDEnabled,
+    formMPDPort,
+    formInjectMetadata,
+    formSongCommand,
+    formSongCommandTimeout,
+    formOnPlayCommand,
+    formOnPlayCommandTimeout,
+    saveError,
+    showBrowser,
+    confirmDelete,
+    resetForm,
+    saveAutoDJ,
+    deleteAutoDJ,
+    loadAutoDJ,
+    applyEvent,
+    InstanceCard,
+  } = store
   useEffect(() => {
     loadAutoDJ(true)
 

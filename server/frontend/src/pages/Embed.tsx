@@ -1,25 +1,48 @@
-import { useEffect, useRef } from 'preact/hooks'
+import { useMemo, useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { EqBars } from '@/components/EqBars'
 import { createSSE } from '@/lib/sse'
+import { applyMetadata, applyStreamTitle } from '@/lib/metadata'
+import type { NowPlaying } from '@/lib/metadata'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
-const title = signal(data.title || '')
-const artist = signal(data.artist || '')
-const playing = signal(false)
+function createEmbedStore() {
+  const title = signal(data.title || '')
+  const artist = signal(data.artist || '')
+  const playing = signal(false)
+
+  return {
+    title,
+    artist,
+    playing,
+  }
+}
 
 export function Embed() {
+  const {
+    title,
+    artist,
+    playing,
+  } = useMemo(createEmbedStore, [])
   const audioRef = useRef<HTMLAudioElement>(null)
 
   useEffect(() => {
-    const sse = createSSE('/events')
+    let current: NowPlaying = { title: title.value, artist: artist.value, revision: null, versioned: false }
+    const sse = createSSE('/events', () => { current = { ...current, revision: null } })
+    sse.on('metadata', (evt) => {
+      if (evt.mount !== data.mount) return
+      current = applyMetadata(current, evt)
+      title.value = current.title
+      artist.value = current.artist
+    })
 
 
     sse.on('stream', (evt) => {
       if (evt.mount === data.mount) {
-        title.value = evt.title
-        artist.value = evt.artist
+        current = applyStreamTitle(current, evt)
+        title.value = current.title
+        artist.value = current.artist
       }
     })
 

@@ -170,3 +170,79 @@ declare global {
     __TINYICE__: TinyIceBase | PlayerData | AdminData | LandingData
   }
 }
+
+export interface DiagnosticHistoryEntry {
+  timestamp: string | number
+  status: string
+  class: string
+  reason: string
+  error?: string
+  actor: string
+  details?: Record<string, string>
+}
+
+export interface AdminStream {
+  mount: string
+  source_ip: string
+  source_kind?: string
+  source_label?: string
+  content_type: string
+  listeners: number
+  viewers?: number
+  burst_size: number
+  effective_burst_size: number
+  max_listeners: number
+  effective_max_listeners: number
+  enabled: boolean
+  visible: boolean
+  health: number
+  bitrate: string
+  current_song: string
+  name: string
+  status: string
+  status_class: string
+  status_reason: string
+  last_error?: string
+  history?: DiagnosticHistoryEntry[]
+  recovery?: { phase: string; attempt: number; next_retry?: string; last_error: string }
+  producer_last_progress?: string
+  availability_last_progress?: string
+  has_video?: boolean
+  video_width?: number
+  video_height?: number
+  video_fps?: number
+  video_gop?: number
+  video_kbps?: number
+}
+
+export interface ListenerInfo {
+  id: string
+  protocol: 'http' | 'webrtc'
+  requested_mount: string
+  current_mount: string
+  remote_addr: string
+  user_agent: string
+  connected_at: number
+  duration_seconds: number
+  last_stream_switch_at: number
+  move_id?: string
+  move_status?: 'pending' | 'completed' | 'failed'
+  move_destination?: string
+  move_error?: string
+}
+
+export interface ListenerMove {
+  id: string
+  status: 'pending'
+  listener_id: string
+  destination: string
+}
+
+export interface MetadataEvent {
+  mount: string
+  title: string
+  artist: string
+  started_at: string
+  playback_id: string
+  revision: number
+}

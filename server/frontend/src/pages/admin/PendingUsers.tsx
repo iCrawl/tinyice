@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 
 interface PendingUserData {
   id: string
@@ -9,46 +9,69 @@ interface PendingUserData {
   requested_at: string
 }
 
-const pendingUsers = signal<PendingUserData[]>([])
-const loading = signal(true)
-const approveModal = signal<PendingUserData | null>(null)
-const approveUsername = signal('')
-const approveRole = signal('dj')
+function createPendingUsersStore() {
+  const pendingUsers = signal<PendingUserData[]>([])
+  const loading = signal(true)
+  const approveModal = signal<PendingUserData | null>(null)
+  const approveUsername = signal('')
+  const approveRole = signal('dj')
 
-async function fetchPending() {
-  try {
-    const res = await fetch('/api/pending-users')
-    if (res.ok) {
-      pendingUsers.value = await res.json()
+  async function fetchPending() {
+    try {
+      const res = await fetch('/api/pending-users')
+      if (res.ok) {
+        pendingUsers.value = await res.json()
+      }
+    } finally {
+      loading.value = false
     }
-  } finally {
-    loading.value = false
   }
-}
 
-async function approve(user: PendingUserData) {
-  const res = await fetch('/api/pending-users/approve', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id: user.id, username: approveUsername.value, role: approveRole.value }),
-  })
-  if (res.ok) {
-    approveModal.value = null
-    approveUsername.value = ''
+  async function approve(user: PendingUserData) {
+    const res = await fetch('/api/pending-users/approve', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: user.id, username: approveUsername.value, role: approveRole.value }),
+    })
+    if (res.ok) {
+      approveModal.value = null
+      approveUsername.value = ''
+      fetchPending()
+    }
+  }
+
+  async function deny(id: string) {
+    await fetch('/api/pending-users/deny', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id }),
+    })
     fetchPending()
   }
-}
 
-async function deny(id: string) {
-  await fetch('/api/pending-users/deny', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ id }),
-  })
-  fetchPending()
+  return {
+    pendingUsers,
+    loading,
+    approveModal,
+    approveUsername,
+    approveRole,
+    fetchPending,
+    approve,
+    deny,
+  }
 }
 
 export function PendingUsers() {
+  const {
+    pendingUsers,
+    loading,
+    approveModal,
+    approveUsername,
+    approveRole,
+    fetchPending,
+    approve,
+    deny,
+  } = useMemo(createPendingUsersStore, [])
   useEffect(() => { fetchPending() }, [])
 
   return (

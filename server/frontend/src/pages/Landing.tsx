@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
@@ -9,8 +9,9 @@ import { createSSE } from '@/lib/sse'
 import type { LandingData, StreamInfo } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
-const streams = signal<StreamInfo[]>(data.streams ?? [])
-const lastSeen = new Map<string, number>()
+function createLandingStore() {
+  return { streams: signal<StreamInfo[]>(data.streams ?? []), lastSeen: new Map<string, number>() }
+}
 
 // Configure marked for safe rendering
 marked.setOptions({ breaks: true, gfm: true })
@@ -25,6 +26,7 @@ function renderSafeMarkdown(md: string): string {
 }
 
 export function Landing() {
+  const { streams, lastSeen } = useMemo(createLandingStore, [])
   useEffect(() => {
     const sse = createSSE('/events')
 
@@ -74,13 +76,11 @@ export function Landing() {
   const customTitle = data.pageTitle && data.pageTitle !== 'TinyIce' ? data.pageTitle : ''
   const customSubtitle = data.pageSubtitle && data.pageSubtitle !== 'Live Streaming Server powered by Go' ? data.pageSubtitle : ''
   const landingMarkdown = data.branding?.landingMarkdown || ''
-  const accentColor = data.branding?.accentColor
   const isCustomized = !!(customTitle || customSubtitle || landingMarkdown)
 
   return (
     <div
       class="min-h-screen bg-surface-base relative overflow-hidden"
-      style={accentColor ? { '--color-accent': accentColor } as any : undefined}
     >
       {/* Dot grid texture */}
       <div
@@ -208,7 +208,7 @@ export function Landing() {
                       key={stream.mount}
                       stream={stream}
                       onPlay={() => {
-                        window.location.href = `/player/${stream.mount}`
+                        window.location.href = `/player/${stream.mount.replace(/^\//, '')}`
                       }}
                     />
                   ))}

@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 
 interface User {
@@ -7,60 +7,91 @@ interface User {
   role: 'superadmin' | 'admin'
 }
 
-const users = signal<User[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const editingUser = signal<string | null>(null)
-const formUsername = signal('')
-const formPassword = signal('')
-const formRole = signal<'superadmin' | 'admin'>('admin')
+function createUsersStore() {
+  const users = signal<User[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const editingUser = signal<string | null>(null)
+  const formUsername = signal('')
+  const formPassword = signal('')
+  const formRole = signal<'superadmin' | 'admin'>('admin')
 
-async function load() {
-  loading.value = true
-  try {
-    users.value = await api.get<User[]>('/api/users')
-  } catch { /* empty */ }
-  loading.value = false
-}
-
-function openAdd() {
-  editingUser.value = null
-  formUsername.value = ''
-  formPassword.value = ''
-  formRole.value = 'admin'
-  showForm.value = true
-}
-
-function openEdit(u: User) {
-  editingUser.value = u.username
-  formUsername.value = u.username
-  formPassword.value = ''
-  formRole.value = u.role
-  showForm.value = true
-}
-
-async function saveUser() {
-  if (editingUser.value) {
-    const body: Record<string, string> = { username: editingUser.value, role: formRole.value }
-    if (formPassword.value) body.password = formPassword.value
-    await api.put('/api/users', body)
-  } else {
-    await api.post('/api/users', {
-      username: formUsername.value,
-      password: formPassword.value,
-      role: formRole.value,
-    })
+  async function load() {
+    loading.value = true
+    try {
+      users.value = await api.get<User[]>('/api/users')
+    } catch { /* empty */ }
+    loading.value = false
   }
-  showForm.value = false
-  load()
-}
 
-async function removeUser(username: string) {
-  await api.del(`/api/users?username=${encodeURIComponent(username)}`)
-  load()
+  function openAdd() {
+    editingUser.value = null
+    formUsername.value = ''
+    formPassword.value = ''
+    formRole.value = 'admin'
+    showForm.value = true
+  }
+
+  function openEdit(u: User) {
+    editingUser.value = u.username
+    formUsername.value = u.username
+    formPassword.value = ''
+    formRole.value = u.role
+    showForm.value = true
+  }
+
+  async function saveUser() {
+    if (editingUser.value) {
+      const body: Record<string, string> = { username: editingUser.value, role: formRole.value }
+      if (formPassword.value) body.password = formPassword.value
+      await api.put('/api/users', body)
+    } else {
+      await api.post('/api/users', {
+        username: formUsername.value,
+        password: formPassword.value,
+        role: formRole.value,
+      })
+    }
+    showForm.value = false
+    load()
+  }
+
+  async function removeUser(username: string) {
+    await api.del(`/api/users?username=${encodeURIComponent(username)}`)
+    load()
+  }
+
+  return {
+    users,
+    loading,
+    showForm,
+    editingUser,
+    formUsername,
+    formPassword,
+    formRole,
+    load,
+    openAdd,
+    openEdit,
+    saveUser,
+    removeUser,
+  }
 }
 
 export function Users() {
+  const {
+    users,
+    loading,
+    showForm,
+    editingUser,
+    formUsername,
+    formPassword,
+    formRole,
+    load,
+    openAdd,
+    openEdit,
+    saveUser,
+    removeUser,
+  } = useMemo(createUsersStore, [])
   useEffect(() => { load() }, [])
 
   return (
@@ -107,6 +138,7 @@ export function Users() {
                       <button
                         onClick={() => openEdit(u)}
                         title="Edit user"
+                        aria-label="Edit user"
                         class="border border-border text-text-secondary font-mono text-xs px-2 py-1.5 rounded-lg hover:border-border-hover"
                       >
                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M11 4H4a2 2 0 00-2 2v14a2 2 0 002 2h14a2 2 0 002-2v-7" /><path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z" /></svg>
@@ -114,6 +146,7 @@ export function Users() {
                       <button
                         onClick={() => removeUser(u.username)}
                         title="Remove user"
+                        aria-label="Remove user"
                         class="border border-border text-danger font-mono text-xs px-2 py-1.5 rounded-lg hover:border-danger/30"
                       >
                         <svg class="w-3.5 h-3.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="3 6 5 6 21 6" /><path d="M19 6v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6m3 0V4a2 2 0 012-2h4a2 2 0 012 2v2" /></svg>

@@ -1,19 +1,47 @@
+import { useMemo } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
 import { startRegistration } from '@simplewebauthn/browser'
 
-const step = signal(0)
-const token = signal('')
-const username = signal('admin')
-const password = signal('')
-const confirmPassword = signal('')
-const error = signal('')
-const loading = signal(false)
-const setupResult = signal<any>(null)
-const passkeyRegistered = signal(false)
+function createSetupStore() {
+  const step = signal(0)
+  const token = signal('')
+  const username = signal('admin')
+  const password = signal('')
+  const confirmPassword = signal('')
+  const error = signal('')
+  const loading = signal(false)
+  const setupResult = signal<{ default_source_pass: string; live_mount_pass: string } | null>(null)
+  const passkeyRegistered = signal(false)
 
-const passwordsMatch = computed(() => password.value === confirmPassword.value)
+  const passwordsMatch = computed(() => password.value === confirmPassword.value)
+
+  return {
+    step,
+    token,
+    username,
+    password,
+    confirmPassword,
+    error,
+    loading,
+    setupResult,
+    passkeyRegistered,
+    passwordsMatch,
+  }
+}
 
 export function Setup() {
+  const {
+    step,
+    token,
+    username,
+    password,
+    confirmPassword,
+    error,
+    loading,
+    setupResult,
+    passkeyRegistered,
+    passwordsMatch,
+  } = useMemo(createSetupStore, [])
   async function verifyToken() {
     loading.value = true
     error.value = ''
@@ -129,6 +157,7 @@ export function Setup() {
                 value={token.value}
                 onInput={(e) => token.value = (e.target as HTMLInputElement).value}
                 placeholder="Setup Token"
+                aria-label="Setup token"
                 class={inputClass}
                 autoFocus
               />
@@ -148,6 +177,7 @@ export function Setup() {
                 value={username.value}
                 onInput={(e) => username.value = (e.target as HTMLInputElement).value}
                 placeholder="Username"
+                aria-label="Username"
                 autocomplete="username"
                 class={inputClass}
               />
@@ -156,6 +186,7 @@ export function Setup() {
                 value={password.value}
                 onInput={(e) => password.value = (e.target as HTMLInputElement).value}
                 placeholder="Password (min 8 characters)"
+                aria-label="Password"
                 autocomplete="new-password"
                 class={inputClass}
               />
@@ -164,6 +195,7 @@ export function Setup() {
                 value={confirmPassword.value}
                 onInput={(e) => confirmPassword.value = (e.target as HTMLInputElement).value}
                 placeholder="Confirm Password"
+                aria-label="Confirm password"
                 autocomplete="new-password"
                 class={`${inputClass} ${confirmPassword.value && !passwordsMatch.value ? 'border-danger' : ''}`}
               />

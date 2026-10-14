@@ -1,121 +1,156 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 
-const copied = signal(false)
+function createAPITokensStore() {
+  const copied = signal(false)
 
-function fallbackCopy(text: string) {
-  const textarea = document.createElement('textarea')
-  textarea.value = text
-  textarea.style.position = 'fixed'
-  textarea.style.opacity = '0'
-  document.body.appendChild(textarea)
-  textarea.select()
-  document.execCommand('copy')
-  document.body.removeChild(textarea)
-  copied.value = true
-  setTimeout(() => { copied.value = false }, 2000)
-}
-
-interface TokenInfo {
-  id: number
-  name: string
-  username: string
-  created_at: string
-  last_used_at: string
-  last_used_ip: string
-  expires_at: string
-  prefix: string
-}
-
-interface TokenCreateResponse {
-  id: number
-  token: string
-  name: string
-}
-
-const tokens = signal<TokenInfo[]>([])
-const loading = signal(true)
-const showCreate = signal(false)
-const createdToken = signal<string | null>(null)
-const createdName = signal('')
-const formName = signal('')
-const formExpiry = signal('never')
-
-function relativeTime(dateStr: string): string {
-  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
-  const now = Date.now()
-  const then = new Date(dateStr).getTime()
-  const diff = now - then
-  if (diff < 0) {
-    const absDiff = -diff
-    const days = Math.floor(absDiff / 86400000)
-    if (days > 365) return `in ${Math.floor(days / 365)}y`
-    if (days > 30) return `in ${Math.floor(days / 30)}mo`
-    if (days > 0) return `in ${days}d`
-    const hours = Math.floor(absDiff / 3600000)
-    if (hours > 0) return `in ${hours}h`
-    const minutes = Math.floor(absDiff / 60000)
-    if (minutes > 0) return `in ${minutes}m`
-    return 'just now'
+  function fallbackCopy(text: string) {
+    const textarea = document.createElement('textarea')
+    textarea.value = text
+    textarea.style.position = 'fixed'
+    textarea.style.opacity = '0'
+    document.body.appendChild(textarea)
+    textarea.select()
+    document.execCommand('copy')
+    document.body.removeChild(textarea)
+    copied.value = true
+    setTimeout(() => { copied.value = false }, 2000)
   }
-  const seconds = Math.floor(diff / 1000)
-  if (seconds < 60) return 'just now'
-  const minutes = Math.floor(seconds / 60)
-  if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
-  const hours = Math.floor(minutes / 60)
-  if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
-  const days = Math.floor(hours / 24)
-  if (days < 30) return `${days} day${days !== 1 ? 's' : ''} ago`
-  const months = Math.floor(days / 30)
-  if (months < 12) return `${months} month${months !== 1 ? 's' : ''} ago`
-  const years = Math.floor(months / 12)
-  return `${years} year${years !== 1 ? 's' : ''} ago`
-}
 
-function formatDate(dateStr: string): string {
-  if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
-  return new Date(dateStr).toLocaleDateString()
-}
-
-async function loadTokens() {
-  loading.value = true
-  try {
-    tokens.value = await api.get<TokenInfo[]>('/api/tokens')
-  } catch { /* empty */ }
-  loading.value = false
-}
-
-async function createToken() {
-  const name = formName.value.trim()
-  if (!name) return
-  let expires_at: string | undefined
-  if (formExpiry.value !== 'never') {
-    const now = new Date()
-    const days = parseInt(formExpiry.value, 10)
-    now.setDate(now.getDate() + days)
-    expires_at = now.toISOString()
+  interface TokenInfo {
+    id: number
+    name: string
+    username: string
+    created_at: string
+    last_used_at: string
+    last_used_ip: string
+    expires_at: string
+    prefix: string
   }
-  try {
-    const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
-    createdToken.value = result.token
-    createdName.value = result.name
-    showCreate.value = false
-    formName.value = ''
-    formExpiry.value = 'never'
-    loadTokens()
-  } catch { /* empty */ }
-}
 
-async function deleteToken(id: number, name: string) {
-  if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
-  try {
-    await api.del(`/api/tokens?id=${id}`)
-    loadTokens()
-  } catch { /* empty */ }
+  interface TokenCreateResponse {
+    id: number
+    token: string
+    name: string
+  }
+
+  const tokens = signal<TokenInfo[]>([])
+  const loading = signal(true)
+  const showCreate = signal(false)
+  const createdToken = signal<string | null>(null)
+  const createdName = signal('')
+  const formName = signal('')
+  const formExpiry = signal('never')
+
+  function relativeTime(dateStr: string): string {
+    if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
+    const now = Date.now()
+    const then = new Date(dateStr).getTime()
+    const diff = now - then
+    if (diff < 0) {
+      const absDiff = -diff
+      const days = Math.floor(absDiff / 86400000)
+      if (days > 365) return `in ${Math.floor(days / 365)}y`
+      if (days > 30) return `in ${Math.floor(days / 30)}mo`
+      if (days > 0) return `in ${days}d`
+      const hours = Math.floor(absDiff / 3600000)
+      if (hours > 0) return `in ${hours}h`
+      const minutes = Math.floor(absDiff / 60000)
+      if (minutes > 0) return `in ${minutes}m`
+      return 'just now'
+    }
+    const seconds = Math.floor(diff / 1000)
+    if (seconds < 60) return 'just now'
+    const minutes = Math.floor(seconds / 60)
+    if (minutes < 60) return `${minutes} minute${minutes !== 1 ? 's' : ''} ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours} hour${hours !== 1 ? 's' : ''} ago`
+    const days = Math.floor(hours / 24)
+    if (days < 30) return `${days} day${days !== 1 ? 's' : ''} ago`
+    const months = Math.floor(days / 30)
+    if (months < 12) return `${months} month${months !== 1 ? 's' : ''} ago`
+    const years = Math.floor(months / 12)
+    return `${years} year${years !== 1 ? 's' : ''} ago`
+  }
+
+  function formatDate(dateStr: string): string {
+    if (!dateStr || dateStr === '0001-01-01T00:00:00Z') return 'Never'
+    return new Date(dateStr).toLocaleDateString()
+  }
+
+  async function loadTokens() {
+    loading.value = true
+    try {
+      tokens.value = await api.get<TokenInfo[]>('/api/tokens')
+    } catch { /* empty */ }
+    loading.value = false
+  }
+
+  async function createToken() {
+    const name = formName.value.trim()
+    if (!name) return
+    let expires_at: string | undefined
+    if (formExpiry.value !== 'never') {
+      const now = new Date()
+      const days = parseInt(formExpiry.value, 10)
+      now.setDate(now.getDate() + days)
+      expires_at = now.toISOString()
+    }
+    try {
+      const result = await api.post<TokenCreateResponse>('/api/tokens', { name, expires_at })
+      createdToken.value = result.token
+      createdName.value = result.name
+      showCreate.value = false
+      formName.value = ''
+      formExpiry.value = 'never'
+      loadTokens()
+    } catch { /* empty */ }
+  }
+
+  async function deleteToken(id: number, name: string) {
+    if (!confirm(`Delete token "${name}"? This cannot be undone.`)) return
+    try {
+      await api.del(`/api/tokens?id=${id}`)
+      loadTokens()
+    } catch { /* empty */ }
+  }
+
+  return {
+    copied,
+    tokens,
+    loading,
+    showCreate,
+    createdToken,
+    createdName,
+    formName,
+    formExpiry,
+    fallbackCopy,
+    relativeTime,
+    formatDate,
+    loadTokens,
+    createToken,
+    deleteToken,
+  }
 }
 
 export function APITokens() {
+  const {
+    copied,
+    tokens,
+    loading,
+    showCreate,
+    createdToken,
+    createdName,
+    formName,
+    formExpiry,
+    fallbackCopy,
+    relativeTime,
+    formatDate,
+    loadTokens,
+    createToken,
+    deleteToken,
+  } = useMemo(createAPITokensStore, [])
   useEffect(() => { loadTokens() }, [])
 
   return (

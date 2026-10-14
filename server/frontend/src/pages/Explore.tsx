@@ -1,4 +1,4 @@
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { Nav } from '@/components/Nav'
 import { StreamCard } from '@/components/StreamCard'
@@ -7,11 +7,12 @@ import { createSSE } from '@/lib/sse'
 import type { LandingData, StreamInfo } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<LandingData>
-const streams = signal<StreamInfo[]>(data.streams ?? [])
-const lastSeen = new Map<string, number>()
-const search = signal('')
+function createExploreStore() {
+  return { streams: signal<StreamInfo[]>(data.streams ?? []), lastSeen: new Map<string, number>(), search: signal('') }
+}
 
 export function Explore() {
+  const { streams, lastSeen, search } = useMemo(createExploreStore, [])
   useEffect(() => {
     const sse = createSSE('/events')
 
@@ -86,6 +87,7 @@ export function Explore() {
             </svg>
             <input
               type="text"
+              aria-label="Search streams"
               placeholder="Search streams..."
               value={search.value}
               onInput={(e) => {
@@ -103,7 +105,7 @@ export function Explore() {
                   key={stream.mount}
                   stream={stream}
                   onPlay={() => {
-                    window.location.href = `/player/${stream.mount}`
+                    window.location.href = `/player/${stream.mount.replace(/^\//, '')}`
                   }}
                 />
               ))}

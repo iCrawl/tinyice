@@ -1,28 +1,49 @@
-import { useEffect, useRef, useCallback } from 'preact/hooks'
+import { useMemo, useEffect, useRef, useCallback } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import type { AdminData } from '@/types'
 
-// ── State signals ──────────────────────────────────────────────
-const broadcasting = signal(false)
-const status = signal<'ready' | 'connecting' | 'live'>('ready')
-const selectedMount = signal('/live')
-const selectedDeviceId = signal('')
-const audioDevices = signal<MediaDeviceInfo[]>([])
-const audioPermission = signal<'prompt' | 'granted' | 'denied'>('prompt')
-const latency = signal(0)
-const durationSec = signal(0)
-const connectionFormat = signal('')
-const errorMsg = signal('')
-
-// Video source. 'mic' keeps the original audio-only behaviour; the rest
-// add a video track to the same peer connection, which the server
-// republishes on the mount's /video sibling.
 type VideoSource = 'mic' | 'camera' | 'screen' | 'file'
-const videoSource = signal<VideoSource>('mic')
-const videoDevices = signal<MediaDeviceInfo[]>([])
-const selectedVideoDeviceId = signal('')
-const videoFileName = signal('')
-const videoStats = signal('')
+
+function createGoLiveStore() {
+  // ── State signals ──────────────────────────────────────────────
+  const broadcasting = signal(false)
+  const status = signal<'ready' | 'connecting' | 'live'>('ready')
+  const selectedMount = signal('/live')
+  const selectedDeviceId = signal('')
+  const audioDevices = signal<MediaDeviceInfo[]>([])
+  const audioPermission = signal<'prompt' | 'granted' | 'denied'>('prompt')
+  const latency = signal(0)
+  const durationSec = signal(0)
+  const connectionFormat = signal('')
+  const errorMsg = signal('')
+
+  // Video source. 'mic' keeps the original audio-only behaviour; the rest
+  // add a video track to the same peer connection, which the server
+  // republishes on the mount's /video sibling.
+  const videoSource = signal<VideoSource>('mic')
+  const videoDevices = signal<MediaDeviceInfo[]>([])
+  const selectedVideoDeviceId = signal('')
+  const videoFileName = signal('')
+  const videoStats = signal('')
+
+  return {
+    broadcasting,
+    status,
+    selectedMount,
+    selectedDeviceId,
+    audioDevices,
+    audioPermission,
+    latency,
+    durationSec,
+    connectionFormat,
+    errorMsg,
+    videoSource,
+    videoDevices,
+    selectedVideoDeviceId,
+    videoFileName,
+    videoStats,
+  }
+}
 
 // Headroom colour ladder, applied imperatively alongside the text so the
 // meters never trigger a render.
@@ -56,6 +77,25 @@ function formatDuration(sec: number): string {
 }
 
 export function GoLive() {
+  const {
+    broadcasting,
+    status,
+    selectedMount,
+    selectedDeviceId,
+    audioDevices,
+    audioPermission,
+    latency,
+    durationSec,
+    connectionFormat,
+    errorMsg,
+    videoSource,
+    videoDevices,
+    selectedVideoDeviceId,
+    videoFileName,
+    videoStats,
+  } = useMemo(createGoLiveStore, [])
+  const generationRef = useRef(0)
+  const handshakeRef = useRef<AbortController | null>(null)
   const pcRef = useRef<RTCPeerConnection | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const previewRef = useRef<HTMLVideoElement | null>(null)
@@ -145,11 +185,16 @@ export function GoLive() {
 
     return () => {
       stopBroadcast()
+      if (fileURLRef.current) URL.revokeObjectURL(fileURLRef.current)
     }
   }, [])
 
   const stopBroadcast = useCallback(() => {
+    generationRef.current++
+    handshakeRef.current?.abort()
+    handshakeRef.current = null
     if (pcRef.current) {
+      pcRef.current.onconnectionstatechange = null
       pcRef.current.close()
       pcRef.current = null
     }
@@ -218,7 +263,7 @@ export function GoLive() {
         const mic = await navigator.mediaDevices.getUserMedia({ audio })
         // Prefer the microphone track: system audio, when the browser
         // offers it at all, is the optional extra.
-        display.getAudioTracks().forEach((t) => display.removeTrack(t))
+        display.getAudioTracks().forEach((t) => { display.removeTrack(t); t.stop() })
         mic.getAudioTracks().forEach((t) => display.addTrack(t))
       } catch {
         // No microphone is fine — the screen's own audio (or silence)
@@ -255,11 +300,16 @@ export function GoLive() {
   }, [])
 
   const startBroadcast = useCallback(async () => {
+    const generation = ++generationRef.current
     try {
       errorMsg.value = ''
       status.value = 'connecting'
 
       const stream = await captureStream()
+      if (generationRef.current !== generation) {
+        stream.getTracks().forEach((track) => track.stop())
+        return
+      }
       streamRef.current = stream
       if (previewRef.current) {
         previewRef.current.srcObject = stream
@@ -342,8 +392,12 @@ export function GoLive() {
       })
 
       const offer = await pc.createOffer()
+      if (generationRef.current !== generation) return
       await pc.setLocalDescription(offer)
+      if (generationRef.current !== generation) return
 
+      const controller = new AbortController()
+      handshakeRef.current = controller
       const mount = selectedMount.value
       // The session cookie authenticates us as an admin with access to
       // this mount; X-CSRF-Token is what stops a third-party page from
@@ -353,6 +407,7 @@ export function GoLive() {
         `/webrtc/source-offer?mount=${encodeURIComponent(mount)}`,
         {
           method: 'POST',
+          signal: controller.signal,
           body: JSON.stringify(pc.localDescription),
           headers: {
             'Content-Type': 'application/json',
@@ -373,7 +428,10 @@ export function GoLive() {
       }
 
       const answer = await res.json()
+      if (generationRef.current !== generation) return
       await pc.setRemoteDescription(answer)
+      if (generationRef.current !== generation) return
+      handshakeRef.current = null
 
       // Duration timer
       durationSec.value = 0
@@ -473,10 +531,10 @@ export function GoLive() {
       rafRef.current = requestAnimationFrame(tick)
 
     } catch (err) {
+      if (generationRef.current !== generation) return
       // Surface the failure. Previously this was console-only, so a
       // rejected handshake looked identical to "the button does
       // nothing" — the button snapped back to GO LIVE with no clue why.
-      console.error('GoLive error:', err)
       const msg = err instanceof Error ? err.message : String(err)
       stopBroadcast()
       errorMsg.value = msg

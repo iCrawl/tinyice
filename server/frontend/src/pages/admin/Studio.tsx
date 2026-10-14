@@ -1,4 +1,4 @@
-import { useEffect, useCallback, useRef } from 'preact/hooks'
+import { useMemo, useEffect, useCallback, useRef } from 'preact/hooks'
 import { signal, computed } from '@preact/signals'
 import { api } from '@/lib/api'
 import { createSSE } from '@/lib/sse'
@@ -30,187 +30,262 @@ interface AutoDJInstanceRaw {
   loop: boolean
 }
 
-// ── Current mount ──────────────────────────────────────────
-const currentMount = signal('')
-const availableMounts = signal<string[]>([])
-const loadingMounts = signal(true)
+function createStudioStore() {
+  // ── Current mount ──────────────────────────────────────────
+  const currentMount = signal('')
+  const availableMounts = signal<string[]>([])
+  const loadingMounts = signal(true)
 
-// ── State signals ──────────────────────────────────────────
-const state = signal<AutoDJState>('stopped')
-const trackTitle = signal('No Track')
-const trackArtist = signal('Unknown Artist')
-const position = signal(0)
-const duration = signal(0)
-const listeners = signal(0)
-const uptime = signal(0)
-const volume = signal(80)
-const metadataEnabled = signal(true)
-const format = signal('mp3')
-const transportError = signal('')
+  // ── State signals ──────────────────────────────────────────
+  const state = signal<AutoDJState>('stopped')
+  const trackTitle = signal('No Track')
+  const trackArtist = signal('')
+  const position = signal(0)
+  const duration = signal(0)
+  const listeners = signal(0)
+  const uptime = signal(0)
+  const volume = signal(80)
+  const metadataEnabled = signal(true)
+  const format = signal('mp3')
+  const transportError = signal('')
 
-// ── Library state ──────────────────────────────────────────
-const libraryPath = signal('')
-const libraryFiles = signal<FileInfo[]>([])
-const librarySearch = signal('')
-const selectedFile = signal<string | null>(null)
+  // ── Library state ──────────────────────────────────────────
+  const libraryPath = signal('')
+  const libraryFiles = signal<FileInfo[]>([])
+  const librarySearch = signal('')
+  const selectedFile = signal<string | null>(null)
 
-// ── Playlist/Queue/History ─────────────────────────────────
-const activeTab = signal<'playlist' | 'queue' | 'history'>('playlist')
-const playlist = signal<PlaylistItem[]>([])
-const queue = signal<PlaylistItem[]>([])
-const history = signal<PlaylistItem[]>([])
-const currentTrackId = signal<number | null>(null)
+  // ── Playlist/Queue/History ─────────────────────────────────
+  const activeTab = signal<'playlist' | 'queue' | 'history'>('playlist')
+  const playlist = signal<PlaylistItem[]>([])
+  const queue = signal<PlaylistItem[]>([])
+  const history = signal<PlaylistItem[]>([])
+  const currentTrackId = signal<number | null>(null)
 
-const filteredFiles = computed(() => {
-  const search = librarySearch.value.toLowerCase()
-  if (!search) return libraryFiles.value
-  return libraryFiles.value.filter(
-    (f) =>
-      f.name.toLowerCase().includes(search) ||
-      f.title?.toLowerCase().includes(search)
-  )
-})
+  const filteredFiles = computed(() => {
+    const search = librarySearch.value.toLowerCase()
+    if (!search) return libraryFiles.value
+    return libraryFiles.value.filter(
+      (f) =>
+        f.name.toLowerCase().includes(search) ||
+        f.title?.toLowerCase().includes(search)
+    )
+  })
 
-const breadcrumbs = computed(() => {
-  const parts = libraryPath.value.split('/').filter(Boolean)
-  return [{ name: 'Root', path: '' }, ...parts.map((p, i) => ({
-    name: p,
-    path: parts.slice(0, i + 1).join('/'),
-  }))]
-})
+  const breadcrumbs = computed(() => {
+    const parts = libraryPath.value.split('/').filter(Boolean)
+    return [{ name: 'Root', path: '' }, ...parts.map((p, i) => ({
+      name: p,
+      path: parts.slice(0, i + 1).join('/'),
+    }))]
+  })
 
-function formatTime(seconds: number): string {
-  const m = Math.floor(seconds / 60)
-  const s = Math.floor(seconds % 60)
-  return `${m}:${s.toString().padStart(2, '0')}`
-}
+  function formatTime(seconds: number): string {
+    const m = Math.floor(seconds / 60)
+    const s = Math.floor(seconds % 60)
+    return `${m}:${s.toString().padStart(2, '0')}`
+  }
 
-function formatUptime(seconds: number): string {
-  const h = Math.floor(seconds / 3600)
-  const m = Math.floor((seconds % 3600) / 60)
-  return h > 0 ? `${h}h ${m}m` : `${m}m`
-}
+  function formatUptime(seconds: number): string {
+    const h = Math.floor(seconds / 3600)
+    const m = Math.floor((seconds % 3600) / 60)
+    return h > 0 ? `${h}h ${m}m` : `${m}m`
+  }
 
-function enc() { return encodeURIComponent(currentMount.value) }
+  function enc() { return encodeURIComponent(currentMount.value) }
 
-// Last playlist version seen on the event feed; -1 forces the first
-// event after a mount switch to refetch.
-let lastPlaylistVersion = -1
+  // Last playlist version seen on the event feed; -1 forces the first
+  // event after a mount switch to refetch.
+  let lastPlaylistVersion = -1
 
-function resetState() {
-  lastPlaylistVersion = -1
-  transportError.value = ''
-  state.value = 'stopped'
-  trackTitle.value = 'No Track'
-  trackArtist.value = 'Unknown Artist'
-  position.value = 0
-  duration.value = 0
-  listeners.value = 0
-  uptime.value = 0
-  volume.value = 80
-  metadataEnabled.value = true
-  format.value = 'mp3'
-  libraryPath.value = ''
-  libraryFiles.value = []
-  librarySearch.value = ''
-  selectedFile.value = null
-  activeTab.value = 'playlist'
-  playlist.value = []
-  queue.value = []
-  history.value = []
-  currentTrackId.value = null
-}
+  function resetState() {
+    lastPlaylistVersion = -1
+    transportError.value = ''
+    state.value = 'stopped'
+    trackTitle.value = 'No Track'
+    trackArtist.value = ''
+    position.value = 0
+    duration.value = 0
+    listeners.value = 0
+    uptime.value = 0
+    volume.value = 80
+    metadataEnabled.value = true
+    format.value = 'mp3'
+    libraryPath.value = ''
+    libraryFiles.value = []
+    librarySearch.value = ''
+    selectedFile.value = null
+    activeTab.value = 'playlist'
+    playlist.value = []
+    queue.value = []
+    history.value = []
+    currentTrackId.value = null
+  }
 
-// applyEvent folds one SSE `autodj` payload into the now-playing panel.
-// The payload is streamerEventInfo (see server/handlers_api.go): a numeric
-// state enum and a flat `song` string, NOT the `currentTrack` object this
-// used to reach for. Reading that threw on every tick — and because the
-// throw happened after `state` had already been assigned the raw number,
-// the transport button compared 1 === 'playing' and stayed on Play
-// forever. That is why the Studio "did nothing" when you pressed it.
-function applyEvent(evt: AutoDJEvent) {
-  state.value = autoDJState(evt.state)
-  trackTitle.value = evt.song || 'No Track'
-  // The AutoDJ reports "Artist - Title" as one string; split it for the
-  // two-line display, and fall back to just the title.
-  const dash = evt.song ? evt.song.indexOf(' - ') : -1
-  trackArtist.value = dash > 0 ? evt.song.slice(0, dash) : 'Unknown Artist'
-  if (dash > 0) trackTitle.value = evt.song.slice(dash + 3)
-  position.value = evt.position || 0
-  duration.value = evt.duration || 0
-  currentTrackId.value = typeof evt.current_id === 'number' && evt.current_id >= 0
-    ? evt.current_id
-    : null
-  if (evt.queue) queue.value = evt.queue
-  // The playlist itself is no longer pushed on every tick — only a
-  // version counter. Refetch when it moves, which also picks up edits
-  // made from another tab.
-  if (typeof evt.playlist_version === 'number' && evt.playlist_version !== lastPlaylistVersion) {
-    lastPlaylistVersion = evt.playlist_version
+  // applyEvent folds one SSE `autodj` payload into the now-playing panel.
+  // The payload is streamerEventInfo (see server/handlers_api.go): a numeric
+  // state enum and a flat `song` string, NOT the `currentTrack` object this
+  // used to reach for. Reading that threw on every tick — and because the
+  // throw happened after `state` had already been assigned the raw number,
+  // the transport button compared 1 === 'playing' and stayed on Play
+  // forever. That is why the Studio "did nothing" when you pressed it.
+  function applyEvent(evt: AutoDJEvent) {
+    state.value = autoDJState(evt.state)
+    trackTitle.value = evt.song || 'No Track'
+    trackArtist.value = evt.name || ''
+    position.value = evt.position || 0
+    duration.value = evt.duration || 0
+    currentTrackId.value = typeof evt.current_id === 'number' && evt.current_id >= 0
+      ? evt.current_id
+      : null
+    if (evt.queue) queue.value = evt.queue
+    // The playlist itself is no longer pushed on every tick — only a
+    // version counter. Refetch when it moves, which also picks up edits
+    // made from another tab.
+    if (typeof evt.playlist_version === 'number' && evt.playlist_version !== lastPlaylistVersion) {
+      lastPlaylistVersion = evt.playlist_version
+      fetchPlaylist()
+    }
+  }
+
+  function fetchLibrary(path: string) {
+    const mount = currentMount.value
+    libraryPath.value = path
+    api.get<FileInfo[]>(`/api/autodj/${enc()}/files?path=${encodeURIComponent(path)}`)
+      .then((data) => { if (currentMount.value === mount && libraryPath.value === path) libraryFiles.value = data })
+      .catch(() => { if (currentMount.value === mount && libraryPath.value === path) libraryFiles.value = [] })
+  }
+
+  function fetchPlaylist() {
+    const mount = currentMount.value
+    api.get<PlaylistItem[]>(`/api/autodj/${enc()}/playlist`)
+      .then((data) => { if (currentMount.value === mount) playlist.value = data })
+      .catch(() => { if (currentMount.value === mount) playlist.value = [] })
+  }
+
+  function fetchQueue() {
+    const mount = currentMount.value
+    api.get<PlaylistItem[]>(`/api/autodj/${enc()}/queue`)
+      .then((data) => { if (currentMount.value === mount) queue.value = data })
+      .catch(() => { if (currentMount.value === mount) queue.value = [] })
+  }
+
+  function fetchAllData() {
+    fetchLibrary('')
     fetchPlaylist()
+    fetchQueue()
+    fetchTransportState()
+  }
+
+  // fetchTransportState seeds the now-playing panel from the REST list.
+  // Without it the panel sat at "stopped / No Track" until the first SSE
+  // tick, and a Studio opened against an already-playing AutoDJ showed a
+  // Play button for an instance that was live.
+  function fetchTransportState() {
+    const mount = currentMount.value
+    api.get<AutoDJInstanceRaw[]>('/api/autodj')
+      .then((data) => {
+        const inst = data.find((d) => d.mount === mount)
+        if (!inst || currentMount.value !== mount) return
+        format.value = inst.format || format.value
+        applyEvent({
+          name: inst.name,
+          mount: inst.mount,
+          state: inst.state,
+          song: inst.current_song,
+          start_time: inst.start_time,
+          position: inst.position,
+          duration: inst.duration,
+          current_id: inst.current_id,
+          playlist_pos: inst.playlist_pos,
+          playlist_len: inst.playlist_len,
+          shuffle: inst.shuffle,
+          loop: inst.loop,
+          // Playlist and queue have their own endpoints; don't let the
+          // summary overwrite what those returned.
+          queue: null,
+          playlist_version: lastPlaylistVersion,
+        })
+      })
+      .catch(() => { /* the mount list effect already surfaces load failures */ })
+  }
+
+  return {
+    currentMount,
+    availableMounts,
+    loadingMounts,
+    state,
+    trackTitle,
+    trackArtist,
+    position,
+    duration,
+    listeners,
+    uptime,
+    volume,
+    metadataEnabled,
+    format,
+    transportError,
+    libraryFiles,
+    librarySearch,
+    selectedFile,
+    activeTab,
+    playlist,
+    queue,
+    history,
+    currentTrackId,
+    filteredFiles,
+    breadcrumbs,
+    formatTime,
+    formatUptime,
+    enc,
+    resetState,
+    applyEvent,
+    fetchLibrary,
+    fetchPlaylist,
+    fetchQueue,
+    fetchAllData,
+    fetchTransportState,
   }
 }
 
-function fetchLibrary(path: string) {
-  libraryPath.value = path
-  api.get<FileInfo[]>(`/api/autodj/${enc()}/files?path=${encodeURIComponent(path)}`)
-    .then((data) => { libraryFiles.value = data })
-    .catch(() => { libraryFiles.value = [] })
-}
-
-function fetchPlaylist() {
-  api.get<PlaylistItem[]>(`/api/autodj/${enc()}/playlist`)
-    .then((data) => { playlist.value = data })
-    .catch(() => { playlist.value = [] })
-}
-
-function fetchQueue() {
-  api.get<PlaylistItem[]>(`/api/autodj/${enc()}/queue`)
-    .then((data) => { queue.value = data })
-    .catch(() => { queue.value = [] })
-}
-
-function fetchAllData() {
-  fetchLibrary('')
-  fetchPlaylist()
-  fetchQueue()
-  fetchTransportState()
-}
-
-// fetchTransportState seeds the now-playing panel from the REST list.
-// Without it the panel sat at "stopped / No Track" until the first SSE
-// tick, and a Studio opened against an already-playing AutoDJ showed a
-// Play button for an instance that was live.
-function fetchTransportState() {
-  const mount = currentMount.value
-  api.get<AutoDJInstanceRaw[]>('/api/autodj')
-    .then((data) => {
-      const inst = data.find((d) => d.mount === mount)
-      if (!inst) return
-      format.value = inst.format || format.value
-      applyEvent({
-        name: inst.name,
-        mount: inst.mount,
-        state: inst.state,
-        song: inst.current_song,
-        start_time: inst.start_time,
-        position: inst.position,
-        duration: inst.duration,
-        current_id: inst.current_id,
-        playlist_pos: inst.playlist_pos,
-        playlist_len: inst.playlist_len,
-        shuffle: inst.shuffle,
-        loop: inst.loop,
-        // Playlist and queue have their own endpoints; don't let the
-        // summary overwrite what those returned.
-        queue: null,
-        playlist_version: lastPlaylistVersion,
-      })
-    })
-    .catch(() => { /* the mount list effect already surfaces load failures */ })
-}
-
 export function Studio() {
+  const store = useMemo(createStudioStore, [])
+  const {
+    currentMount,
+    availableMounts,
+    loadingMounts,
+    state,
+    trackTitle,
+    trackArtist,
+    position,
+    duration,
+    listeners,
+    uptime,
+    volume,
+    metadataEnabled,
+    format,
+    transportError,
+    libraryFiles,
+    librarySearch,
+    selectedFile,
+    activeTab,
+    playlist,
+    queue,
+    history,
+    currentTrackId,
+    filteredFiles,
+    breadcrumbs,
+    formatTime,
+    formatUptime,
+    enc,
+    resetState,
+    applyEvent,
+    fetchLibrary,
+    fetchPlaylist,
+    fetchQueue,
+    fetchAllData,
+    fetchTransportState,
+  } = store
   const sseRef = useRef<ReturnType<typeof createSSE> | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
@@ -292,7 +367,7 @@ export function Studio() {
   const handleTransport = useCallback((action: string) => {
     api.post(`/api/autodj/${enc()}/${action}`)
       .then(() => { fetchTransportState(); fetchQueue() })
-      .catch((e) => { transportError.value = (e as Error).message || `${action} failed` })
+      .catch((e) => { transportError.value = (e instanceof Error ? e.message : '') || `${action} failed` })
   }, [])
 
   const handleVolumeChange = useCallback((v: number) => {
@@ -326,7 +401,7 @@ export function Studio() {
   const handlePlayNext = useCallback((id: number) => {
     api.post(`/api/autodj/${enc()}/playlist/playnext`, { id })
       .then(() => fetchQueue())
-      .catch((e) => { transportError.value = (e as Error).message || 'Play next failed' })
+      .catch((e) => { transportError.value = (e instanceof Error ? e.message : '') || 'Play next failed' })
   }, [])
 
   const handleClear = useCallback(() => {
@@ -348,7 +423,7 @@ export function Studio() {
     }
     api.post(`/api/autodj/${enc()}/playlist/load?file=${encodeURIComponent(chosen)}`)
       .then(() => { transportError.value = ''; fetchPlaylist() })
-      .catch((e) => { transportError.value = (e as Error).message || 'Load failed' })
+      .catch((e) => { transportError.value = (e instanceof Error ? e.message : '') || 'Load failed' })
   }, [])
 
   const handleFolderClick = useCallback((file: FileInfo) => {

@@ -1,5 +1,5 @@
 import { signal } from '@preact/signals'
-import { useEffect } from 'preact/hooks'
+import { useMemo, useEffect } from 'preact/hooks'
 import { api } from '../../lib/api'
 import { reportError, showToast } from '../../lib/toast'
 
@@ -22,114 +22,165 @@ interface Transcoder {
   opus_frame_size_ms?: number
 }
 
-const transcoders = signal<Transcoder[]>([])
-const loading = signal(true)
-const showForm = signal(false)
-const editingName = signal<string | null>(null)
-const formName = signal('')
-const formInput = signal('')
-const formOutput = signal('')
-const formFormat = signal('mp3')
-const formBitrate = signal(128)
-const formEnabled = signal(true)
-const formSampleRate = signal(0)
-const formOpusApp = signal('audio')
-const formOpusVBR = signal(true)
-const formOpusComplexity = signal(0)
-const formOpusFrame = signal(20)
-const formError = signal('')
+function createTranscodersStore() {
+  const transcoders = signal<Transcoder[]>([])
+  const loading = signal(true)
+  const showForm = signal(false)
+  const editingName = signal<string | null>(null)
+  const formName = signal('')
+  const formInput = signal('')
+  const formOutput = signal('')
+  const formFormat = signal('mp3')
+  const formBitrate = signal(128)
+  const formEnabled = signal(true)
+  const formSampleRate = signal(0)
+  const formOpusApp = signal('audio')
+  const formOpusVBR = signal(true)
+  const formOpusComplexity = signal(0)
+  const formOpusFrame = signal(20)
+  const formError = signal('')
 
-function resetForm() {
-  formName.value = ''
-  formInput.value = ''
-  formOutput.value = ''
-  formFormat.value = 'mp3'
-  formBitrate.value = 128
-  formEnabled.value = true
-  formSampleRate.value = 0
-  formOpusApp.value = 'audio'
-  formOpusVBR.value = true
-  formOpusComplexity.value = 0
-  formOpusFrame.value = 20
-  editingName.value = null
-  formError.value = ''
-}
-
-function openAddForm() {
-  resetForm()
-  showForm.value = true
-}
-
-function openEditForm(t: Transcoder) {
-  resetForm()
-  editingName.value = t.name
-  formName.value = t.name
-  formInput.value = t.input
-  formOutput.value = t.output
-  formFormat.value = t.format || 'mp3'
-  formBitrate.value = t.bitrate || 128
-  formEnabled.value = t.enabled
-  formSampleRate.value = t.sample_rate || 0
-  formOpusApp.value = t.opus_application || 'audio'
-  formOpusVBR.value = t.opus_vbr ?? true
-  formOpusComplexity.value = t.opus_complexity || 0
-  formOpusFrame.value = t.opus_frame_size_ms || 20
-  showForm.value = true
-}
-
-async function load() {
-  loading.value = true
-  try {
-    transcoders.value = await api.get<Transcoder[]>('/api/transcoders')
-  } catch (e) {
-    reportError(e, 'Failed to load transcoders')
+  function resetForm() {
+    formName.value = ''
+    formInput.value = ''
+    formOutput.value = ''
+    formFormat.value = 'mp3'
+    formBitrate.value = 128
+    formEnabled.value = true
+    formSampleRate.value = 0
+    formOpusApp.value = 'audio'
+    formOpusVBR.value = true
+    formOpusComplexity.value = 0
+    formOpusFrame.value = 20
+    editingName.value = null
+    formError.value = ''
   }
-  loading.value = false
-}
 
-function currentBody() {
-  return {
-    name: formName.value,
-    input_mount: formInput.value,
-    output_mount: formOutput.value,
-    format: formFormat.value,
-    bitrate: formBitrate.value,
-    enabled: formEnabled.value,
-    sample_rate: formSampleRate.value || undefined,
-    opus_application: formFormat.value === 'opus' ? formOpusApp.value : undefined,
-    opus_vbr: formFormat.value === 'opus' ? formOpusVBR.value : undefined,
-    opus_complexity: formFormat.value === 'opus' && formOpusComplexity.value > 0 ? formOpusComplexity.value : undefined,
-    opus_frame_size_ms: formFormat.value === 'opus' ? formOpusFrame.value : undefined,
-  }
-}
-
-async function saveTranscoder() {
-  formError.value = ''
-  try {
-    if (editingName.value) {
-      await api.put(`/api/transcoders?name=${encodeURIComponent(editingName.value)}`, currentBody())
-    } else {
-      await api.post('/api/transcoders', currentBody())
-    }
-    showForm.value = false
+  function openAddForm() {
     resetForm()
-    load()
-  } catch (e) {
-    formError.value = (e as Error).message || 'Save failed'
+    showForm.value = true
   }
-}
 
-async function removeTranscoder(name: string) {
-  try {
-    await api.del(`/api/transcoders?name=${encodeURIComponent(name)}`)
-    showToast('success', `Transcoder "${name}" removed`)
-  } catch (e) {
-    reportError(e, `Failed to remove transcoder "${name}"`)
+  function openEditForm(t: Transcoder) {
+    resetForm()
+    editingName.value = t.name
+    formName.value = t.name
+    formInput.value = t.input
+    formOutput.value = t.output
+    formFormat.value = t.format || 'mp3'
+    formBitrate.value = t.bitrate || 128
+    formEnabled.value = t.enabled
+    formSampleRate.value = t.sample_rate || 0
+    formOpusApp.value = t.opus_application || 'audio'
+    formOpusVBR.value = t.opus_vbr ?? true
+    formOpusComplexity.value = t.opus_complexity || 0
+    formOpusFrame.value = t.opus_frame_size_ms || 20
+    showForm.value = true
   }
-  load()
+
+  async function load() {
+    loading.value = true
+    try {
+      transcoders.value = await api.get<Transcoder[]>('/api/transcoders')
+    } catch (e) {
+      reportError(e, 'Failed to load transcoders')
+    }
+    loading.value = false
+  }
+
+  function currentBody() {
+    return {
+      name: formName.value,
+      input_mount: formInput.value,
+      output_mount: formOutput.value,
+      format: formFormat.value,
+      bitrate: formBitrate.value,
+      enabled: formEnabled.value,
+      sample_rate: formSampleRate.value || undefined,
+      opus_application: formFormat.value === 'opus' ? formOpusApp.value : undefined,
+      opus_vbr: formFormat.value === 'opus' ? formOpusVBR.value : undefined,
+      opus_complexity: formFormat.value === 'opus' && formOpusComplexity.value > 0 ? formOpusComplexity.value : undefined,
+      opus_frame_size_ms: formFormat.value === 'opus' ? formOpusFrame.value : undefined,
+    }
+  }
+
+  async function saveTranscoder() {
+    formError.value = ''
+    try {
+      if (editingName.value) {
+        await api.put(`/api/transcoders?name=${encodeURIComponent(editingName.value)}`, currentBody())
+      } else {
+        await api.post('/api/transcoders', currentBody())
+      }
+      showForm.value = false
+      resetForm()
+      load()
+    } catch (e) {
+      formError.value = (e as Error).message || 'Save failed'
+    }
+  }
+
+  async function removeTranscoder(name: string) {
+    try {
+      await api.del(`/api/transcoders?name=${encodeURIComponent(name)}`)
+      showToast('success', `Transcoder "${name}" removed`)
+    } catch (e) {
+      reportError(e, `Failed to remove transcoder "${name}"`)
+    }
+    load()
+  }
+
+  return {
+    transcoders,
+    loading,
+    showForm,
+    editingName,
+    formName,
+    formInput,
+    formOutput,
+    formFormat,
+    formBitrate,
+    formEnabled,
+    formSampleRate,
+    formOpusApp,
+    formOpusVBR,
+    formOpusComplexity,
+    formOpusFrame,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveTranscoder,
+    removeTranscoder,
+  }
 }
 
 export function Transcoders() {
+  const {
+    transcoders,
+    loading,
+    showForm,
+    editingName,
+    formName,
+    formInput,
+    formOutput,
+    formFormat,
+    formBitrate,
+    formEnabled,
+    formSampleRate,
+    formOpusApp,
+    formOpusVBR,
+    formOpusComplexity,
+    formOpusFrame,
+    formError,
+    resetForm,
+    openAddForm,
+    openEditForm,
+    load,
+    saveTranscoder,
+    removeTranscoder,
+  } = useMemo(createTranscodersStore, [])
   useEffect(() => { load() }, [])
 
   return (
