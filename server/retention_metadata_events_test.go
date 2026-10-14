@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/DatanoiseTV/tinyice/relay"
 )
 
 func TestMetadataSSEReplaysTerminalClearAfterSourceDisappearance(t *testing.T) {
@@ -62,5 +64,67 @@ func TestMetadataSSEReplaysTerminalClearAfterSourceDisappearance(t *testing.T) {
 	replay := readMetadata(reader)
 	if replay["title"] != "" || replay["revision"] != cleared["revision"] {
 		t.Fatalf("terminal clear did not replace last replay: %#v", replay)
+	}
+}
+
+func TestMetadataSSEFiltersDisappearedPlaybackWithEmptyTitle(t *testing.T) {
+	for _, endpoint := range []string{"combined", "metadata"} {
+		t.Run(endpoint, func(t *testing.T) {
+			s := newListenerAPITestServer(t)
+			stale := relay.MetadataChange{Mount: "/gone", Visible: true, PlaybackID: "active-playback", Revision: 10}
+			s.Relay.NotifyMetadataChange(stale)
+			clear := relay.MetadataChange{Mount: "/clear", Visible: true, Revision: 1}
+			s.Relay.NotifyMetadataChange(clear)
+			handler := s.handleMetadataEvents
+			if endpoint == "combined" {
+				handler = s.handlePublicEvents
+			}
+			httpServer := httptest.NewServer(http.HandlerFunc(handler))
+			defer httpServer.Close()
+			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			request, err := http.NewRequestWithContext(ctx, http.MethodGet, httpServer.URL, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			response, err := http.DefaultClient.Do(request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer response.Body.Close()
+			reader := bufio.NewReader(response.Body)
+			event := ""
+			for {
+				line, err := reader.ReadString('\n')
+				if err != nil {
+					t.Fatal(err)
+				}
+				if strings.HasPrefix(line, "event: ") {
+					event = strings.TrimSpace(strings.TrimPrefix(line, "event: "))
+				}
+				if strings.HasPrefix(line, "data: ") && event == "metadata" {
+					var metadata map[string]interface{}
+					if err := json.Unmarshal([]byte(strings.TrimSpace(strings.TrimPrefix(line, "data: "))), &metadata); err != nil {
+						t.Fatal(err)
+					}
+					if metadata["mount"] == "/gone" {
+						t.Fatalf("disappeared active playback leaked as a terminal clear: %#v", metadata)
+					}
+					if metadata["mount"] != "/clear" || metadata["title"] != "" || metadata["playback_id"] != "" {
+						t.Fatalf("terminal clear lost compatible fields: %#v", metadata)
+					}
+					if metadata["revision"] == float64(2) {
+						return
+					}
+					stale.Revision++
+					s.Relay.NotifyMetadataChange(stale)
+					clear.Revision++
+					s.Relay.NotifyMetadataChange(clear)
+				}
+				if line == "\n" {
+					event = ""
+				}
+			}
+		})
 	}
 }
