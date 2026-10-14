@@ -2,6 +2,7 @@ package relay
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -47,6 +48,9 @@ type Streamer struct {
 	Recovery             RecoveryState
 	commandCancel        context.CancelFunc
 	loopDone             chan struct{}
+	hookWG               sync.WaitGroup
+	hookCancels          map[uint64]context.CancelFunc
+	hookSequence         uint64
 	Name                 string
 	OutputMount          string
 	MusicDir             string
@@ -66,6 +70,7 @@ type Streamer struct {
 	SongCommandTimeout   int
 	OnPlayCommand        string
 	OnPlayCommandTimeout int
+	volumeSet            bool
 	Volume               float64 // 0..1 playback gain applied before encode
 	manualStop           bool
 
@@ -112,8 +117,8 @@ type StreamerManager struct {
 	runtimeRegistry *RuntimeRegistry
 	config          *config.Config
 
-	// OnTrackStart fires once per track, after metadata is parsed and just
-	// before encoding begins. Used by the server to dispatch the
+	// OnTrackStart fires once per track after the first real encoded frame
+	// is published. Used by the server to dispatch the
 	// `now_playing` webhook event without dragging the server package
 	// into relay (which would be a cyclic import). Set by the server at
 	// startup; nil on construction.
@@ -137,6 +142,9 @@ type TrackStartInfo struct {
 	Format          string  // "mp3" | "opus"
 	Bitrate         int     // kbps
 	DurationSeconds float64 // 0 when unknown
+	PlaybackID      string
+	Revision        uint64
+	StartedAt       time.Time
 }
 
 func NewStreamerManager(r *Relay, cfg *config.Config) *StreamerManager {
@@ -183,9 +191,13 @@ func (sm *StreamerManager) RecoverDeadSongCommandMount(mount string) {
 	}
 	s.Recovery.Phase = "recovering"
 	cancel := s.fileCancel
+	commandCancel := s.commandCancel
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if commandCancel != nil {
+		commandCancel()
 	}
 	s.signalStateChange()
 }
@@ -257,6 +269,7 @@ func (s *Streamer) SetVolume(v float64) {
 	}
 	s.mu.Lock()
 	s.Volume = v
+	s.volumeSet = true
 	s.mu.Unlock()
 }
 
@@ -264,7 +277,7 @@ func (s *Streamer) SetVolume(v float64) {
 func (s *Streamer) GetVolume() float64 {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.Volume <= 0 {
+	if s.Volume <= 0 && !s.volumeSet {
 		return 1.0
 	}
 	return s.Volume
@@ -322,12 +335,17 @@ func (s *Streamer) Stop() {
 	commandCancel := s.commandCancel
 	session := s.outputSession
 	s.outputSession = nil
+	hookCancels := s.hookCancels
+	s.hookCancels = nil
 	s.mu.Unlock()
 	if fileCancel != nil {
 		fileCancel()
 	}
 	if commandCancel != nil {
 		commandCancel()
+	}
+	for _, cancel := range hookCancels {
+		cancel()
 	}
 	s.recordIntent("stopped", DiagnosticStatusStopped, "AutoDJ stopped")
 	if session != nil {
@@ -361,6 +379,7 @@ func (s *Streamer) recordIntent(intent string, status DiagnosticStatus, reason s
 	}
 	out, ok := s.relay.GetStream(s.OutputMount)
 	if !ok {
+		s.relay.Diagnostics.Record(DiagnosticUpdate{Mount: s.OutputMount, Status: status, Class: DiagnosticClassManualStop, Reason: reason, Actor: DiagnosticActorAutoDJ, Timestamp: time.Now()})
 		return
 	}
 	if out.GetSourceIP() != autoDJSourceLabel && out.ProducerIntent() == "" {
@@ -387,6 +406,7 @@ func (s *Streamer) Shutdown() {
 	if done != nil {
 		<-done
 	}
+	s.hookWG.Wait()
 	if s.MPDServer != nil {
 		s.MPDServer.Stop()
 	}
@@ -1014,19 +1034,28 @@ func (s *Streamer) execOnPlayCommand(artist, title, album, filePath, mount strin
 		timeout = 10
 	}
 
+	s.mu.Lock()
+	if s.State != StatePlaying {
+		s.mu.Unlock()
+		return
+	}
 	parent := s.ctx
 	if parent == nil {
 		parent = context.Background()
 	}
+	ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
+	s.hookSequence++
+	hookID := s.hookSequence
+	if s.hookCancels == nil {
+		s.hookCancels = make(map[uint64]context.CancelFunc)
+	}
+	s.hookCancels[hookID] = cancel
+	s.hookWG.Add(1)
+	s.mu.Unlock()
 	go func() {
-		// Inherit from the streamer's lifetime context so Stop()
-		// propagates cancellation to the child shell (and thus the
-		// command it spawned). The per-call WithTimeout still bounds
-		// well-behaved commands; what changes is that an operator
-		// stopping the streamer no longer waits 10 s of zombie
-		// children to drain.
-		ctx, cancel := context.WithTimeout(parent, time.Duration(timeout)*time.Second)
+		defer s.hookWG.Done()
 		defer cancel()
+		defer func() { s.mu.Lock(); delete(s.hookCancels, hookID); s.mu.Unlock() }()
 
 		cmd := exec.CommandContext(ctx, "sh", "-c", s.OnPlayCommand)
 		cancelCommandTree(cmd)
@@ -1372,6 +1401,7 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 
 			s.mu.Lock()
 			var filePath string
+			var selectionErr error
 			var fileID int
 
 			var filePos int
@@ -1389,6 +1419,7 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 					fileID = -1
 					filePos = -1
 				} else {
+					selectionErr = err
 					logger.L.Warnf("Streamer %s: Song command error, falling back to playlist: %v", s.Name, err)
 					if s.relay != nil && s.OutputMount != "" {
 						s.relay.Diagnostics.Record(DiagnosticUpdate{
@@ -1458,18 +1489,20 @@ func (sm *StreamerManager) runStreamerLoop(ctx context.Context, s *Streamer) {
 			}
 
 			if filePath == "" {
-				if s.SongCommand == "" && s.relay != nil && s.OutputMount != "" {
-					s.relay.Diagnostics.Record(DiagnosticUpdate{
-						Mount:     s.OutputMount,
-						Status:    DiagnosticStatusStopped,
-						Class:     DiagnosticClassPlaylistExhausted,
-						Reason:    "playlist exhausted",
-						Actor:     DiagnosticActorAutoDJ,
-						Timestamp: time.Now(),
-					})
+				s.mu.Lock()
+				hasSongCommand := s.SongCommand != ""
+				if !hasSongCommand {
+					s.State = StateStopped
 				}
-
-				if !s.retryPlayback(ctx, fmt.Errorf("no playable track")) {
+				s.mu.Unlock()
+				if !hasSongCommand {
+					s.recordIntent("stopped", DiagnosticStatusStopped, "playlist exhausted")
+					continue
+				}
+				if selectionErr == nil {
+					selectionErr = fmt.Errorf("no playable track")
+				}
+				if !s.retryPlayback(ctx, selectionErr) {
 					return
 				}
 				continue
@@ -1609,6 +1642,8 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		return err
 	}
 	defer f.Close()
+	stopClose := context.AfterFunc(ctx, func() { _ = f.Close() })
+	defer stopClose()
 	songTitle := filepath.Base(path)
 	artist, title, album := "", songTitle, ""
 	if m, err := tag.ReadFrom(f); err == nil {
@@ -1631,6 +1666,21 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	if err != nil {
 		return err
 	}
+	pcm := s.buildPCMChain(ctx, decoder, decoder.SampleRate())
+	frameSamples := 1152
+	if s.Format == "opus" {
+		frameSamples = 960
+	}
+	firstPCM := make([]byte, frameSamples*4)
+	n, readErr := io.ReadFull(pcm, firstPCM)
+	if n == 0 {
+		return fmt.Errorf("track has no playable PCM: %w", readErr)
+	}
+	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
+		return readErr
+	}
+	gate := pcm.(*pauseGate)
+	gate.src = io.MultiReader(bytes.NewReader(firstPCM[:n]), gate.src)
 	if s.relay == nil {
 		s.relay = sm.relay
 	}
@@ -1657,7 +1707,6 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	if err = session.Start(lifetime); err != nil {
 		return err
 	}
-	pcm := s.buildPCMChain(ctx, decoder, decoder.SampleRate())
 	source := newReaderPCMFrameSource(ctx, pcm, f)
 	session.SetSourceWithActivation(source, func() {
 		if ctx.Err() != nil {
@@ -1690,7 +1739,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 		sm.recordAutoDJPlaybackStarted(s.OutputMount)
 		s.execOnPlayCommand(artist, title, album, path, s.OutputMount)
 		if cb := sm.OnTrackStart; cb != nil {
-			info := TrackStartInfo{Mount: s.OutputMount, StreamerName: s.Name, Artist: artist, Title: title, Album: album, FilePath: path, Format: s.Format, Bitrate: s.Bitrate}
+			info := TrackStartInfo{PlaybackID: mc.PlaybackID, Revision: mc.Revision, StartedAt: mc.StartedAt, Mount: s.OutputMount, StreamerName: s.Name, Artist: artist, Title: title, Album: album, FilePath: path, Format: s.Format, Bitrate: s.Bitrate}
 			go func() { defer func() { _ = recover() }(); cb(info) }()
 		}
 	})
@@ -1777,9 +1826,7 @@ func songCommandDiagnosticDetails(err error) map[string]string {
 // ring buffer as fast as the CPU allowed.
 func (s *Streamer) buildPCMChain(ctx context.Context, decoded io.Reader, srcRate int) io.Reader {
 	pcm := decoded
-	if gain := s.GetVolume(); gain < 1.0 {
-		pcm = newGainReader(pcm, gain)
-	}
+	pcm = &gainReader{src: pcm, streamer: s}
 	targetRate := 44100
 	if s.Format == "opus" {
 		targetRate = 48000
@@ -1796,8 +1843,9 @@ func (s *Streamer) buildPCMChain(ctx context.Context, decoded io.Reader, srcRate
 // fixed gain in [0, 1]. Used to apply the AutoDJ's Volume setting without
 // touching the decoder / encoder interfaces.
 type gainReader struct {
-	src  io.Reader
-	gain float64
+	streamer *Streamer
+	src      io.Reader
+	gain     float64
 }
 
 func newGainReader(src io.Reader, gain float64) *gainReader {
@@ -1818,10 +1866,14 @@ func (g *gainReader) Read(p []byte) (int, error) {
 	// Process whole 2-byte samples only; defer odd trailing byte to the
 	// next read (the source always feeds us whole stereo frames so this
 	// rarely matters).
+	gain := g.gain
+	if g.streamer != nil {
+		gain = g.streamer.GetVolume()
+	}
 	end := n - (n % 2)
 	for i := 0; i+1 < end; i += 2 {
 		s := int32(int16(p[i]) | int16(p[i+1])<<8)
-		s = int32(float64(s) * g.gain)
+		s = int32(float64(s) * gain)
 		if s > 32767 {
 			s = 32767
 		} else if s < -32768 {

@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -413,15 +414,19 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 	defer s.Relay.UnsubscribeMetadata(metaCh)
 
 	type PublicStreamInfo struct {
-		Mount       string `json:"mount"`
-		Name        string `json:"name"`
-		Listeners   int    `json:"listeners"`
-		Viewers     int    `json:"viewers,omitempty"`
-		Bitrate     string `json:"bitrate"`
-		Uptime      string `json:"uptime"`
-		Genre       string `json:"genre"`
-		Description string `json:"description"`
-		CurrentSong string `json:"song"`
+		PlaybackID  string    `json:"playback_id"`
+		Revision    uint64    `json:"revision"`
+		StartedAt   time.Time `json:"started_at,omitzero"`
+		Artist      string    `json:"artist"`
+		Mount       string    `json:"mount"`
+		Name        string    `json:"name"`
+		Listeners   int       `json:"listeners"`
+		Viewers     int       `json:"viewers,omitempty"`
+		Bitrate     string    `json:"bitrate"`
+		Uptime      string    `json:"uptime"`
+		Genre       string    `json:"genre"`
+		Description string    `json:"description"`
+		CurrentSong string    `json:"song"`
 		// Live mirrors the landing page's bootstrap field: a mount with
 		// no connected source still appears here, and without this the
 		// page had no way to tell the two apart.
@@ -452,7 +457,12 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 			if strings.HasSuffix(st.MountName, "/video") {
 				continue // sub-mount, surfaced via the parent
 			}
-			entry := PublicStreamInfo{
+			playback := st.Playback
+			artist := playback.Artist
+			if playback.Revision == 0 {
+				artist = st.Name
+			}
+			entry := PublicStreamInfo{PlaybackID: playback.PlaybackID, Revision: playback.Revision, StartedAt: playback.StartedAt, Artist: artist,
 				Mount: st.MountName, Name: st.Name, Listeners: st.ListenersCount,
 				Bitrate: st.Bitrate, Uptime: st.Uptime, Genre: st.Genre,
 				Description: st.Description, CurrentSong: st.CurrentSong,
@@ -490,9 +500,10 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 		// kept for legacy listeners.
 		for _, entry := range info {
 			single, _ := json.Marshal(map[string]interface{}{
-				"mount":        entry.Mount,
-				"title":        entry.CurrentSong,
-				"artist":       entry.Name,
+				"mount":       entry.Mount,
+				"title":       entry.CurrentSong,
+				"artist":      entry.Artist,
+				"playback_id": entry.PlaybackID, "revision": entry.Revision, "started_at": entry.StartedAt.UTC().Format(time.RFC3339),
 				"format":       "",
 				"bitrate":      entry.Bitrate,
 				"listeners":    entry.Listeners,
@@ -509,17 +520,34 @@ func (s *Server) handlePublicEvents(w http.ResponseWriter, r *http.Request) {
 				return err
 			}
 		}
+		present := make(map[string]bool, len(info))
+		for _, entry := range info {
+			present[entry.Mount] = true
+		}
+		for _, mc := range s.Relay.LastMetadata() {
+			if !present[mc.Mount] && mc.Title == "" {
+				single, _ := json.Marshal(map[string]interface{}{"mount": mc.Mount, "title": "", "artist": mc.Artist, "started_at": mc.StartedAt.UTC().Format(time.RFC3339), "playback_id": "", "revision": mc.Revision, "live": false, "listeners": 0, "viewers": 0, "has_video": false})
+				if _, err := fmt.Fprintf(w, "event: stream\ndata: %s\n\n", single); err != nil {
+					return err
+				}
+			}
+		}
 		flusher.Flush()
 		return nil
 	}
+	sentRevision := make(map[string]uint64)
 	sendMetadata := func(mc relay.MetadataChange) error {
 		if current, exists := s.Relay.GetStream(mc.Mount); exists {
 			if !current.IsVisible() {
 				return nil
 			}
-		} else if !mc.Visible {
+		} else if !mc.Visible || mc.Title != "" {
 			return nil
 		}
+		if previous, ok := sentRevision[mc.Mount]; ok && mc.Revision <= previous {
+			return nil
+		}
+		sentRevision[mc.Mount] = mc.Revision
 		metadataJSON, _ := json.Marshal(map[string]interface{}{
 			"mount":       mc.Mount,
 			"title":       mc.Title,
@@ -569,14 +597,21 @@ func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
 	metaCh := s.Relay.SubscribeMetadata()
 	defer s.Relay.UnsubscribeMetadata(metaCh)
 
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+	sentRevision := make(map[string]uint64)
 	sendMetadata := func(mc relay.MetadataChange) error {
 		if current, exists := s.Relay.GetStream(mc.Mount); exists {
 			if !current.IsVisible() {
 				return nil
 			}
-		} else if !mc.Visible {
+		} else if !mc.Visible || mc.Title != "" {
 			return nil
 		}
+		if previous, ok := sentRevision[mc.Mount]; ok && mc.Revision <= previous {
+			return nil
+		}
+		sentRevision[mc.Mount] = mc.Revision
 		metadataJSON, _ := json.Marshal(map[string]interface{}{
 			"mount":       mc.Mount,
 			"title":       mc.Title,
@@ -603,6 +638,12 @@ func (s *Server) handleMetadataEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case <-r.Context().Done():
 			return
+		case <-ticker.C:
+			for _, mc := range s.Relay.LastMetadata() {
+				if err := sendMetadata(mc); err != nil {
+					return
+				}
+			}
 		case mc := <-metaCh:
 			if err := sendMetadata(mc); err != nil {
 				return
@@ -836,10 +877,14 @@ func (s *Server) handleWebRTCOffer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	answer, err := s.WebRTCM.HandleOffer(mount, offer)
+	answer, err := s.WebRTCM.HandleOffer(mount, offer, relay.ListenerSnapshot{RemoteAddr: r.RemoteAddr, UserAgent: r.UserAgent()})
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, relay.ErrListenerCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		w.WriteHeader(status)
 		json.NewEncoder(w).Encode(map[string]string{"error": webrtcErrorHint(err)})
 		return
 	}
@@ -1040,7 +1085,10 @@ func (s *Server) handleGoLiveChunk(w http.ResponseWriter, r *http.Request) {
 		s.RuntimeRegistry.AttachClaim(stream, token, relay.SourceWebRTC, "default")
 		defer s.RuntimeRegistry.DetachClaim(stream, token)
 	}
-	stream.Broadcast(body, s.Relay)
+	if !s.Relay.PublishSource(stream, token, body) {
+		http.Error(w, "Source ownership revoked", http.StatusConflict)
+		return
+	}
 
 	w.WriteHeader(http.StatusOK)
 }

@@ -199,17 +199,6 @@ func (tm *TranscoderManager) safePerformTranscode(ctx context.Context, inst *Tra
 }
 
 func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *TranscoderInstance) {
-	// Per-invocation child context. Cancelled when this function
-	// returns so any goroutine we spawn (mirrorTranscodeMetadata
-	// most notably) exits along with the encode loop instead of
-	// leaking until the parent transcoder is torn down.
-	//
-	// Production goroutine dump showed >1000 mirrorTranscodeMetadata
-	// goroutines accumulated because each source disconnect /
-	// reconnect cycle spawned a fresh one tied to the outer ctx
-	// (which only cancels on Stop, not on encode-loop return).
-	// With ~600 reconnect cycles × N transcoders, the leak filled
-	// the goroutine table and pushed RSS from ~44 MB to >800 MB.
 	runCtx, runCancel := context.WithCancel(ctx)
 	defer runCancel()
 
@@ -294,7 +283,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 		if sr != decoder.SampleRate() {
 			pcm = NewLinearResampler(decoder, decoder.SampleRate(), sr)
 		}
-		EncodeMP3(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, sr)
+		EncodeMP3(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, sr, inst.token)
 	} else if inst.Config.Format == "opus" {
 		output.mu.Lock()
 		output.ContentType = "audio/ogg"
@@ -311,7 +300,7 @@ func (tm *TranscoderManager) performTranscode(ctx context.Context, inst *Transco
 				"to", 48000,
 			)
 		}
-		EncodeOpus(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false,
+		EncodeOpus(runCtx, tm.relay, output, pcm, inst.Config.Bitrate, &inst.BytesEncoded, false, inst.token,
 			OpusEncoderSettings{
 				Application: inst.Config.OpusApplication,
 				VBR:         inst.Config.OpusVBR,
@@ -451,7 +440,10 @@ func (tm *TranscoderManager) runMetadataMirror(ctx context.Context, inst *Transc
 	}
 }
 
-func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, sampleRate int) {
+func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, sampleRate int, token int64) {
+	if !relay.HasSourceClaim(output, token) {
+		return
+	}
 	if sampleRate <= 0 {
 		sampleRate = 44100 // Fallback
 	}
@@ -477,7 +469,7 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	// Reuse a single streamWriter across iterations — recreating it on
 	// every frame churned 38 allocations/sec per transcoder for no
 	// benefit; the struct holds no per-call state.
-	writer := &streamWriter{stream: output, relay: relay, stats: stats}
+	writer := &streamWriter{token: token, stream: output, relay: relay, stats: stats}
 
 	for {
 		select {
@@ -551,7 +543,10 @@ func EncodeMP3(ctx context.Context, relay *Relay, output *Stream, decoder io.Rea
 	}
 }
 
-func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, settings ...OpusEncoderSettings) {
+func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Reader, bitrate int, stats *int64, pace bool, token int64, settings ...OpusEncoderSettings) {
+	if !relay.HasSourceClaim(output, token) {
+		return
+	}
 	// 48kHz is the canonical Opus sample rate.
 	const sampleRate = 48000
 	const channels = 2
@@ -580,7 +575,7 @@ func EncodeOpus(ctx context.Context, relay *Relay, output *Stream, decoder io.Re
 	}
 
 	// Ogg encapsulation
-	writer := &streamWriter{stream: output, relay: relay, stats: stats, capture: true}
+	writer := &streamWriter{token: token, stream: output, relay: relay, stats: stats, capture: true}
 	serial := uint32(time.Now().UnixNano())
 	pw := ogg.NewPacketWriter(writer, serial)
 
@@ -687,6 +682,7 @@ func activeElapsed(start time.Time, r io.Reader) time.Duration {
 }
 
 type streamWriter struct {
+	token     int64
 	stream    *Stream
 	relay     *Relay
 	stats     *int64
@@ -695,20 +691,12 @@ type streamWriter struct {
 }
 
 func (w *streamWriter) Write(p []byte) (n int, err error) {
+	if !w.relay.PublishSource(w.stream, w.token, p) {
+		return 0, ErrSourceOwnershipLost
+	}
 	if w.capture {
 		w.headerBuf.Write(p)
 	}
-	// Follow the mount if the Stream object was replaced under us. The
-	// health monitor removes a mount that has gone silent (e.g. a long
-	// AutoDJ pause) and the next write recreates it; without this we
-	// would keep broadcasting into the orphaned object and every
-	// listener on the live mount would hear nothing.
-	if w.relay != nil && w.stream != nil {
-		if cur, ok := w.relay.GetStream(w.stream.MountName); ok && cur != w.stream {
-			w.stream = cur
-		}
-	}
-	w.stream.Broadcast(p, w.relay)
 	if w.stats != nil {
 		atomic.AddInt64(w.stats, int64(len(p)))
 	}

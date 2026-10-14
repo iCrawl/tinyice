@@ -40,7 +40,7 @@ func TestEncodeOpusRoundTripHasNoDroppedAudio(t *testing.T) {
 	offset, _ := out.Subscribe("probe", 0)
 
 	pcm := bytes.NewReader(tonePCM(2.0, sampleRate))
-	EncodeOpus(context.Background(), r, out, pcm, 128, nil, false)
+	EncodeOpus(context.Background(), r, out, pcm, 128, nil, false, claimTestEncoder(t, out))
 
 	var encoded []byte
 	buf := make([]byte, 64*1024)

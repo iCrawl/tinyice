@@ -42,7 +42,7 @@ func TestPacedEncodersRespectRealTimeWithoutListeners(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		EncodeMP3(ctx, r, out, silentPCM(secs), 128, nil, true, 48000)
+		EncodeMP3(ctx, r, out, silentPCM(secs), 128, nil, true, 48000, claimTestEncoder(t, out))
 		elapsed := time.Since(start)
 
 		if elapsed < floor {
@@ -64,7 +64,7 @@ func TestPacedEncodersRespectRealTimeWithoutListeners(t *testing.T) {
 		defer cancel()
 
 		start := time.Now()
-		EncodeOpus(ctx, r, out, silentPCM(secs), 128, nil, true)
+		EncodeOpus(ctx, r, out, silentPCM(secs), 128, nil, true, claimTestEncoder(t, out))
 		elapsed := time.Since(start)
 
 		if elapsed < floor {
@@ -100,7 +100,7 @@ func TestIdleEncoderKeepsMountAlive(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	EncodeMP3(ctx, r, out, silentPCM(1), 128, nil, true, 48000)
+	EncodeMP3(ctx, r, out, silentPCM(1), 128, nil, true, 48000, claimTestEncoder(t, out))
 
 	out.mu.RLock()
 	got := out.LastDataReceived

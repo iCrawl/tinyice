@@ -416,7 +416,7 @@ func LoadConfig(path string) (*Config, error) {
 	defer file.Close()
 
 	decoder := json.NewDecoder(file)
-	config := &Config{}
+	config := &Config{MaxListeners: 100}
 	err = decoder.Decode(config)
 	if err != nil {
 		return nil, err
@@ -443,9 +443,6 @@ func (config *Config) setBasicDefaults() {
 	}
 	if config.AdminUser == "" {
 		config.AdminUser = "admin"
-	}
-	if config.MaxListeners == 0 {
-		config.MaxListeners = 100
 	}
 	if config.PageTitle == "" {
 		config.PageTitle = "TinyIce"

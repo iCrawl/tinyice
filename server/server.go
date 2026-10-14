@@ -4,6 +4,7 @@ import (
 	"context"
 	"embed"
 	"fmt"
+	"html/template"
 	"net"
 	"net/http"
 	"net/url"
@@ -22,6 +23,9 @@ import (
 	"golang.org/x/crypto/acme/autocert"
 )
 
+//go:embed all:templates
+var templateFS embed.FS
+
 //go:embed all:assets
 var assetFS embed.FS
 
@@ -33,7 +37,6 @@ var assetFS embed.FS
 //
 // Key responsibilities:
 //   - HTTP request routing and handling
-//   - Web interface rendering (embedded frontend, assets)
 //   - WebSocket connections for real-time updates
 //   - Source client authentication and authorization
 //   - Listener connection management
@@ -61,11 +64,12 @@ type Server struct {
 	SRT             *relay.SRTServer         // SRT ingest server (optional)
 	TenantM         *relay.TenantManager     // Multi-tenant management
 	mpdServer       *relay.MPDServer         // MPD protocol server (optional)
-	shell           *ShellRenderer           // New Preact frontend renderer
-	Version         string                   // TinyIce version
-	Commit          string                   // Git commit hash
-	httpServers     []*http.Server           // Active HTTP servers
-	startTime       time.Time                // Server start time
+	tmpl            *template.Template
+	shell           *ShellRenderer // New Preact frontend renderer
+	Version         string         // TinyIce version
+	Commit          string         // Git commit hash
+	httpServers     []*http.Server // Active HTTP servers
+	startTime       time.Time      // Server start time
 	AuthLog         *zap.SugaredLogger
 	RuntimeRegistry *relay.RuntimeRegistry
 
@@ -116,6 +120,12 @@ type Server struct {
 }
 
 func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, setupToken string) *Server {
+	tmpl := template.New("base")
+	tmpl, err := tmpl.ParseFS(templateFS, "templates/*.html")
+	if err != nil {
+		logger.L.Fatalf("Error loading embedded templates: %v", err)
+	}
+
 	hm, err := relay.NewHistoryManager("history.db")
 	if err != nil {
 		logger.L.Fatalf("Failed to initialize history manager: %v", err)
@@ -151,9 +161,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		AttestationPreference: protocol.PreferNoAttestation,
 	})
 
-	// Keep dead streams visible by default so operators can inspect
-	// diagnostics and decide whether removal should be manual.
-	healthM := relay.NewHealthMonitor(r)
+	healthM := relay.NewHealthMonitor(r).WithAutoRemove(0)
 	hlsCtx, hlsCancel := context.WithCancel(context.Background())
 	srv := &Server{
 		Config:           cfg,
@@ -167,6 +175,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 		RTMP:             relay.NewRTMPServer(r, cfg),
 		SRT:              relay.NewSRTServer(r, cfg),
 		TenantM:          relay.NewTenantManager(),
+		tmpl:             tmpl,
 		shell:            NewShellRenderer(),
 		Version:          version,
 		Commit:           commit,
@@ -220,6 +229,7 @@ func NewServer(cfg *config.Config, authLog *zap.SugaredLogger, version, commit, 
 			"format":           info.Format,
 			"bitrate":          info.Bitrate,
 			"duration_seconds": info.DurationSeconds,
+			"playback_id":      info.PlaybackID, "revision": info.Revision, "started_at": info.StartedAt,
 		})
 	}
 

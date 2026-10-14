@@ -86,8 +86,8 @@ func TestRetentionMoveToFullMount(t *testing.T) {
 	r.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	s.apiMoveListener(w, r)
-	if w.Code == http.StatusOK {
-		t.Errorf("move to full mount accepted with status 200")
+	if w.Code != http.StatusConflict {
+		t.Errorf("move to full mount returned %d, want 409", w.Code)
 	}
 	select {
 	case <-from.MoveCh:

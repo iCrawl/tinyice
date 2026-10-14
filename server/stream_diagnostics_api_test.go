@@ -158,9 +158,9 @@ func TestAPIGetStreamsMarksRuntimeOwnedAutoDJMountAsRunningWithoutRemoteSourceIP
 	s := newListenerAPITestServer(t)
 	s.sessions["sid-1"] = &session{User: s.Config.Users["admin"]}
 
-	s.Relay.GetOrCreateStream("/auto")
-	s.RuntimeRegistry.GetOrCreate("/auto")
-	s.RuntimeRegistry.AttachSource("/auto", relay.SourceAutoDJ, "default")
+	stream := s.Relay.GetOrCreateStream("/auto")
+	token, _ := stream.ClaimSource("autodj")
+	s.RuntimeRegistry.AttachClaim(stream, token, relay.SourceAutoDJ, "default")
 
 	req := httptest.NewRequest(http.MethodGet, "/api/streams", nil)
 	req.AddCookie(&http.Cookie{Name: "sid", Value: "sid-1"})

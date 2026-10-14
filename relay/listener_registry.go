@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+var ErrListenerCapacity = errors.New("mount listener capacity reached")
+
 type ListenerProtocol string
 
 const (
@@ -128,7 +130,7 @@ func (r *ListenerRegistry) Admit(l *Listener, limit int) error {
 		l.CurrentMount = l.RequestedMount
 	}
 	if limit > 0 && len(r.byMount[l.CurrentMount])+len(r.reservations[l.CurrentMount]) >= limit {
-		return errors.New("mount listener capacity reached")
+		return ErrListenerCapacity
 	}
 	r.listeners[l.ID] = l
 	if r.byMount[l.CurrentMount] == nil {
@@ -228,7 +230,7 @@ func (r *ListenerRegistry) reserveLocked(id, target string, limit int) (string, 
 		return "", nil
 	}
 	if limit > 0 && len(r.byMount[target])+len(r.reservations[target]) >= limit {
-		return "", errors.New("mount listener capacity reached")
+		return "", ErrListenerCapacity
 	}
 	r.moveSequence++
 	l.moveID = fmt.Sprintf("move-%d", r.moveSequence)

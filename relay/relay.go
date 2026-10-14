@@ -1,6 +1,7 @@
 package relay
 
 import (
+	"errors"
 	"sort"
 	"sync"
 	"sync/atomic"
@@ -28,7 +29,7 @@ import (
 //	relay := NewRelay(true, historyManager)
 //	stream := relay.GetOrCreateStream("/live")
 //	stats := relay.Snapshot()
-//
+
 // MetadataChange is emitted when a stream's current song changes.
 type MetadataChange struct {
 	owner      *Stream
@@ -140,6 +141,25 @@ func (r *Relay) GetOrCreateStreamSized(mount string, bufferSize int) *Stream {
 }
 
 // RemoveStream deletes a stream (e.g., when source disconnects)
+var ErrSourceOwnershipLost = errors.New("source ownership was revoked")
+
+func (r *Relay) HasSourceClaim(stream *Stream, token int64) bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.Streams[stream.MountName] == stream && stream.IsCurrentSource(token)
+}
+func (r *Relay) PublishSource(stream *Stream, token int64, data []byte) bool {
+	if token == 0 {
+		return false
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if r.Streams[stream.MountName] != stream {
+		return false
+	}
+	return stream.broadcast(data, r, token)
+}
+
 func (r *Relay) RemoveStream(mount string) {
 	r.mu.Lock()
 	stream := r.Streams[mount]

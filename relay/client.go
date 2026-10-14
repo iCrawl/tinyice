@@ -310,9 +310,9 @@ func (rm *RelayManager) performPull(ctx context.Context, inst *RelayInstance) {
 
 	// In-stream metadata parsing
 	if metaInt > 0 {
-		rm.pullWithMetadata(pullCtx, body, stream, metaInt)
+		rm.pullWithMetadata(pullCtx, body, stream, metaInt, token)
 	} else {
-		rm.pullSimple(pullCtx, body, stream)
+		rm.pullSimple(pullCtx, body, stream, token)
 	}
 }
 
@@ -333,7 +333,7 @@ func (i *idleResetReader) Read(p []byte) (int, error) {
 	return n, err
 }
 
-func (rm *RelayManager) pullSimple(ctx context.Context, body io.Reader, stream *Stream) {
+func (rm *RelayManager) pullSimple(ctx context.Context, body io.Reader, stream *Stream, token int64) {
 	buf := make([]byte, 16384)
 	// Ogg Vorbis/Opus carry track info in comment headers rather than ICY blocks.
 	sniffer := NewOggCommentSniffer(func(song string) { stream.SetCurrentSong(song, rm.relay) })
@@ -345,7 +345,9 @@ func (rm *RelayManager) pullSimple(ctx context.Context, body io.Reader, stream *
 			n, err := body.Read(buf)
 			if n > 0 {
 				data := buf[:n]
-				stream.Broadcast(data, rm.relay)
+				if !rm.relay.PublishSource(stream, token, data) {
+					return
+				}
 
 				sniffer.Feed(data)
 			}
@@ -356,7 +358,7 @@ func (rm *RelayManager) pullSimple(ctx context.Context, body io.Reader, stream *
 	}
 }
 
-func (rm *RelayManager) pullWithMetadata(ctx context.Context, body io.Reader, stream *Stream, metaInt int) {
+func (rm *RelayManager) pullWithMetadata(ctx context.Context, body io.Reader, stream *Stream, metaInt int, token int64) {
 	audioBuf := make([]byte, metaInt)
 	for {
 		select {
@@ -368,7 +370,9 @@ func (rm *RelayManager) pullWithMetadata(ctx context.Context, body io.Reader, st
 			if err != nil {
 				return
 			}
-			stream.Broadcast(audioBuf, rm.relay)
+			if !rm.relay.PublishSource(stream, token, audioBuf) {
+				return
+			}
 
 			// 2. Read Metadata Length Byte
 			var metaLenByte [1]byte

@@ -133,7 +133,7 @@ func (s *Server) handlePlayerSavePlaylist(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handlePlayerClearPlaylist(w http.ResponseWriter, r *http.Request) {
@@ -239,7 +239,7 @@ func (s *Server) handlePlayerLoadPlaylist(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handlePlayerReorder(w http.ResponseWriter, r *http.Request) {
@@ -459,7 +459,7 @@ func (s *Server) handlePlayerMetadata(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	w.WriteHeader(http.StatusOK)
+	jsonResponse(w, map[string]string{"status": "ok"})
 }
 
 func (s *Server) handlePlayerRestart(w http.ResponseWriter, r *http.Request) {

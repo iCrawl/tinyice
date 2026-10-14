@@ -93,21 +93,16 @@ func (rr *RuntimeRegistry) tenantLocked(rt *MountRuntime, tenantID string) {
 		}
 	}
 }
-func (rr *RuntimeRegistry) AttachSource(mount string, src MountSource, tenantID string) {
-	rr.mu.Lock()
-	defer rr.mu.Unlock()
-	rt := rr.ensureLocked(mount)
-	rr.tenantLocked(rt, tenantID)
-	rt.Source = src
-	rt.UpdatedAt = time.Now()
-	rt.LastActive = rt.UpdatedAt
-}
 func (rr *RuntimeRegistry) AttachClaim(stream *Stream, token int64, src MountSource, tenantID string) {
 	if !stream.IsCurrentSource(token) {
 		return
 	}
 	rr.mu.Lock()
 	defer rr.mu.Unlock()
+	current, exists := rr.relay.GetStream(stream.MountName)
+	if !exists || current != stream || !stream.IsCurrentSource(token) {
+		return
+	}
 	rt := rr.ensureLocked(stream.MountName)
 	rr.tenantLocked(rt, tenantID)
 	rt.Source = src

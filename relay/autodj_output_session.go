@@ -47,8 +47,11 @@ func newReaderPCMFrameSource(ctx context.Context, reader io.Reader, closer io.Cl
 	}
 	if closer != nil {
 		go func() {
-			<-ctx.Done()
-			s.closeDone()
+			select {
+			case <-ctx.Done():
+				s.closeDone()
+			case <-s.done:
+			}
 		}()
 	}
 	return s
@@ -87,6 +90,7 @@ func (s *readerPCMFrameSource) closeDone() {
 }
 
 type AutoDJOutputSession struct {
+	closed      bool
 	streamer    *Streamer
 	stream      *Stream
 	frameWriter PCMFrameWriter
@@ -114,21 +118,27 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 	if !ok {
 		return nil, fmt.Errorf("mount %s already has a live source", streamer.OutputMount)
 	}
+	session := &AutoDJOutputSession{streamer: streamer, stream: stream, token: token, wake: make(chan struct{}, 1)}
+	stream.SetSourceCloserIfCurrent(token, func() { streamer.Stop(); session.Stop() })
 	stream.BeginSession()
 
 	sampleRate := 44100
 	frameSize := 1152
 	contentType := "audio/mpeg"
 
-	var writer PCMFrameWriter
-	var err error
 	if streamer.Format == "opus" {
 		sampleRate = 48000
 		frameSize = 960
 		contentType = "audio/ogg"
-		writer, err = NewOpusEncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, 2, &streamer.BytesStreamed)
+	}
+	stream.ConfigureAutoDJOutput(streamer.Name, fmt.Sprintf("%d", streamer.Bitrate), contentType, streamer.Visible)
+
+	var writer PCMFrameWriter
+	var err error
+	if streamer.Format == "opus" {
+		writer, err = NewOpusEncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, 2, &streamer.BytesStreamed, token)
 	} else {
-		writer, err = NewMP3EncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, &streamer.BytesStreamed)
+		writer, err = NewMP3EncoderSession(stream, streamer.relay, streamer.Bitrate, sampleRate, &streamer.BytesStreamed, token)
 	}
 	if err != nil {
 		stream.ReleaseSourceIfCurrent(token)
@@ -138,22 +148,27 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 		streamer.runtimeRegistry.AttachClaim(stream, token, SourceAutoDJ, "default")
 	}
 
-	stream.ConfigureAutoDJOutput(streamer.Name, fmt.Sprintf("%d", streamer.Bitrate), contentType, streamer.Visible)
+	session.mu.Lock()
+	if session.closed {
+		session.mu.Unlock()
+		_ = writer.Close()
+		return nil, ErrSourceOwnershipLost
+	}
+	session.frameWriter = writer
+	session.frameSize = frameSize
+	session.channels = 2
+	session.sampleRate = sampleRate
+	session.mu.Unlock()
+	return session, nil
 
-	return &AutoDJOutputSession{
-		streamer:    streamer,
-		stream:      stream,
-		frameWriter: writer,
-		frameSize:   frameSize,
-		channels:    2,
-		sampleRate:  sampleRate,
-		token:       token,
-		wake:        make(chan struct{}, 1),
-	}, nil
 }
 
 func (s *AutoDJOutputSession) Start(ctx context.Context) error {
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return ErrSourceOwnershipLost
+	}
 	if s.cancel != nil {
 		s.mu.Unlock()
 		return nil
@@ -295,6 +310,7 @@ func (s *AutoDJOutputSession) markActivated(binding *sourceBinding) {
 func (s *AutoDJOutputSession) Stop() {
 	s.stopOnce.Do(func() {
 		s.mu.Lock()
+		s.closed = true
 		cancel := s.cancel
 		binding := s.source
 		s.cancel = nil
@@ -308,8 +324,11 @@ func (s *AutoDJOutputSession) Stop() {
 			}
 		}
 		s.wg.Wait()
-		if s.frameWriter != nil {
-			_ = s.frameWriter.Close()
+		s.mu.RLock()
+		writer := s.frameWriter
+		s.mu.RUnlock()
+		if writer != nil {
+			_ = writer.Close()
 		}
 		if s.stream.IsCurrentSource(s.token) {
 			s.stream.SetCurrentSong("", s.streamer.relay)

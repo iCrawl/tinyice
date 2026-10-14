@@ -3,6 +3,7 @@ package relay
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"sync"
 	"sync/atomic"
@@ -249,5 +250,59 @@ func TestIntentionalPauseAndStopSurviveHealthPolling(t *testing.T) {
 	diagnostic, _ = r.Diagnostics.Current("/intent")
 	if diagnostic.Status != DiagnosticStatusStopped || recoveryRequests.Load() != 0 {
 		t.Fatal("health polling replaced intentional stop with dead recovery")
+	}
+}
+
+func TestRemovedPersistentProducerCannotPublishIntoSuccessor(t *testing.T) {
+	for _, format := range []string{"mp3", "opus"} {
+		t.Run(format, func(t *testing.T) {
+			r := NewRelay(false, nil)
+			s := &Streamer{Name: "old", OutputMount: "/radio", Format: format, Bitrate: 128, State: StatePlaying, relay: r}
+			session, err := NewAutoDJOutputSession(s)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Stop()
+			r.RemoveStream("/radio")
+			next := r.GetOrCreateStream("/radio")
+			token, _ := next.ClaimSource("live-icecast")
+			head := next.Buffer.HeadOffset()
+			frameSize := 2304
+			if format == "opus" {
+				frameSize = 1920
+			}
+			if err = session.frameWriter.WriteFrame(make([]int16, frameSize)); !errors.Is(err, ErrSourceOwnershipLost) {
+				t.Fatalf("stale writer error %v", err)
+			}
+			if next.Buffer.HeadOffset() != head || !next.IsCurrentSource(token) || s.GetStats().State != StateStopped {
+				t.Fatal("removed producer wrote into successor or retained playback intent")
+			}
+		})
+	}
+}
+func TestEndedSourceRemainsStoppedUnderHealthPolling(t *testing.T) {
+	r := NewRelay(false, nil)
+	out := r.GetOrCreateStream("/ended")
+	token, _ := out.ClaimSource("source")
+	r.Diagnostics.Record(DiagnosticUpdate{Mount: "/ended", Status: DiagnosticStatusStopped, Class: DiagnosticClassSourceDisconnect, Actor: DiagnosticActorWebRTC, Reason: "source disconnected"})
+	out.ReleaseSourceIfCurrent(token)
+	out.mu.Lock()
+	out.LastDataReceived = time.Now().Add(-time.Hour)
+	out.Started = time.Now().Add(-time.Hour)
+	out.mu.Unlock()
+	health := NewHealthMonitor(r)
+	health.check()
+	diagnostic, _ := r.Diagnostics.Current("/ended")
+	if diagnostic.Status != DiagnosticStatusStopped || diagnostic.Class != DiagnosticClassSourceDisconnect {
+		t.Fatal("health polling overwrote ended source with stall diagnostic")
+	}
+	next, _ := out.ClaimSource("successor")
+	if !out.IsCurrentSource(next) {
+		t.Fatal("successor claim failed")
+	}
+	health.check()
+	diagnostic, _ = r.Diagnostics.Current("/ended")
+	if diagnostic.Status != DiagnosticStatusDead {
+		t.Fatal("terminal exclusion masked stalled attached successor")
 	}
 }

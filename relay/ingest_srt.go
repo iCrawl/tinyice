@@ -207,7 +207,7 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 
 	demuxer := NewTSDemuxer()
 	demuxer.OnAudio(func(data []byte, pts int64) {
-		stream.Broadcast(data, ss.relay)
+		ss.relay.PublishSource(stream, sourceToken, data)
 	})
 	// Previously the demuxer's OnVideo callback was never registered, so
 	// SRT video packets were parsed, tagged with keyframe status and
@@ -232,7 +232,7 @@ func (ss *SRTServer) handlePublish(conn srt.Conn) {
 		if isKeyframe {
 			videoStream.Buffer.RecordKeyframe(videoStream.Buffer.HeadOffset())
 		}
-		videoStream.Broadcast(data, ss.relay)
+		ss.relay.PublishSource(videoStream, videoSourceToken, data)
 	})
 
 	// Per-read deadline. A wedged peer can keep the SRT connection

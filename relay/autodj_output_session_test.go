@@ -48,7 +48,7 @@ func writeTestMP3File(t *testing.T) string {
 
 	r := NewRelay(false, nil)
 	stream := r.GetOrCreateStream("/fixture")
-	session, err := NewMP3EncoderSession(stream, r, 64, 44100, nil)
+	session, err := NewMP3EncoderSession(stream, r, 64, 44100, nil, claimTestEncoder(t, stream))
 	if err != nil {
 		t.Fatalf("NewMP3EncoderSession: %v", err)
 	}

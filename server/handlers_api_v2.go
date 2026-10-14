@@ -90,6 +90,64 @@ func (s *Server) apiGetAuditLog(w http.ResponseWriter, r *http.Request) {
 // Streams
 // ---------------------------------------------------------------------------
 
+type mountDiagnosticInfo struct {
+	ProducerState            string                  `json:"producer_state,omitempty"`
+	AvailabilityState        string                  `json:"availability_state"`
+	Recovery                 relay.RecoveryState     `json:"recovery"`
+	ProducerLastProgress     time.Time               `json:"producer_last_progress,omitzero"`
+	AvailabilityLastProgress time.Time               `json:"availability_last_progress,omitzero"`
+	Status                   string                  `json:"status,omitempty"`
+	StatusClass              string                  `json:"status_class,omitempty"`
+	StatusReason             string                  `json:"status_reason,omitempty"`
+	LastError                string                  `json:"last_error,omitempty"`
+	StatusUpdatedAt          int64                   `json:"status_updated_at,omitempty"`
+	History                  []relay.DiagnosticEntry `json:"history,omitempty"`
+}
+
+func (s *Server) mountDiagnostics(mount string) mountDiagnosticInfo {
+	info := mountDiagnosticInfo{AvailabilityState: "silent"}
+	r := s.Relay
+	if out, ok := r.GetStream(mount); ok {
+		info.ProducerLastProgress = out.ProducerLastProgress()
+		info.AvailabilityLastProgress = out.GetLastDataReceived()
+		info.ProducerState = out.ProducerIntent()
+		if !info.AvailabilityLastProgress.IsZero() && time.Since(info.AvailabilityLastProgress) <= 5*time.Second {
+			info.AvailabilityState = "available"
+		}
+	}
+	if s.StreamerM != nil {
+		if streamer := s.StreamerM.GetStreamer(mount); streamer != nil {
+			info.Recovery = streamer.RecoverySnapshot()
+			if info.Recovery.Phase == "recovering" || info.Recovery.Phase == "backoff" {
+				info.ProducerState = "recovering"
+			}
+		}
+	}
+	diag, ok := r.Diagnostics.Current(mount)
+	if !ok {
+		if r.History != nil {
+			history := r.History.GetDiagnostics(mount, 10)
+			if len(history) > 0 {
+				latest := history[0]
+				info.Status = string(latest.Status)
+				info.StatusClass = string(latest.Class)
+				info.StatusReason = latest.Reason
+				info.LastError = latest.Error
+				info.StatusUpdatedAt = latest.Timestamp.Unix()
+				info.History = history
+			}
+		}
+		return info
+	}
+	info.Status = string(diag.Status)
+	info.StatusClass = string(diag.Class)
+	info.StatusReason = diag.Reason
+	info.LastError = diag.Error
+	info.StatusUpdatedAt = diag.UpdatedAt.Unix()
+	info.History = diag.History
+	return info
+}
+
 func mountBurstSize(cfg *config.Config, mount string) int {
 	if cfg != nil {
 		cfg.RLockMaps()
@@ -137,81 +195,36 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type streamInfo struct {
-		ProducerState            string                  `json:"producer_state,omitempty"`
-		AvailabilityState        string                  `json:"availability_state"`
-		Recovery                 relay.RecoveryState     `json:"recovery"`
-		ProducerLastProgress     time.Time               `json:"producer_last_progress,omitzero"`
-		AvailabilityLastProgress time.Time               `json:"availability_last_progress,omitzero"`
-		EffectiveMaxListeners    int                     `json:"effective_max_listeners"`
-		Mount                    string                  `json:"mount"`
-		ContentType              string                  `json:"content_type"`
-		Bitrate                  string                  `json:"bitrate"`
-		BurstSize                int                     `json:"burst_size"`
-		EffectiveBurst           int                     `json:"effective_burst_size"`
-		Listeners                int                     `json:"listeners"`
-		MaxListeners             int                     `json:"max_listeners"`
-		SourceIP                 string                  `json:"source_ip"`
-		SourceKind               string                  `json:"source_kind,omitempty"`
-		SourceLabel              string                  `json:"source_label,omitempty"`
-		Visible                  bool                    `json:"visible"`
-		Enabled                  bool                    `json:"enabled"`
-		Health                   float64                 `json:"health"`
-		Uptime                   string                  `json:"uptime"`
-		CurrentSong              string                  `json:"current_song"`
-		Name                     string                  `json:"name"`
-		Status                   string                  `json:"status,omitempty"`
-		StatusClass              string                  `json:"status_class,omitempty"`
-		StatusReason             string                  `json:"status_reason,omitempty"`
-		LastError                string                  `json:"last_error,omitempty"`
-		StatusUpdatedAt          int64                   `json:"status_updated_at,omitempty"`
-		History                  []relay.DiagnosticEntry `json:"history,omitempty"`
-		HasVideo                 bool                    `json:"has_video"`
-		VideoWidth               int                     `json:"video_width,omitempty"`
-		VideoHeight              int                     `json:"video_height,omitempty"`
-		VideoFPS                 float64                 `json:"video_fps,omitempty"`
-		VideoGOP                 float64                 `json:"video_gop,omitempty"`
-		VideoKbps                int                     `json:"video_kbps,omitempty"`
+		mountDiagnosticInfo
+		EffectiveMaxListeners int     `json:"effective_max_listeners"`
+		Mount                 string  `json:"mount"`
+		ContentType           string  `json:"content_type"`
+		Bitrate               string  `json:"bitrate"`
+		BurstSize             int     `json:"burst_size"`
+		EffectiveBurst        int     `json:"effective_burst_size"`
+		Listeners             int     `json:"listeners"`
+		MaxListeners          int     `json:"max_listeners"`
+		SourceIP              string  `json:"source_ip"`
+		SourceKind            string  `json:"source_kind,omitempty"`
+		SourceLabel           string  `json:"source_label,omitempty"`
+		Visible               bool    `json:"visible"`
+		Enabled               bool    `json:"enabled"`
+		Health                float64 `json:"health"`
+		Uptime                string  `json:"uptime"`
+		CurrentSong           string  `json:"current_song"`
+		Name                  string  `json:"name"`
+		HasVideo              bool    `json:"has_video"`
+		VideoWidth            int     `json:"video_width,omitempty"`
+		VideoHeight           int     `json:"video_height,omitempty"`
+		VideoFPS              float64 `json:"video_fps,omitempty"`
+		VideoGOP              float64 `json:"video_gop,omitempty"`
+		VideoKbps             int     `json:"video_kbps,omitempty"`
 	}
 	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
-		diag, ok := r.Diagnostics.Current(mount)
-		if !ok {
-			if r.History != nil {
-				history := r.History.GetDiagnostics(mount, 10)
-				if len(history) > 0 {
-					latest := history[0]
-					info.Status = string(latest.Status)
-					info.StatusClass = string(latest.Class)
-					info.StatusReason = latest.Reason
-					info.LastError = latest.Error
-					info.StatusUpdatedAt = latest.Timestamp.Unix()
-					info.History = history
-				}
-			}
-			return
-		}
-		info.Status = string(diag.Status)
-		info.StatusClass = string(diag.Class)
-		info.StatusReason = diag.Reason
-		info.LastError = diag.Error
-		info.StatusUpdatedAt = diag.UpdatedAt.Unix()
-		info.History = diag.History
+		info.mountDiagnosticInfo = s.mountDiagnostics(mount)
 	}
 	applyStreamSource := func(info *streamInfo, mount string) {
 		info.EffectiveMaxListeners = s.effectiveMountListenerLimit(mount)
-		if out, ok := s.Relay.GetStream(mount); ok {
-			info.ProducerLastProgress = out.ProducerLastProgress()
-			info.AvailabilityLastProgress = out.LastDataTime()
-			info.ProducerState = out.ProducerIntent()
-			info.AvailabilityState = "silent"
-			if !info.AvailabilityLastProgress.IsZero() && time.Since(info.AvailabilityLastProgress) <= 5*time.Second {
-				info.AvailabilityState = "available"
-			}
-		}
-		if s.StreamerM != nil {
-			if streamer := s.StreamerM.GetStreamer(mount); streamer != nil {
-				info.Recovery = streamer.RecoverySnapshot()
-			}
-		}
 		sourceKind := ""
 		sourceLabel := ""
 		if s.RuntimeRegistry != nil {
@@ -379,6 +392,8 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
+		Enabled  *bool  `json:"enabled"`
+		Visible  *bool  `json:"visible"`
 		Mount    string `json:"mount"`
 		Password string `json:"password"`
 		// The create form has always had a burst-size field; the handler
@@ -429,6 +444,9 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.BurstSize > 0 || body.MaxListeners > 0 {
 		s.Config.LockMaps()
+		if s.Config.AdvancedMounts == nil {
+			s.Config.AdvancedMounts = make(map[string]*config.MountSettings)
+		}
 		adv, ok := s.Config.AdvancedMounts[body.Mount]
 		if !ok || adv == nil {
 			adv = &config.MountSettings{}
@@ -436,6 +454,30 @@ func (s *Server) apiCreateStream(w http.ResponseWriter, r *http.Request) {
 		}
 		adv.BurstSize = body.BurstSize
 		adv.MaxListeners = body.MaxListeners
+		s.Config.UnlockMaps()
+	}
+	if body.Enabled != nil || body.Visible != nil {
+		s.Config.LockMaps()
+		if body.Enabled != nil {
+			if s.Config.DisabledMounts == nil {
+				s.Config.DisabledMounts = make(map[string]bool)
+			}
+			if *body.Enabled {
+				delete(s.Config.DisabledMounts, body.Mount)
+			} else {
+				s.Config.DisabledMounts[body.Mount] = true
+			}
+		}
+		if body.Visible != nil {
+			if s.Config.VisibleMounts == nil {
+				s.Config.VisibleMounts = make(map[string]bool)
+			}
+			if *body.Visible {
+				s.Config.VisibleMounts[body.Mount] = true
+			} else {
+				delete(s.Config.VisibleMounts, body.Mount)
+			}
+		}
 		s.Config.UnlockMaps()
 	}
 	s.Config.SaveConfig()
@@ -515,7 +557,9 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 			s.Config.Mounts[body.Mount] = hashed
 			s.Config.UnlockMaps()
 		} else {
+			s.Config.LockMaps()
 			owningUser.Mounts[body.Mount] = hashed
+			s.Config.UnlockMaps()
 		}
 	}
 
@@ -668,6 +712,7 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 	}
 
 	type autoDJInfo struct {
+		mountDiagnosticInfo
 		Name                 string               `json:"name"`
 		Mount                string               `json:"mount"`
 		State                int                  `json:"state"`
@@ -709,7 +754,7 @@ func (s *Server) apiGetAutoDJ(w http.ResponseWriter, r *http.Request) {
 		if !s.hasAccess(user, adj.Mount) {
 			continue
 		}
-		info := autoDJInfo{
+		info := autoDJInfo{mountDiagnosticInfo: s.mountDiagnostics(adj.Mount),
 			Name:                 adj.Name,
 			Mount:                adj.Mount,
 			Format:               adj.Format,
@@ -2900,7 +2945,9 @@ func (s *Server) apiUpdateSettings(w http.ResponseWriter, r *http.Request) {
 	}
 	if v, ok := body["max_listeners"]; ok {
 		if n, ok := v.(float64); ok {
+			s.Config.LockMaps()
 			s.Config.MaxListeners = int(n)
+			s.Config.UnlockMaps()
 		}
 	}
 	if v, ok := body["directory_listing"]; ok {

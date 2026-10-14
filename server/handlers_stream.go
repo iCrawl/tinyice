@@ -352,7 +352,9 @@ func (s *Server) handleSource(w http.ResponseWriter, r *http.Request) {
 					logger.L.Infow("Source declared no bitrate; using measured rate", "mount", mount, "kbps", kbps)
 				}
 			}
-			stream.Broadcast(buf[:n], s.Relay)
+			if !s.Relay.PublishSource(stream, sourceToken, buf[:n]) {
+				break
+			}
 			if sniffer != nil {
 				sniffer.Feed(buf[:n])
 			}
@@ -586,6 +588,17 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 		default:
 		}
 
+		if served {
+			current, exists := s.Relay.GetStream(listener.CurrentMountName())
+			if !exists || !current.Snapshot().Enabled || s.Config.DisabledMounts[listener.CurrentMountName()] {
+				if outageSince.IsZero() {
+					outageSince = time.Now()
+				}
+				if time.Since(outageSince) > maxOutageWait {
+					return
+				}
+			}
+		}
 		if mount != originalMount {
 			if _, ok := s.Relay.GetStream(originalMount); ok {
 				if primaryFirstSeen.IsZero() {
@@ -606,7 +619,16 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 
 		stream, ok := s.Relay.GetStream(mount)
 		if registered && listener.CurrentMountName() != mount {
-			if !ok || s.Config.DisabledMounts[mount] {
+			snapshot, _ := s.Relay.Listeners.Get(id)
+			if !ok && snapshot.MoveStatus == "pending" && snapshot.MoveDestination == mount {
+				s.Relay.Listeners.FailMove(id, "destination unavailable")
+				mount = listener.CurrentMountName()
+				originalMount = listener.RequestedMountName()
+				continue
+			}
+		}
+		if registered && listener.CurrentMountName() != mount && ok {
+			if s.Config.DisabledMounts[mount] {
 				s.Relay.Listeners.FailMove(id, "destination unavailable")
 				mount = listener.CurrentMountName()
 				originalMount = listener.RequestedMountName()
@@ -727,6 +749,8 @@ func (s *Server) handleListener(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 
+		served = true
+		outageSince = time.Time{}
 		result := s.serveStreamData(w, r, stream, id, originalMount, mount, recoveryTicker, metaint, icy)
 		if !result.KeepGoing {
 			return
@@ -782,9 +806,6 @@ type listenerLoopResult struct {
 }
 
 func (s *Server) serveStreamData(w http.ResponseWriter, r *http.Request, stream *relay.Stream, id, originalMount, currentMount string, recoveryTicker *time.Ticker, metaint int, icy *icyState) listenerLoopResult {
-	// A zero configured burst means "use the default", not "disable burst".
-	// Keep the default modest so server-side metadata changes are not hidden
-	// behind a long listener backfill on AutoDJ/transcoded mounts.
 	offset, signal := stream.Subscribe(id, effectiveMountBurstSize(s.Config, currentMount))
 	if err := s.Relay.Listeners.CompleteMove(id, currentMount, time.Now()); err != nil {
 		stream.Unsubscribe(id)

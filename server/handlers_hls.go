@@ -2,6 +2,7 @@ package server
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"image/jpeg"
 	"io"
@@ -158,10 +159,14 @@ func (s *Server) handleWHEP(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	answer, err := s.WebRTCM.HandleWHEPOffer(mount, string(body))
+	answer, err := s.WebRTCM.HandleWHEPOffer(mount, string(body), relay.ListenerSnapshot{RemoteAddr: r.RemoteAddr, UserAgent: r.UserAgent()})
 	if err != nil {
 		logger.L.Warnw("WHEP: offer rejected", "mount", mount, "err", err.Error())
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		status := http.StatusBadRequest
+		if errors.Is(err, relay.ErrListenerCapacity) {
+			status = http.StatusServiceUnavailable
+		}
+		http.Error(w, err.Error(), status)
 		return
 	}
 	if stream, ok := s.Relay.GetStream(mount); ok {
@@ -408,10 +413,10 @@ func (s *Server) RegisterHLS(mount string) *relay.HLSOutput {
 	}
 	hls.Start(s.hlsCtx, tracks)
 	s.hlsOutputs[mount] = hls
-	s.hlsMu.Unlock()
 	if s.RuntimeRegistry != nil {
 		s.RuntimeRegistry.AttachOutput(mount, relay.OutputHLS)
 	}
+	s.hlsMu.Unlock()
 
 	logger.L.Infow("HLS: Registered output", "mount", mount, "has_video", len(tracks) > 1)
 	return hls
@@ -424,9 +429,9 @@ func (s *Server) UnregisterHLS(mount string) {
 		hls.Stop()
 		delete(s.hlsOutputs, mount)
 		delete(s.hlsLastAccess, mount)
+		if s.RuntimeRegistry != nil {
+			s.RuntimeRegistry.DetachOutput(mount, relay.OutputHLS)
+		}
 	}
 	s.hlsMu.Unlock()
-	if s.RuntimeRegistry != nil {
-		s.RuntimeRegistry.DetachOutput(mount, relay.OutputHLS)
-	}
 }

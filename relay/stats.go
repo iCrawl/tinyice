@@ -8,6 +8,7 @@ import (
 
 // StreamStats is a point-in-time snapshot of a stream for the UI
 type StreamStats struct {
+	Playback       MetadataChange
 	MountName      string
 	ContentType    string
 	Description    string
@@ -54,9 +55,13 @@ func (s *Stream) Snapshot() StreamStats {
 	// would surface as 50-60% health on perfectly healthy mounts
 	// nobody happens to be listening to. The upstream source mount
 	// has its own health metric that reflects real-source stalls.
-	if !s.IsTranscoded {
-		if !s.LastDataReceived.IsZero() {
-			silence := time.Since(s.LastDataReceived)
+	if !s.IsTranscoded && s.producerIntent != "paused" && s.producerIntent != "stopped" && s.producerIntent != "ended" {
+		lastData := s.LastDataReceived
+		if s.producerIntent != "" {
+			lastData = s.producerLastProgress
+		}
+		if !lastData.IsZero() {
+			silence := time.Since(lastData)
 			if silence > 5*time.Second {
 				penalty := float64(silence/time.Second) * 2.0 // 2% per second of silence
 				health -= penalty
@@ -71,7 +76,7 @@ func (s *Stream) Snapshot() StreamStats {
 		health = 0
 	}
 
-	return StreamStats{
+	return StreamStats{Playback: s.playback,
 		MountName:      s.MountName,
 		ContentType:    s.ContentType,
 		Description:    s.Description,

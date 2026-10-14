@@ -20,7 +20,8 @@ func TestRemoveStreamKicksTheSource(t *testing.T) {
 	r := relay.NewRelay(false, nil)
 	st := r.GetOrCreateStream("/kickme")
 	var closed atomic.Bool
-	st.SetSourceCloser(func() { closed.Store(true) })
+	token, _ := st.ClaimSource("test source")
+	st.SetSourceCloserIfCurrent(token, func() { closed.Store(true) })
 
 	r.RemoveStream("/kickme")
 

@@ -78,7 +78,7 @@ func TestEncodeMP3HonoursRequestedBitrate(t *testing.T) {
 			offset, _ := out.Subscribe("probe", 0)
 
 			pcm := bytes.NewReader(tonePCM(1.0, sampleRate))
-			EncodeMP3(context.Background(), r, out, pcm, kbps, nil, false, sampleRate)
+			EncodeMP3(context.Background(), r, out, pcm, kbps, nil, false, sampleRate, claimTestEncoder(t, out))
 
 			var encoded []byte
 			buf := make([]byte, 64*1024)
@@ -141,7 +141,7 @@ func TestEncodeMP3RoundTripHasNoDroppedAudio(t *testing.T) {
 	offset, _ := out.Subscribe("probe", 0)
 
 	pcm := bytes.NewReader(tonePCM(2.0, sampleRate))
-	EncodeMP3(context.Background(), r, out, pcm, 128, nil, false, sampleRate)
+	EncodeMP3(context.Background(), r, out, pcm, 128, nil, false, sampleRate, claimTestEncoder(t, out))
 
 	var encoded []byte
 	buf := make([]byte, 64*1024)

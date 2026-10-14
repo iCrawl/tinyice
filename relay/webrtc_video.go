@@ -237,7 +237,9 @@ func (wm *WebRTCManager) pumpVideoTrack(ctx context.Context, mount string, track
 			vs.Buffer.RecordKeyframe(vs.Buffer.HeadOffset())
 		}
 
-		vs.Broadcast(frame, wm.relay)
+		if !wm.relay.PublishSource(vs, token, frame) {
+			return
+		}
 
 		w, h, _ := ParseSPSResolution(sps)
 		vs.RecordVideoSample(w, h, len(frame), isKeyframe, time.Now())

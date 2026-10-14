@@ -13,7 +13,7 @@ func TestPersistentMP3PreservesRealTone(t *testing.T) {
 	r := NewRelay(false, nil)
 	out := r.GetOrCreateStream("/audit-session")
 	offset, _ := out.Subscribe("probe", 0)
-	s, err := NewMP3EncoderSession(out, r, 128, 44100, nil)
+	s, err := NewMP3EncoderSession(out, r, 128, 44100, nil, claimTestEncoder(t, out))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,4 +64,14 @@ func TestPersistentMP3PreservesRealTone(t *testing.T) {
 			t.Fatalf("decoded audio drops out at byte %d (window peak %d, want >=3000)", i, peak)
 		}
 	}
+}
+
+func claimTestEncoder(t *testing.T, stream *Stream) int64 {
+	t.Helper()
+	token, ok := stream.ClaimSource("test encoder")
+	if !ok {
+		t.Fatal("fixture producer claim failed")
+	}
+	t.Cleanup(func() { stream.ReleaseSourceIfCurrent(token) })
+	return token
 }

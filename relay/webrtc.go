@@ -96,8 +96,12 @@ func (wm *WebRTCManager) SetRuntimeRegistry(rr *RuntimeRegistry) {
 }
 
 func (wm *WebRTCManager) SetListenerLimit(resolve func(string) int) { wm.listenerLimit = resolve }
-func (wm *WebRTCManager) admitPlayback(mount string) (*Listener, error) {
+func (wm *WebRTCManager) admitPlayback(mount string, details ...ListenerSnapshot) (*Listener, error) {
 	l := &Listener{ID: fmt.Sprintf("webrtc-%d", time.Now().UnixNano()), Protocol: ListenerProtocolWebRTC, RequestedMount: mount, CurrentMount: mount, Connected: time.Now(), DisconnectCh: make(chan struct{})}
+	if len(details) > 0 {
+		l.RemoteAddr = details[0].RemoteAddr
+		l.UserAgent = details[0].UserAgent
+	}
 	limit := 0
 	if wm.listenerLimit != nil {
 		limit = wm.listenerLimit(mount)
@@ -108,7 +112,7 @@ func (wm *WebRTCManager) admitPlayback(mount string) (*Listener, error) {
 	return l, nil
 }
 
-func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescription) (*webrtc.SessionDescription, error) {
+func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescription, details ...ListenerSnapshot) (*webrtc.SessionDescription, error) {
 	stream, ok := wm.relay.GetStream(mount)
 	if !ok {
 		return nil, fmt.Errorf("stream not found")
@@ -120,7 +124,7 @@ func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescripti
 		return nil, fmt.Errorf("WebRTC requires Opus stream (got %s)", stream.ContentType)
 	}
 
-	listener, err := wm.admitPlayback(mount)
+	listener, err := wm.admitPlayback(mount, details...)
 	if err != nil {
 		return nil, err
 	}
@@ -211,13 +215,16 @@ func (wm *WebRTCManager) HandleOffer(mount string, offer webrtc.SessionDescripti
 }
 
 type relayWriter struct {
+	token  int64
 	relay  *Relay
 	stream *Stream
 }
 
 func (rw *relayWriter) Write(p []byte) (n int, err error) {
 	logger.L.Debugw("relayWriter: Broadcasting", "bytes", len(p), "mount", rw.stream.MountName)
-	rw.stream.Broadcast(p, rw.relay)
+	if !rw.relay.PublishSource(rw.stream, rw.token, p) {
+		return 0, ErrSourceOwnershipLost
+	}
 	return len(p), nil
 }
 
@@ -268,9 +275,7 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	}
 	if existingDone != nil {
 		// Bounded wait: pion's track.ReadRTP returns promptly on
-		// PC.Close. 3 s is generous; if it hasn't unwound by then
-		// we proceed anyway and accept the brief overlap rather
-		// than blocking the new source forever.
+		// PC.Close. A timeout rejects the replacement so writers never overlap.
 		select {
 		case <-existingDone:
 		case <-time.After(3 * time.Second):
@@ -291,20 +296,22 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 		if state == webrtc.PeerConnectionStateFailed || state == webrtc.PeerConnectionStateClosed || state == webrtc.PeerConnectionStateDisconnected {
 			srcCancel()
 			wm.mu.Lock()
-			if wm.sources[mount] == peerConnection {
+			currentSource := wm.sources[mount] == peerConnection
+			if currentSource {
 				delete(wm.sources, mount)
-				delete(wm.sourceDone, mount)
 			}
 			wm.mu.Unlock()
 
-			wm.relay.Diagnostics.Record(DiagnosticUpdate{
-				Mount:     mount,
-				Status:    DiagnosticStatusStopped,
-				Class:     DiagnosticClassSourceDisconnect,
-				Reason:    "webrtc source disconnected",
-				Actor:     DiagnosticActorWebRTC,
-				Timestamp: time.Now(),
-			})
+			if currentSource {
+				wm.relay.Diagnostics.Record(DiagnosticUpdate{
+					Mount:     mount,
+					Status:    DiagnosticStatusStopped,
+					Class:     DiagnosticClassSourceDisconnect,
+					Reason:    "webrtc source disconnected",
+					Actor:     DiagnosticActorWebRTC,
+					Timestamp: time.Now(),
+				})
+			}
 			// Release UDP sockets / DTLS state on terminal states.
 			// pion's PC keeps internal goroutines alive until Close;
 			// without this the FD count creeps up across reconnects.
@@ -322,6 +329,14 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	// track owns the pump; the rest are declined; doneCh closes once.
 	var pumpClaimed atomic.Bool
 	var videoClaimed atomic.Bool
+	go func() {
+		<-doneCh
+		wm.mu.Lock()
+		if wm.sourceDone[mount] == doneCh {
+			delete(wm.sourceDone, mount)
+		}
+		wm.mu.Unlock()
+	}()
 	var doneOnce sync.Once
 	var pumpMu sync.Mutex
 	activePumps := 0
@@ -408,7 +423,7 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 
 		// Capture headers written by oggwriter.NewWith
 		var headerBuf bytes.Buffer
-		multi := io.MultiWriter(&headerBuf, &relayWriter{wm.relay, stream})
+		multi := io.MultiWriter(&headerBuf, &relayWriter{relay: wm.relay, stream: stream, token: token})
 
 		writer, err := oggwriter.NewWith(multi, 48000, 2)
 		if err != nil {
@@ -572,13 +587,13 @@ func (wm *WebRTCManager) streamToTrack(ctx context.Context, pc *webrtc.PeerConne
 // audio and video tracks when the mount has them. The returned string
 // is the SDP answer only — the HTTP layer wraps it with the WHEP
 // headers (Location, 201 status).
-func (wm *WebRTCManager) HandleWHEPOffer(mount, sdpOffer string) (string, error) {
+func (wm *WebRTCManager) HandleWHEPOffer(mount, sdpOffer string, details ...ListenerSnapshot) (string, error) {
 	stream, ok := wm.relay.GetStream(mount)
 	if !ok {
 		return "", fmt.Errorf("stream not found")
 	}
 
-	listener, err := wm.admitPlayback(mount)
+	listener, err := wm.admitPlayback(mount, details...)
 	if err != nil {
 		return "", err
 	}

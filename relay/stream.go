@@ -58,7 +58,8 @@ type Stream struct {
 	SourceIP         string    // IP address of the source client
 	sourceCloser     func()    // terminates the source connection (see KickSource)
 	LastDataReceived time.Time // Last time data was received from source
-	sourceGeneration int64     // Monotonic token for replacing same-mount sources
+	sourceGeneration int64
+	sourceClaimed    bool
 
 	// Stream state and visibility
 	Enabled      bool // Whether the stream is accepting connections
@@ -173,10 +174,12 @@ func (s *Stream) IsOgg() bool {
 func (s *Stream) ClaimSource(label string) (int64, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.SourceIP != "" || atomic.LoadInt32(&s.closed) != 0 {
+	if s.sourceClaimed || atomic.LoadInt32(&s.closed) != 0 {
 		return 0, false
 	}
 	s.sourceGeneration++
+	s.sourceClaimed = true
+	s.producerLastProgress = time.Time{}
 	s.producerIntent = ""
 	s.SourceIP = label
 	return s.sourceGeneration, true
@@ -185,24 +188,11 @@ func (s *Stream) ClaimSource(label string) (int64, bool) {
 func (s *Stream) SetSourceCloserIfCurrent(token int64, closer func()) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if token == 0 || token != s.sourceGeneration || s.SourceIP == "" {
+	if token == 0 || token != s.sourceGeneration || !s.sourceClaimed {
 		return false
 	}
 	s.sourceCloser = closer
 	return true
-}
-
-// SetSourceCloser registers how to terminate the current source's
-// connection. RemoveStream and the admin "kick source" action only ever
-// dropped the Stream object and the listeners: the encoder's connection
-// stayed open, kept reading, and a fresh Stream was created under it on
-// the next write, so a kicked source carried on broadcasting. The ingest
-// handler registers a closer when it takes ownership and clears it on
-// exit.
-func (s *Stream) SetSourceCloser(fn func()) {
-	s.mu.Lock()
-	s.sourceCloser = fn
-	s.mu.Unlock()
 }
 
 // KickSource terminates the source connection if one is registered.
@@ -224,6 +214,10 @@ func (s *Stream) ReleaseSourceIfCurrent(token int64) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if token != 0 && s.sourceGeneration == token {
+		s.sourceClaimed = false
+		if s.producerIntent != "paused" && s.producerIntent != "stopped" {
+			s.producerIntent = "ended"
+		}
 		s.SourceIP = ""
 		s.sourceCloser = nil
 	}
@@ -241,7 +235,7 @@ func (s *Stream) GetSourceIP() string {
 func (s *Stream) IsCurrentSource(token int64) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	return token != 0 && s.sourceGeneration == token && s.SourceIP != ""
+	return token != 0 && s.sourceGeneration == token && s.sourceClaimed
 }
 
 // StoreVideoHeaders records the Annex-B SPS and PPS bytes for an H.264
@@ -632,9 +626,11 @@ func (s *Stream) DisconnectListeners() {
 // Example:
 //
 //	stream.Broadcast(audioChunk, relayInstance)
-func (s *Stream) Broadcast(data []byte, relay *Relay) {
+func (s *Stream) Broadcast(data []byte, relay *Relay) { s.broadcast(data, relay, 0) }
+
+func (s *Stream) broadcast(data []byte, relay *Relay, token int64) bool {
 	if atomic.LoadInt32(&s.closed) == 1 {
-		return
+		return false
 	}
 
 	// 1. Write phase — hold the write lock only for the bookkeeping
@@ -653,7 +649,14 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 	//    goroutines so we capture the listener slice under RLock
 	//    and signal outside any lock.
 	s.mu.Lock()
+	if atomic.LoadInt32(&s.closed) != 0 || (token != 0 && (!s.sourceClaimed || token != s.sourceGeneration)) {
+		s.mu.Unlock()
+		return false
+	}
 	s.LastDataReceived = time.Now()
+	if s.producerIntent == "" {
+		s.producerLastProgress = s.LastDataReceived
+	}
 	atomic.AddInt64(&relay.BytesIn, int64(len(data)))
 	atomic.AddInt64(&s.BytesIn, int64(len(data)))
 	if s.IsOggStream {
@@ -719,6 +722,7 @@ func (s *Stream) Broadcast(data []byte, relay *Relay) {
 		}
 	}
 	s.mu.RUnlock()
+	return true
 }
 
 // Subscribe adds a listener and returns its starting offset and a signal channel.
@@ -1007,24 +1011,24 @@ func (s *Stream) SetBitrateIfUnknown(kbps int) bool {
 // lock, release it, then write to history outside.
 func (s *Stream) SetCurrentSong(song string, relay *Relay) {
 	s.mu.Lock()
-	if s.CurrentSong == song {
+	if s.CurrentSong == song && (song != "" || s.playback.PlaybackID == "") {
 		s.mu.Unlock()
 		return
 	}
-	mc := s.playbackLocked(song, "", time.Now(), relay)
+	mc := s.playbackLocked(song, "", time.Now(), relay, false)
 	s.mu.Unlock()
 	s.publishPlayback(mc, relay)
 }
 
-func (s *Stream) playbackLocked(title, id string, started time.Time, relay *Relay) MetadataChange {
+func (s *Stream) playbackLocked(title, id string, started time.Time, relay *Relay, newPlayback bool) MetadataChange {
 	revision := s.playback.Revision + 1
 	if relay != nil {
 		revision = relay.metadataRevision.Add(1)
 	}
-	if title != "" && id == "" {
+	if newPlayback || (title != "" && id == "") {
 		id = fmt.Sprintf("%s-%d-%d", s.MountName, time.Now().UnixNano(), revision)
 	}
-	if title == "" {
+	if title == "" && id == "" {
 		id = ""
 		started = time.Time{}
 	}
@@ -1036,11 +1040,12 @@ func (s *Stream) playbackLocked(title, id string, started time.Time, relay *Rela
 
 func (s *Stream) ActivatePlayback(token int64, title string, relay *Relay) (MetadataChange, bool) {
 	s.mu.Lock()
-	if token == 0 || token != s.sourceGeneration || s.SourceIP == "" {
+	if token == 0 || token != s.sourceGeneration || !s.sourceClaimed {
 		s.mu.Unlock()
 		return MetadataChange{}, false
 	}
-	mc := s.playbackLocked(title, "", time.Now(), relay)
+	started := time.Now()
+	mc := s.playbackLocked(title, "", started, relay, true)
 	s.mu.Unlock()
 	s.publishPlayback(mc, relay)
 	return mc, true
@@ -1058,7 +1063,7 @@ func (s *Stream) MirrorPlayback(input MetadataChange, relay *Relay) {
 		s.mu.Unlock()
 		return
 	}
-	mc := s.playbackLocked(input.Title, input.PlaybackID, input.StartedAt, relay)
+	mc := s.playbackLocked(input.Title, input.PlaybackID, input.StartedAt, relay, false)
 	s.mu.Unlock()
 	s.publishPlayback(mc, relay)
 }
@@ -1184,16 +1189,13 @@ func (s *Stream) HLSMuxableAudio() bool {
 func (s *Stream) MarkProducerAlive() {
 	s.mu.Lock()
 	s.LastDataReceived = time.Now()
+	if s.producerIntent == "" {
+		s.producerLastProgress = s.LastDataReceived
+	}
 	s.mu.Unlock()
 }
 
 func (s *Stream) IsVisible() bool { s.mu.RLock(); defer s.mu.RUnlock(); return s.Visible }
-
-func (s *Stream) LastDataTime() time.Time {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.LastDataReceived
-}
 
 func (s *Stream) SetProducerIntent(intent string) {
 	s.mu.Lock()

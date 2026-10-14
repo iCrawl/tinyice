@@ -383,7 +383,9 @@ func (h *rtmpHandler) OnAudio(timestamp uint32, payload io.Reader) (err error) {
 	// Broadcast the raw audio data to the stream (for byte-level
 	// Icecast listeners) and publish a Frame to the hub (for HLS /
 	// other per-frame consumers). Audio has no B-frames so DTS == PTS.
-	h.stream.Broadcast(data, h.relay)
+	if !h.relay.PublishSource(h.stream, h.sourceToken, data) {
+		return ErrSourceOwnershipLost
+	}
 	if h.stream.Frames != nil {
 		frameData := make([]byte, len(data))
 		copy(frameData, data)
@@ -472,7 +474,9 @@ func (h *rtmpHandler) OnVideo(timestamp uint32, payload io.Reader) (err error) {
 				h.videoStream.Buffer.RecordKeyframe(h.videoStream.Buffer.HeadOffset())
 			}
 
-			h.videoStream.Broadcast(annexB, h.relay)
+			if !h.relay.PublishSource(h.videoStream, h.videoSourceToken, annexB) {
+				return ErrSourceOwnershipLost
+			}
 			// Feed the dashboard's video metrics sampler: resolution
 			// (parsed from the cached SPS, zero means "unchanged"),
 			// this frame's byte count, and whether it's a keyframe.
