@@ -30,7 +30,7 @@ func TestPCMChainAlwaysExposesThePauseGate(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s := &Streamer{Format: tc.format, Volume: tc.volume}
-			chain := s.buildPCMChain(ctx, io.LimitReader(zeroReader{}, 1<<20), tc.rate)
+			var chain io.Reader = s.buildPCMChain(ctx, io.LimitReader(zeroReader{}, 1<<20), tc.rate)
 			if _, ok := chain.(pauseAware); !ok {
 				t.Fatalf("%T does not implement pauseAware: the encoder cannot subtract paused time", chain)
 			}

@@ -220,9 +220,6 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 		VideoGOP              float64 `json:"video_gop,omitempty"`
 		VideoKbps             int     `json:"video_kbps,omitempty"`
 	}
-	applyStreamDiagnostic := func(info *streamInfo, r *relay.Relay, mount string) {
-		info.mountDiagnosticInfo = s.mountDiagnostics(mount)
-	}
 	applyStreamSource := func(info *streamInfo, mount string) {
 		info.EffectiveMaxListeners = s.effectiveMountListenerLimit(mount)
 		sourceKind := ""
@@ -286,7 +283,7 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Name:           st.Name,
 				HasVideo:       videoMounts[st.MountName],
 			}
-			applyStreamDiagnostic(&info, s.Relay, st.MountName)
+			info.mountDiagnosticInfo = s.mountDiagnostics(st.MountName)
 			applyStreamSource(&info, st.MountName)
 			// Pull video metrics from the /video sibling (that's where
 			// ingest records them) so the parent row in the UI carries
@@ -322,7 +319,7 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 				Visible:        visible,
 				Enabled:        !disabled,
 			})
-			applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+			result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(mount)
 			applyStreamSource(&result[len(result)-1], mount)
 		}
 	}
@@ -340,9 +337,26 @@ func (s *Server) apiGetStreams(w http.ResponseWriter, r *http.Request) {
 					Visible:        visible,
 					Enabled:        !disabled,
 				})
-				applyStreamDiagnostic(&result[len(result)-1], s.Relay, mount)
+				result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(mount)
 				applyStreamSource(&result[len(result)-1], mount)
 			}
+		}
+	}
+
+	for _, adj := range s.Config.AutoDJs {
+		if !seen[adj.Mount] && s.hasAccess(user, adj.Mount) {
+			seen[adj.Mount] = true
+			result = append(result, streamInfo{
+				Mount:          adj.Mount,
+				Name:           adj.Name,
+				BurstSize:      mountBurstSize(s.Config, adj.Mount),
+				EffectiveBurst: effectiveMountBurstSize(s.Config, adj.Mount),
+				MaxListeners:   mountMaxListeners(s.Config, adj.Mount),
+				Visible:        adj.Visible,
+				Enabled:        adj.Enabled && !s.Config.DisabledMounts[adj.Mount],
+			})
+			result[len(result)-1].mountDiagnosticInfo = s.mountDiagnostics(adj.Mount)
+			applyStreamSource(&result[len(result)-1], adj.Mount)
 		}
 	}
 
@@ -541,12 +555,23 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 			break
 		}
 	}
-	if !inGlobal && owningUser == nil {
+	var autoDJ *config.AutoDJConfig
+	for _, adj := range s.Config.AutoDJs {
+		if adj.Mount == body.Mount {
+			autoDJ = adj
+			break
+		}
+	}
+	if !inGlobal && owningUser == nil && autoDJ == nil {
 		jsonError(w, "Mount not found", http.StatusNotFound)
 		return
 	}
 
 	if body.Password != nil && *body.Password != "" {
+		if !inGlobal && owningUser == nil {
+			jsonError(w, "Mount has no source password", http.StatusBadRequest)
+			return
+		}
 		hashed, err := config.HashPassword(*body.Password)
 		if err != nil {
 			jsonError(w, "Failed to hash password", http.StatusInternalServerError)
@@ -564,17 +589,25 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Enabled != nil {
+		s.Config.LockMaps()
 		if s.Config.DisabledMounts == nil {
 			s.Config.DisabledMounts = make(map[string]bool)
 		}
+		if autoDJ != nil {
+			autoDJ.Enabled = *body.Enabled
+		}
 		if *body.Enabled {
-			s.Config.LockMaps()
 			delete(s.Config.DisabledMounts, body.Mount)
 			s.Config.UnlockMaps()
+			if autoDJ != nil && s.StreamerM != nil {
+				s.StreamerM.ResumeStreamer(body.Mount)
+			}
 		} else {
-			s.Config.LockMaps()
 			s.Config.DisabledMounts[body.Mount] = true
 			s.Config.UnlockMaps()
+			if autoDJ != nil && s.StreamerM != nil {
+				s.StreamerM.StopStreamer(body.Mount)
+			}
 			// Kick the live source if it's currently connected so the new
 			// disabled state takes effect immediately. DisconnectListeners
 			// alone left the encoder streaming — it just recreated the
@@ -584,6 +617,14 @@ func (s *Server) apiUpdateStream(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if body.Visible != nil {
+		if autoDJ != nil {
+			autoDJ.Visible = *body.Visible
+			if s.StreamerM != nil {
+				if streamer := s.StreamerM.GetStreamer(body.Mount); streamer != nil {
+					streamer.SetVisible(*body.Visible)
+				}
+			}
+		}
 		if s.Config.VisibleMounts == nil {
 			s.Config.VisibleMounts = make(map[string]bool)
 		}
@@ -1133,6 +1174,10 @@ func (s *Server) apiAutoDJPlay(w http.ResponseWriter, r *http.Request) {
 	}
 	mount, ok := s.requireMountAccess(w, r, "")
 	if !ok {
+		return
+	}
+	if s.Config.DisabledMounts[mount] {
+		jsonError(w, "Mount disabled", http.StatusConflict)
 		return
 	}
 	streamer := s.StreamerM.GetStreamer(mount)

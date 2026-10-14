@@ -112,7 +112,12 @@ func NewAutoDJOutputSession(streamer *Streamer) (*AutoDJOutputSession, error) {
 	if streamer == nil || streamer.relay == nil {
 		return nil, fmt.Errorf("streamer relay is required")
 	}
+	streamer.mu.RLock()
+	defer streamer.mu.RUnlock()
+	return newAutoDJOutputSessionLocked(streamer)
+}
 
+func newAutoDJOutputSessionLocked(streamer *Streamer) (*AutoDJOutputSession, error) {
 	stream := streamer.relay.GetOrCreateStream(streamer.OutputMount)
 	token, ok := stream.ClaimSource(autoDJSourceLabel)
 	if !ok {

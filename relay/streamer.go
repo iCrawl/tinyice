@@ -74,6 +74,7 @@ type Streamer struct {
 	Volume               float64 // 0..1 playback gain applied before encode
 	manualStop           bool
 
+	config *config.Config
 	relay  *Relay
 	ctx    context.Context // streamer-lifetime context, parents file/command ctxs
 	cancel context.CancelFunc
@@ -211,6 +212,13 @@ func (sm *StreamerManager) mountHasFreshData(mount string) bool {
 }
 
 func (s *Streamer) Play() {
+	if s.config != nil {
+		s.config.RLockMaps()
+		defer s.config.RUnlockMaps()
+		if s.config.DisabledMounts[s.OutputMount] {
+			return
+		}
+	}
 	s.mu.Lock()
 	// A non-looping playlist that ran to the end leaves CurrentPos past
 	// the last entry and the state Stopped. Without this rewind, pressing
@@ -1188,6 +1196,7 @@ func (sm *StreamerManager) StartStreamer(name, mount, musicDir string, loop bool
 		OnPlayCommand:        onPlayCommand,
 		OnPlayCommandTimeout: onPlayCommandTimeout,
 		relay:                sm.relay,
+		config:               sm.config,
 		runtimeRegistry:      sm.runtimeRegistry,
 		ctx:                  ctx,
 		cancel:               cancel,
@@ -1679,8 +1688,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	if readErr != nil && readErr != io.EOF && readErr != io.ErrUnexpectedEOF {
 		return readErr
 	}
-	gate := pcm.(*pauseGate)
-	gate.src = io.MultiReader(bytes.NewReader(firstPCM[:n]), gate.src)
+	pcm.src = io.MultiReader(bytes.NewReader(firstPCM[:n]), pcm.src)
 	if s.relay == nil {
 		s.relay = sm.relay
 	}
@@ -1691,7 +1699,7 @@ func (sm *StreamerManager) streamFile(ctx context.Context, s *Streamer, path str
 	}
 	session := s.outputSession
 	if session == nil {
-		session, err = NewAutoDJOutputSession(s)
+		session, err = newAutoDJOutputSessionLocked(s)
 		if err != nil {
 			s.mu.Unlock()
 			return err
@@ -1824,7 +1832,7 @@ func songCommandDiagnosticDetails(err error) map[string]string {
 // file that wasn't already 48 kHz left the encoder believing it was
 // behind schedule, and on resume it dumped the rest of the track into the
 // ring buffer as fast as the CPU allowed.
-func (s *Streamer) buildPCMChain(ctx context.Context, decoded io.Reader, srcRate int) io.Reader {
+func (s *Streamer) buildPCMChain(ctx context.Context, decoded io.Reader, srcRate int) *pauseGate {
 	pcm := decoded
 	pcm = &gainReader{src: pcm, streamer: s}
 	targetRate := 44100
@@ -1948,6 +1956,17 @@ func (s *Streamer) SetInjectMetadata(on bool) {
 	s.mu.Lock()
 	s.InjectMetadata = on
 	s.mu.Unlock()
+}
+
+func (s *Streamer) SetVisible(visible bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.Visible = visible
+	if s.relay != nil {
+		if stream, ok := s.relay.GetStream(s.OutputMount); ok {
+			stream.SetVisible(visible)
+		}
+	}
 }
 
 // playlistLen returns the streamer's playlist length under its mutex,
