@@ -275,7 +275,7 @@ func (wm *WebRTCManager) HandleSourceOffer(mount string, offer webrtc.SessionDes
 	}
 	if existingDone != nil {
 		// Bounded wait: pion's track.ReadRTP returns promptly on
-		// PC.Close. A timeout rejects the replacement so writers never overlap.
+		// PC.Close.
 		select {
 		case <-existingDone:
 		case <-time.After(3 * time.Second):

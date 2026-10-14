@@ -104,7 +104,10 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 		enc.Close()
 		return nil, err
 	}
-	pw.Flush()
+	if err := pw.Flush(); err != nil {
+		enc.Close()
+		return nil, err
+	}
 
 	tags := ogg.OpusTags{Vendor: "tinyice-opus"}
 	tagsPacket, _ := ogg.BuildOpusTagsPacket(tags)
@@ -112,7 +115,10 @@ func NewOpusEncoderSession(stream *Stream, relay *Relay, bitrate, sampleRate, ch
 		enc.Close()
 		return nil, err
 	}
-	pw.Flush()
+	if err := pw.Flush(); err != nil {
+		enc.Close()
+		return nil, err
+	}
 
 	stream.StoreOggHead(writer.headerBuf.Bytes(), stream.Buffer.HeadOffset())
 	writer.capture = false
@@ -141,8 +147,7 @@ func (s *OpusEncoderSession) WriteFrame(frame []int16) error {
 	if err := s.packetWriter.WritePacket(packet[:n], s.granulePos, false, false); err != nil {
 		return err
 	}
-	s.packetWriter.Flush()
-	return nil
+	return s.packetWriter.Flush()
 }
 
 func (s *OpusEncoderSession) Close() error {
