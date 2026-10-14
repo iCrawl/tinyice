@@ -70,6 +70,9 @@ export interface StreamEvent {
   mount: string
   title: string
   artist: string
+  started_at?: string
+  playback_id?: string
+  revision?: number
   format: string
   bitrate: number | string
   listeners: number

@@ -6,8 +6,7 @@ import { VolumeKnob } from '@/components/VolumeKnob'
 import { createSSE } from '@/lib/sse'
 import { connectAudio, getFrequencyData, resumeAudio } from '@/lib/audio'
 import { useAlbumArt } from '@/hooks/useAlbumArt'
-import { applyMetadata, applyStreamTitle } from '@/lib/metadata'
-import type { NowPlaying } from '@/lib/metadata'
+import { createMetadataCallbacks } from '@/lib/metadata'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
@@ -274,20 +273,20 @@ export function Player() {
   }, [])
 
   useEffect(() => {
-    let nowPlaying: NowPlaying = { title: title.value, artist: artist.value, revision: null, versioned: false }
-    const sse = createSSE('/events', () => { nowPlaying = { ...nowPlaying, revision: null } })
-    sse.on('metadata', (evt) => {
-      if (evt.mount !== data.mount) return
-      nowPlaying = applyMetadata(nowPlaying, evt)
-      title.value = nowPlaying.title
-      artist.value = nowPlaying.artist
+    const metadata = createMetadataCallbacks({
+      mount: data.mount,
+      initial: { title: title.value, artist: artist.value },
+      update(current) {
+        title.value = current.title
+        artist.value = current.artist
+      },
     })
+    const sse = createSSE('/events', metadata.onOpen)
+    sse.on('metadata', metadata.metadata)
 
     sse.on('stream', (evt) => {
       if (evt.mount !== data.mount) return
-      nowPlaying = applyStreamTitle(nowPlaying, evt)
-      title.value = nowPlaying.title
-      artist.value = nowPlaying.artist
+      metadata.stream(evt)
       // Audience: prefer viewers (HLS / WHEP) when this is a video
       // mount; otherwise fall through to the raw listener count.
       const audience =

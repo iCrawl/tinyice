@@ -2,8 +2,7 @@ import { useMemo, useEffect, useRef } from 'preact/hooks'
 import { signal } from '@preact/signals'
 import { EqBars } from '@/components/EqBars'
 import { createSSE } from '@/lib/sse'
-import { applyMetadata, applyStreamTitle } from '@/lib/metadata'
-import type { NowPlaying } from '@/lib/metadata'
+import { createMetadataCallbacks } from '@/lib/metadata'
 import type { PlayerData } from '@/types'
 
 const data = (window.__TINYICE__ ?? {}) as Partial<PlayerData>
@@ -28,23 +27,17 @@ export function Embed() {
   const audioRef = useRef<HTMLAudioElement>(null)
 
   useEffect(() => {
-    let current: NowPlaying = { title: title.value, artist: artist.value, revision: null, versioned: false }
-    const sse = createSSE('/events', () => { current = { ...current, revision: null } })
-    sse.on('metadata', (evt) => {
-      if (evt.mount !== data.mount) return
-      current = applyMetadata(current, evt)
-      title.value = current.title
-      artist.value = current.artist
-    })
-
-
-    sse.on('stream', (evt) => {
-      if (evt.mount === data.mount) {
-        current = applyStreamTitle(current, evt)
+    const metadata = createMetadataCallbacks({
+      mount: data.mount,
+      initial: { title: title.value, artist: artist.value },
+      update(current) {
         title.value = current.title
         artist.value = current.artist
-      }
+      },
     })
+    const sse = createSSE('/events', metadata.onOpen)
+    sse.on('metadata', metadata.metadata)
+    sse.on('stream', metadata.stream)
 
     return () => sse.close()
   }, [])

@@ -5,7 +5,7 @@ import { reportError, showToast } from '../../lib/toast'
 
 import type { AdminStream as Stream, DiagnosticHistoryEntry } from '../../types'
 
-function createStreamsStore() {
+export function createStreamsStore() {
   const streams = signal<Stream[]>([])
   const loading = signal(true)
   const loadError = signal('')
@@ -23,6 +23,7 @@ function createStreamsStore() {
   const historyEntries = signal<DiagnosticHistoryEntry[]>([])
   const historyError = signal('')
   const historyLoading = signal(false)
+  let historyGeneration = 0
 
   function statusDotClass(s: Stream): string {
     switch (s.status) {
@@ -38,17 +39,24 @@ function createStreamsStore() {
   }
 
   async function openHistory(mount: string) {
+    const generation = ++historyGeneration
     historyMount.value = mount
     historyEntries.value = []
     historyError.value = ''
     historyLoading.value = true
     try {
-      historyEntries.value = await api.get<DiagnosticHistoryEntry[]>(`/api/streams/diagnostics?mount=${encodeURIComponent(mount)}&limit=20`)
+      const entries = await api.get<DiagnosticHistoryEntry[]>(`/api/streams/diagnostics?mount=${encodeURIComponent(mount)}&limit=20`)
+      if (generation === historyGeneration) historyEntries.value = entries
     } catch (e) {
-      historyError.value = e instanceof Error ? e.message : 'Could not load diagnostics'
+      if (generation === historyGeneration) historyError.value = e instanceof Error ? e.message : 'Could not load diagnostics'
     } finally {
-      historyLoading.value = false
+      if (generation === historyGeneration) historyLoading.value = false
     }
+  }
+
+  function closeHistory() {
+    ++historyGeneration
+    historyMount.value = ''
   }
 
   function resetForm() {
@@ -173,6 +181,7 @@ function createStreamsStore() {
     statusDotClass,
     statusLabel,
     openHistory,
+    closeHistory,
     resetForm,
     openAddModal,
     openEditModal,
@@ -205,6 +214,7 @@ export function Streams() {
     statusDotClass,
     statusLabel,
     openHistory,
+    closeHistory,
     resetForm,
     openAddModal,
     openEditModal,
@@ -340,7 +350,7 @@ export function Streams() {
             <p class="text-text-secondary">{entry.reason}</p>
             {entry.error && <p class="text-danger">{entry.error}</p>}
           </li>)}</ol>}
-          <button onClick={() => { historyMount.value = '' }} class="mt-4 border border-border rounded-lg px-4 py-2">Close</button>
+          <button onClick={closeHistory} class="mt-4 border border-border rounded-lg px-4 py-2">Close</button>
         </div>
       </div>}
       {/* Add / Edit Mount Modal */}

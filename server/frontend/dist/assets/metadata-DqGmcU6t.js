@@ -1,1 +1,0 @@
-function r(i,t){return i.revision!==null&&t.revision<i.revision?i:{title:t.title,artist:t.artist,revision:t.revision,versioned:!0}}function a(i,t){return i.versioned?i:{...i,title:t.title,artist:t.artist}}export{r as a,a as b};
