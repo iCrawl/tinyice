@@ -1,5 +1,9 @@
 ## Agent skills
 
+### Delivery
+
+Deliver changes directly on `custom`. Keep custom changes in linear commits on top of upstream. Do not open pull requests unless the user explicitly asks for one. Preserve old branch tips before replacing history.
+
 ### Issue tracker
 
 Issues and PRDs are tracked as local markdown under `docs/features/<feature>/`. See `docs/agents/issue-tracker.md`.

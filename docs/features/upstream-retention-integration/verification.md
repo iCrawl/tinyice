@@ -1,6 +1,8 @@
 # Integration verification
 
-Verified on October 14, 2026. The final application source revision is `8f1b81adb7b13d5ea4d68674f4c2189580a32184`. Later documentation commits leave application code unchanged. The ancestry merge preserves its entire pre-merge tree. The integration uses upstream `9bc4cad` and ports the accepted fork behavior from `d313d7e`.
+Verified on October 14, 2026. The final application source revision is `8f1b81adb7b13d5ea4d68674f4c2189580a32184`. Later documentation and delivery changes leave application code unchanged. The integration uses upstream `9bc4cad` and ports the accepted fork behavior from `d313d7e`.
+
+Delivery uses `custom` with linear commits on top of upstream. The earlier ancestry merge and PR delivery plan are superseded by the user's direct-branch preference. Before changing delivery documentation, the reconstructed linear branch had exactly the same tree as the published integration at `bda91c6`. Local backup branches preserve the former `custom` and integration tips. GitHub now has pull requests disabled; attempts to close PR #2 returned that restriction, and its T3 tracking link was removed.
 
 ## Results
 
